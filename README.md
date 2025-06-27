@@ -2,7 +2,6 @@
 
 🔐 **High-security encryption/decryption library** using AES-256-GCM and Argon2id for Node.js applications with full TypeScript support.
 
-[![npm version](https://badge.fury.io/js/secure-crypto.svg)](https://badge.fury.io/js/secure-crypto)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8.3-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)

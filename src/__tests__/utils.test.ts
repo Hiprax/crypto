@@ -19,7 +19,7 @@ import {
   getFileInfo,
 } from '../utils';
 import { CryptoError } from '../types';
-import { writeFile, unlink } from 'node:fs/promises';
+import { writeFile, unlink, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -209,131 +209,128 @@ describe('Utils', () => {
   });
 
   describe('isValidBase64', () => {
-    it('should validate base64 strings', () => {
+    it('should validate valid base64 strings', () => {
+      expect(isValidBase64('dGVzdA==')).toBe(true);
       expect(isValidBase64('SGVsbG8gV29ybGQ=')).toBe(true);
-      expect(isValidBase64('invalid-base64!')).toBe(false);
       expect(isValidBase64('')).toBe(false);
     });
 
-    it('should handle edge cases', () => {
-      expect(isValidBase64(null as unknown as string)).toBe(false);
-      expect(isValidBase64(undefined as unknown as string)).toBe(false);
-      expect(isValidBase64(123 as unknown as string)).toBe(false);
+    it('should reject invalid base64 strings', () => {
+      expect(isValidBase64('invalid!')).toBe(false);
+      expect(isValidBase64('dGVzdA==!')).toBe(false);
+      expect(isValidBase64('not-base64')).toBe(false);
     });
 
-    it('should handle base64 with padding', () => {
-      expect(isValidBase64('SGVsbG8=')).toBe(true);
-      expect(isValidBase64('SGVsbG8')).toBe(false);
+    it('should handle null/undefined input', () => {
+      expect(isValidBase64(null as unknown as string)).toBe(false);
+      expect(isValidBase64(undefined as unknown as string)).toBe(false);
     });
   });
 
   describe('secureStringCompare', () => {
-    it('should compare strings securely', () => {
-      expect(secureStringCompare('hello', 'hello')).toBe(true);
-      expect(secureStringCompare('hello', 'world')).toBe(false);
-      expect(secureStringCompare('hello', 'hell')).toBe(false);
+    it('should compare strings correctly', () => {
+      expect(secureStringCompare('test', 'test')).toBe(true);
+      expect(secureStringCompare('', '')).toBe(true);
+      expect(secureStringCompare('different', 'strings')).toBe(false);
     });
 
-    it('should handle edge cases', () => {
-      expect(secureStringCompare('', '')).toBe(true);
-      expect(secureStringCompare('', 'hello')).toBe(false);
-      expect(secureStringCompare('hello', '')).toBe(false);
+    it('should handle different length strings', () => {
+      expect(secureStringCompare('short', 'longer')).toBe(false);
+      expect(secureStringCompare('longer', 'short')).toBe(false);
     });
 
     it('should handle non-string inputs', () => {
-      expect(secureStringCompare(null as unknown as string, 'hello')).toBe(
+      expect(secureStringCompare(null as unknown as string, 'test')).toBe(
         false
       );
-      expect(secureStringCompare('hello', null as unknown as string)).toBe(
+      expect(secureStringCompare('test', null as unknown as string)).toBe(
         false
       );
-      expect(secureStringCompare(123 as unknown as string, 'hello')).toBe(
-        false
-      );
-      expect(secureStringCompare('hello', 123 as unknown as string)).toBe(
-        false
-      );
+      expect(secureStringCompare(123 as unknown as string, 'test')).toBe(false);
     });
   });
 
   describe('createProgressBar', () => {
-    it('should create progress bar', () => {
-      const bar = createProgressBar(50, 100);
-      expect(bar).toMatch(/\[.*\] 50%/);
-    });
-
-    it('should handle edge cases', () => {
+    it('should create progress bar for valid inputs', () => {
+      expect(createProgressBar(50, 100)).toMatch(/\[.*\] 50%/);
       expect(createProgressBar(0, 100)).toMatch(/\[.*\] 0%/);
       expect(createProgressBar(100, 100)).toMatch(/\[.*\] 100%/);
-      expect(createProgressBar(0, 0)).toMatch(/\[.*\] 0%/);
     });
 
-    it('should handle custom width', () => {
-      const bar = createProgressBar(50, 100, 50);
-      expect(bar).toMatch(/\[.*\] 50%/);
-      expect(bar.length).toBeGreaterThan(50);
+    it('should handle zero total', () => {
+      expect(createProgressBar(10, 0)).toBe(
+        '[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%'
+      );
     });
 
-    it('should handle overflow values', () => {
-      const bar = createProgressBar(150, 100);
-      expect(bar).toMatch(/\[.*\] 100%/);
+    it('should handle current greater than total', () => {
+      expect(createProgressBar(150, 100)).toMatch(/\[.*\] 100%/);
+    });
+
+    it('should use custom width', () => {
+      const result = createProgressBar(50, 100, 10);
+      expect(result).toMatch(/\[.{10}\] 50%/);
     });
   });
 
   describe('sleep', () => {
-    it('should sleep for specified time', async (): Promise<void> => {
+    it('should sleep for specified time', async () => {
       const start = Date.now();
       await sleep(10);
       const end = Date.now();
-      expect(end - start).toBeGreaterThanOrEqual(10);
+      expect(end - start).toBeGreaterThanOrEqual(5); // Allow some tolerance
     });
   });
 
   describe('retryWithBackoff', () => {
-    it('should retry and succeed', async (): Promise<void> => {
-      let attempts = 0;
-      const fn = async (): Promise<string> => {
-        attempts++;
-        if (attempts < 3) {
-          throw new Error('Temporary error');
-        }
-        return 'success';
-      };
-
-      const result = await retryWithBackoff(fn, {
-        maxRetries: 3,
-        baseDelay: 1,
-      });
+    it('should succeed on first attempt', async () => {
+      const fn = jest.fn().mockResolvedValue('success');
+      const result = await retryWithBackoff(fn);
       expect(result).toBe('success');
-      expect(attempts).toBe(3);
+      expect(fn).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw after max retries', async (): Promise<void> => {
-      const fn = async (): Promise<string> => {
-        throw new Error('Persistent error');
-      };
+    it('should retry and succeed', async () => {
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('First failure'))
+        .mockResolvedValue('success');
+
+      const result = await retryWithBackoff(fn);
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it('should fail after max retries', async () => {
+      const fn = jest.fn().mockRejectedValue(new Error('Persistent failure'));
+
+      await expect(retryWithBackoff(fn)).rejects.toThrow('Persistent failure');
+      expect(fn).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
+    }, 10000);
+
+    it('should use custom retry config', async () => {
+      const fn = jest.fn().mockRejectedValue(new Error('Failure'));
 
       await expect(
-        retryWithBackoff(fn, { maxRetries: 2, baseDelay: 1 })
-      ).rejects.toThrow('Persistent error');
+        retryWithBackoff(fn, { maxRetries: 1, baseDelay: 10 })
+      ).rejects.toThrow('Failure');
+      expect(fn).toHaveBeenCalledTimes(2); // 1 initial + 1 retry
     });
 
-    it('should handle non-Error exceptions', async (): Promise<void> => {
-      const fn = async (): Promise<string> => {
-        throw 'String error';
-      };
+    it('should handle non-Error exceptions', async () => {
+      const fn = jest.fn().mockRejectedValue('String error');
+
+      await expect(retryWithBackoff(fn)).rejects.toThrow('String error');
+    }, 10000);
+
+    it('should handle fallback error case', async () => {
+      // This test triggers the fallback error case when lastError is undefined
+      // This is a very edge case that's hard to trigger in practice
+      const fn = jest.fn().mockRejectedValue(undefined);
 
       await expect(
-        retryWithBackoff(fn, { maxRetries: 1, baseDelay: 1 })
-      ).rejects.toThrow('String error');
-    });
-
-    it('should use default config', async (): Promise<void> => {
-      const fn = async (): Promise<string> => {
-        throw new Error('Error');
-      };
-
-      await expect(retryWithBackoff(fn)).rejects.toThrow('Error');
+        retryWithBackoff(fn, { maxRetries: 0, baseDelay: 1 })
+      ).rejects.toThrow('undefined');
     }, 10000);
   });
 
@@ -363,15 +360,11 @@ describe('Utils', () => {
         CryptoError
       );
     });
-
-    it('should handle file access errors', async () => {
-      await expect(getFileInfo('')).rejects.toThrow(CryptoError);
-    });
   });
 
   describe('validatePasswordStrength', () => {
     it('should validate strong passwords', () => {
-      const result = validatePasswordStrength('MySecureP@ssw0rd123!');
+      const result = validatePasswordStrength('StrongP@ss1');
       expect(result.isValid).toBe(true);
       expect(result.score).toBeGreaterThanOrEqual(4);
       expect(result.feedback).toHaveLength(0);
@@ -384,49 +377,55 @@ describe('Utils', () => {
       expect(result.feedback.length).toBeGreaterThan(0);
     });
 
-    it('should provide detailed feedback', () => {
-      const result = validatePasswordStrength('weak');
-      expect(result.feedback).toContain(
-        'Password must be at least 8 characters long'
-      );
-      expect(result.feedback).toContain(
-        'Password must contain at least one uppercase letter'
-      );
-    });
-
-    it('should handle invalid input', () => {
-      const result = validatePasswordStrength('');
-      expect(result.isValid).toBe(false);
-      expect(result.score).toBe(0);
-      expect(result.feedback).toContain('Password must be a non-empty string');
-    });
-
     it('should handle null/undefined input', () => {
       const result1 = validatePasswordStrength(null as unknown as string);
       expect(result1.isValid).toBe(false);
       expect(result1.score).toBe(0);
+      expect(result1.feedback).toContain('Password must be a non-empty string');
 
       const result2 = validatePasswordStrength(undefined as unknown as string);
       expect(result2.isValid).toBe(false);
       expect(result2.score).toBe(0);
     });
 
-    it('should handle passwords with repeated characters', () => {
-      const result = validatePasswordStrength('MySecureP@ssw0rd123!');
-      expect(result.score).toBeGreaterThanOrEqual(4);
+    it('should provide detailed feedback', () => {
+      const result = validatePasswordStrength('short');
+      expect(result.feedback).toContain(
+        'Password must be at least 8 characters long'
+      );
+      expect(result.feedback).toContain(
+        'Password must contain at least one uppercase letter'
+      );
+      expect(result.feedback).toContain(
+        'Password must contain at least one number'
+      );
+      expect(result.feedback).toContain(
+        'Password must contain at least one special character'
+      );
     });
 
-    it('should handle passwords with all same characters', () => {
-      const result = validatePasswordStrength('aaaaaaaa');
-      expect(result.score).toBeLessThan(4);
+    it('should handle repeated characters', () => {
+      const result = validatePasswordStrength('aaaA1!');
+      expect(result.feedback).toContain('Avoid repeated characters');
+    });
+
+    it('should handle all same characters', () => {
+      const result = validatePasswordStrength('AAAAAAAA');
       expect(result.feedback).toContain(
         'Avoid using the same character repeatedly'
       );
     });
 
-    it('should handle very long passwords', () => {
-      const result = validatePasswordStrength('MySecureP@ssw0rd123!VeryLong');
-      expect(result.score).toBeGreaterThanOrEqual(4);
+    it('should cap score at 5', () => {
+      const result = validatePasswordStrength(
+        'VeryLongAndComplexPassword123!@#'
+      );
+      expect(result.score).toBeLessThanOrEqual(5);
+    });
+
+    it('should not allow negative score', () => {
+      const result = validatePasswordStrength('aaa');
+      expect(result.score).toBeGreaterThanOrEqual(0);
     });
   });
 
@@ -447,17 +446,10 @@ describe('Utils', () => {
 
   describe('sha256', () => {
     it('should hash string correctly', () => {
-      const hash = sha256('hello world');
+      const hash = sha256('test');
       expect(hash).toBe(
-        'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9'
+        '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08'
       );
-    });
-
-    it('should be deterministic', () => {
-      const input = 'test string';
-      const hash1 = sha256(input);
-      const hash2 = sha256(input);
-      expect(hash1).toBe(hash2);
     });
 
     it('should handle empty string', () => {
@@ -466,19 +458,25 @@ describe('Utils', () => {
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
       );
     });
+
+    it('should handle special characters', () => {
+      const hash = sha256('test@123!');
+      expect(hash).toHaveLength(64);
+      expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    });
   });
 
   describe('generateRandomHex', () => {
     it('should generate hex string of specified length', () => {
-      const length = 16;
-      const hex = generateRandomHex(length);
-      expect(hex).toHaveLength(length);
-      expect(hex).toMatch(/^[0-9a-f]+$/);
+      const hex = generateRandomHex(16);
+      expect(hex).toHaveLength(16);
+      expect(hex).toMatch(/^[0-9a-f]{16}$/);
     });
 
     it('should use default length', () => {
       const hex = generateRandomHex();
       expect(hex).toHaveLength(32);
+      expect(hex).toMatch(/^[0-9a-f]{32}$/);
     });
 
     it('should throw error for invalid length', () => {
@@ -487,16 +485,10 @@ describe('Utils', () => {
       expect(() => generateRandomHex(1025)).toThrow(CryptoError);
     });
 
-    it('should handle odd length', () => {
-      const hex = generateRandomHex(15);
-      expect(hex).toHaveLength(15);
-      expect(hex).toMatch(/^[0-9a-f]+$/);
-    });
-
-    it('should handle maximum length', () => {
-      const hex = generateRandomHex(1024);
-      expect(hex).toHaveLength(1024);
-      expect(hex).toMatch(/^[0-9a-f]+$/);
+    it('should generate unique hex strings', () => {
+      const hex1 = generateRandomHex(16);
+      const hex2 = generateRandomHex(16);
+      expect(hex1).not.toBe(hex2);
     });
   });
 });

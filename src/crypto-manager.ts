@@ -30,6 +30,7 @@ export class CryptoManager {
   private readonly tagLength: number;
   private readonly argon2Options: Argon2Options;
   private readonly aad: Buffer;
+  private readonly defaultPassphrase?: string;
 
   constructor(options: CryptoManagerOptions = {}) {
     this.algorithm = EncryptionAlgorithm.AES_256_GCM;
@@ -37,6 +38,14 @@ export class CryptoManager {
     this.ivLength = 12; // 96 bits for GCM
     this.saltLength = 32; // 256 bits
     this.tagLength = 16; // 128 bits for GCM
+
+    // Store default passphrase if provided and not empty
+    if (
+      options.defaultPassphrase !== undefined &&
+      options.defaultPassphrase !== ''
+    ) {
+      this.defaultPassphrase = options.defaultPassphrase;
+    }
 
     // Argon2id parameters (high security)
     this.argon2Options = {
@@ -244,11 +253,11 @@ export class CryptoManager {
   /**
    * Encrypt text with password
    * @param text - Text to encrypt
-   * @param password - Encryption password
+   * @param password - Encryption password (optional if default passphrase is set)
    * @returns Base64 encoded encrypted data
    * @throws CryptoError if encryption fails
    */
-  public async encryptText(text: string, password: string): Promise<string> {
+  public async encryptText(text: string, password?: string): Promise<string> {
     if (!text || typeof text !== 'string') {
       throw new CryptoError(
         'Text must be a non-empty string',
@@ -257,16 +266,18 @@ export class CryptoManager {
       );
     }
 
-    if (!password || typeof password !== 'string') {
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
       throw new CryptoError(
-        'Password must be a non-empty string',
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_PASSWORD'
       );
     }
 
     // Validate password strength
-    if (!this.validatePassword(password)) {
+    if (!this.validatePassword(finalPassword)) {
       throw new CryptoError(
         'Password does not meet security requirements',
         CryptoErrorType.INVALID_PASSWORD,
@@ -280,7 +291,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(password, salt);
+      const key = await this.deriveKey(finalPassword, salt);
 
       // Encrypt the text
       const textBuffer = Buffer.from(text, 'utf8');
@@ -309,13 +320,13 @@ export class CryptoManager {
   /**
    * Decrypt text with password
    * @param encryptedText - Base64 encoded encrypted text
-   * @param password - Decryption password
+   * @param password - Decryption password (optional if default passphrase is set)
    * @returns Decrypted text
    * @throws CryptoError if decryption fails
    */
   public async decryptText(
     encryptedText: string,
-    password: string
+    password?: string
   ): Promise<string> {
     if (!encryptedText || typeof encryptedText !== 'string') {
       throw new CryptoError(
@@ -325,9 +336,11 @@ export class CryptoManager {
       );
     }
 
-    if (!password || typeof password !== 'string') {
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
       throw new CryptoError(
-        'Password must be a non-empty string',
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_PASSWORD'
       );
@@ -362,7 +375,7 @@ export class CryptoManager {
       );
 
       // Derive key from password
-      const key = await this.deriveKey(password, salt);
+      const key = await this.deriveKey(finalPassword, salt);
 
       // Decrypt the data
       const decrypted = this.decryptData(encrypted, key, iv, tag);
@@ -387,24 +400,34 @@ export class CryptoManager {
    * Encrypt file with password (streaming for large files)
    * @param inputPath - Input file path
    * @param outputPath - Output file path
-   * @param password - Encryption password
+   * @param password - Encryption password (optional if default passphrase is set)
    * @throws CryptoError if encryption fails
    */
   public async encryptFile(
     inputPath: string,
     outputPath: string,
-    password: string
+    password?: string
   ): Promise<void> {
-    if (!inputPath || !outputPath || !password) {
+    if (!inputPath || !outputPath) {
       throw new CryptoError(
-        'Input path, output path, and password are required',
+        'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
         'MISSING_REQUIRED_PARAMS'
       );
     }
 
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
     // Validate password strength
-    if (!this.validatePassword(password)) {
+    if (!this.validatePassword(finalPassword)) {
       throw new CryptoError(
         'Password does not meet security requirements',
         CryptoErrorType.INVALID_PASSWORD,
@@ -441,7 +464,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(password, salt);
+      const key = await this.deriveKey(finalPassword, salt);
 
       // Write header: salt + iv
       const header = Buffer.concat([salt, iv]);
@@ -493,19 +516,29 @@ export class CryptoManager {
    * Decrypt file with password (streaming for large files)
    * @param inputPath - Input file path
    * @param outputPath - Output file path
-   * @param password - Decryption password
+   * @param password - Decryption password (optional if default passphrase is set)
    * @throws CryptoError if decryption fails
    */
   public async decryptFile(
     inputPath: string,
     outputPath: string,
-    password: string
+    password?: string
   ): Promise<void> {
-    if (!inputPath || !outputPath || !password) {
+    if (!inputPath || !outputPath) {
       throw new CryptoError(
-        'Input path, output path, and password are required',
+        'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
         'MISSING_REQUIRED_PARAMS'
+      );
+    }
+
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
       );
     }
 
@@ -556,7 +589,7 @@ export class CryptoManager {
       const encryptedData = fileBuffer.slice(headerSize, tagStart);
 
       // Derive key from password
-      const key = await this.deriveKey(password, salt);
+      const key = await this.deriveKey(finalPassword, salt);
 
       // Create decryption transform stream
       const decipher = crypto.createDecipheriv(
@@ -664,5 +697,15 @@ export class CryptoManager {
     } else {
       return SecurityLevel.LOW;
     }
+  }
+
+  /**
+   * Check if a default passphrase is set
+   * @returns True if default passphrase is configured
+   */
+  public hasDefaultPassphrase(): boolean {
+    return (
+      this.defaultPassphrase !== undefined && this.defaultPassphrase !== ''
+    );
   }
 }

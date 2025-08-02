@@ -10,6 +10,8 @@ export interface CryptoManagerOptions {
   parallelism?: number;
   /** Custom AAD (Additional Authenticated Data) */
   aad?: string;
+  /** Default passphrase to use when no password is provided to encryption/decryption methods */
+  defaultPassphrase?: string;
 }
 
 /**

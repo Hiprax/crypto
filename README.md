@@ -18,6 +18,7 @@
 - 🧪 **Comprehensive testing** with 80%+ coverage
 - 🚀 **Modern ES modules** with tree-shaking support
 - 🔒 **Security-focused** with constant-time comparisons
+- 🔑 **Default passphrase** support for simplified usage
 
 ## 📦 Installation
 
@@ -46,6 +47,33 @@ const decrypted = await crypto.decryptText(encrypted, 'MySecureP@ssw0rd123!');
 console.log('Decrypted:', decrypted);
 ```
 
+### Using Default Passphrase
+
+You can set a default passphrase when creating the CryptoManager instance, which allows you to encrypt and decrypt without specifying a password each time:
+
+```typescript
+import { CryptoManager } from '@hiprax/crypto';
+
+// Create instance with default passphrase
+const crypto = new CryptoManager({
+  defaultPassphrase: 'MySecureP@ssw0rd123!',
+});
+
+// Encrypt text without specifying password
+const encrypted = await crypto.encryptText('Hello World');
+console.log('Encrypted:', encrypted);
+
+// Decrypt text without specifying password
+const decrypted = await crypto.decryptText(encrypted);
+console.log('Decrypted:', decrypted);
+
+// You can still override with a custom password
+const encryptedWithCustom = await crypto.encryptText(
+  'Hello World',
+  'CustomP@ssw0rd456!'
+);
+```
+
 ### File Encryption
 
 ```typescript
@@ -58,6 +86,26 @@ await crypto.encryptFile('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
 
 // Decrypt file
 await crypto.decryptFile('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
+```
+
+### File Encryption with Default Passphrase
+
+```typescript
+import { CryptoManager } from '@hiprax/crypto';
+
+// Create instance with default passphrase
+const crypto = new CryptoManager({
+  defaultPassphrase: 'MySecureP@ssw0rd123!',
+});
+
+// Encrypt file without specifying password
+await crypto.encryptFile('input.txt', 'output.enc');
+
+// Decrypt file without specifying password
+await crypto.decryptFile('output.enc', 'decrypted.txt');
+
+// You can still override with a custom password
+await crypto.encryptFile('input.txt', 'output.enc', 'CustomP@ssw0rd456!');
 ```
 
 ### Custom Configuration
@@ -93,12 +141,13 @@ const crypto = new CryptoManager(options?: CryptoManagerOptions);
 - `timeCost` (number): Argon2 time cost (default: 3)
 - `parallelism` (number): Argon2 parallelism (default: 1)
 - `aad` (string): Custom Additional Authenticated Data (default: 'secure-crypto-tool-v2')
+- `defaultPassphrase` (string): Default passphrase to use when no password is provided to encryption/decryption methods
 
 #### Methods
 
-##### `encryptText(text: string, password: string): Promise<string>`
+##### `encryptText(text: string, password?: string): Promise<string>`
 
-Encrypts text with a password.
+Encrypts text with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
 
 ```typescript
 const encrypted = await crypto.encryptText(
@@ -106,31 +155,47 @@ const encrypted = await crypto.encryptText(
   'MySecureP@ssw0rd123!'
 );
 // Returns: base64 encoded string
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+const encrypted = await crypto.encryptText('Hello World');
 ```
 
-##### `decryptText(encryptedText: string, password: string): Promise<string>`
+##### `decryptText(encryptedText: string, password?: string): Promise<string>`
 
-Decrypts text with a password.
+Decrypts text with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
 
 ```typescript
 const decrypted = await crypto.decryptText(encrypted, 'MySecureP@ssw0rd123!');
 // Returns: original text
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+const decrypted = await crypto.decryptText(encrypted);
 ```
 
-##### `encryptFile(inputPath: string, outputPath: string, password: string, progressCallback?: ProgressCallback): Promise<void>`
+##### `encryptFile(inputPath: string, outputPath: string, password?: string, progressCallback?: ProgressCallback): Promise<void>`
 
-Encrypts a file with a password.
+Encrypts a file with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
 
 ```typescript
 await crypto.encryptFile('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+await crypto.encryptFile('input.txt', 'output.enc');
 ```
 
-##### `decryptFile(inputPath: string, outputPath: string, password: string, progressCallback?: ProgressCallback): Promise<void>`
+##### `decryptFile(inputPath: string, outputPath: string, password?: string, progressCallback?: ProgressCallback): Promise<void>`
 
-Decrypts a file with a password.
+Decrypts a file with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
 
 ```typescript
 await crypto.decryptFile('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+await crypto.decryptFile('output.enc', 'decrypted.txt');
 ```
 
 ##### `validatePassword(password: string): boolean`
@@ -167,6 +232,15 @@ Gets security level based on configuration.
 ```typescript
 const level = crypto.getSecurityLevel();
 // Returns: 'low' | 'medium' | 'high' | 'ultra'
+```
+
+##### `hasDefaultPassphrase(): boolean`
+
+Checks if a default passphrase is configured.
+
+```typescript
+const hasDefault = crypto.hasDefaultPassphrase();
+// Returns: boolean indicating if default passphrase is set
 ```
 
 ### Utility Functions

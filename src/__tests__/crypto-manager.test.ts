@@ -38,6 +38,17 @@ describe('CryptoManager', () => {
       expect(params.argon2Options.timeCost).toBe(2);
       expect(params.argon2Options.parallelism).toBe(2);
     });
+
+    it('should create instance with default passphrase', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      expect(cryptoWithDefault.hasDefaultPassphrase()).toBe(true);
+    });
+
+    it('should not have default passphrase when not provided', () => {
+      expect(crypto.hasDefaultPassphrase()).toBe(false);
+    });
   });
 
   describe('generateSecureRandom', () => {
@@ -236,6 +247,29 @@ describe('CryptoManager', () => {
       expect(result).not.toBe(testText);
     });
 
+    it('should encrypt text with default passphrase when no password provided', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      const result = await cryptoWithDefault.encryptText(testText);
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+      expect(result).not.toBe(testText);
+    });
+
+    it('should use provided password over default passphrase', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      const result = await cryptoWithDefault.encryptText(
+        testText,
+        testPassword
+      );
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+      expect(result).not.toBe(testText);
+    });
+
     it('should throw error for invalid text', async () => {
       await expect(crypto.encryptText('', testPassword)).rejects.toThrow(
         CryptoError
@@ -253,12 +287,37 @@ describe('CryptoManager', () => {
         crypto.encryptText(testText, null as unknown as string)
       ).rejects.toThrow(CryptoError);
     });
+
+    it('should throw error when no password provided and no default passphrase set', async () => {
+      await expect(crypto.encryptText(testText)).rejects.toThrow(CryptoError);
+    });
   });
 
   describe('decryptText', () => {
     it('should decrypt text successfully', async () => {
       const encrypted = await crypto.encryptText(testText, testPassword);
       const decrypted = await crypto.decryptText(encrypted, testPassword);
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should decrypt text with default passphrase when no password provided', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      const encrypted = await cryptoWithDefault.encryptText(testText);
+      const decrypted = await cryptoWithDefault.decryptText(encrypted);
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should use provided password over default passphrase for decryption', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      const encrypted = await crypto.encryptText(testText, testPassword);
+      const decrypted = await cryptoWithDefault.decryptText(
+        encrypted,
+        testPassword
+      );
       expect(decrypted).toBe(testText);
     });
 
@@ -286,6 +345,11 @@ describe('CryptoManager', () => {
         CryptoError
       );
     });
+
+    it('should throw error when no password provided and no default passphrase set', async () => {
+      const encrypted = await crypto.encryptText(testText, testPassword);
+      await expect(crypto.decryptText(encrypted)).rejects.toThrow(CryptoError);
+    });
   });
 
   describe('encryptFile', () => {
@@ -312,15 +376,38 @@ describe('CryptoManager', () => {
       expect(stats.length).toBeGreaterThan(testText.length);
     });
 
+    it('should encrypt file with default passphrase when no password provided', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      await cryptoWithDefault.encryptFile(testFilePath, encryptedFilePath);
+      expect(existsSync(encryptedFilePath)).toBe(true);
+
+      const stats = await readFile(encryptedFilePath);
+      expect(stats.length).toBeGreaterThan(testText.length);
+    });
+
+    it('should use provided password over default passphrase for file encryption', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      await cryptoWithDefault.encryptFile(
+        testFilePath,
+        encryptedFilePath,
+        testPassword
+      );
+      expect(existsSync(encryptedFilePath)).toBe(true);
+
+      const stats = await readFile(encryptedFilePath);
+      expect(stats.length).toBeGreaterThan(testText.length);
+    });
+
     it('should throw error for missing parameters', async () => {
       await expect(
         crypto.encryptFile('', encryptedFilePath, testPassword)
       ).rejects.toThrow(CryptoError);
       await expect(
         crypto.encryptFile(testFilePath, '', testPassword)
-      ).rejects.toThrow(CryptoError);
-      await expect(
-        crypto.encryptFile(testFilePath, encryptedFilePath, '')
       ).rejects.toThrow(CryptoError);
     });
 
@@ -333,6 +420,12 @@ describe('CryptoManager', () => {
     it('should throw error for non-existent input file', async () => {
       await expect(
         crypto.encryptFile('non-existent.txt', encryptedFilePath, testPassword)
+      ).rejects.toThrow(CryptoError);
+    });
+
+    it('should throw error when no password provided and no default passphrase set', async () => {
+      await expect(
+        crypto.encryptFile(testFilePath, encryptedFilePath)
       ).rejects.toThrow(CryptoError);
     });
 
@@ -378,15 +471,38 @@ describe('CryptoManager', () => {
       expect(decryptedContent).toBe(testText);
     });
 
+    it('should decrypt file with default passphrase when no password provided', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      await cryptoWithDefault.decryptFile(encryptedFilePath, decryptedFilePath);
+      expect(existsSync(decryptedFilePath)).toBe(true);
+
+      const decryptedContent = await readFile(decryptedFilePath, 'utf8');
+      expect(decryptedContent).toBe(testText);
+    });
+
+    it('should use provided password over default passphrase for file decryption', async () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      await cryptoWithDefault.decryptFile(
+        encryptedFilePath,
+        decryptedFilePath,
+        testPassword
+      );
+      expect(existsSync(decryptedFilePath)).toBe(true);
+
+      const decryptedContent = await readFile(decryptedFilePath, 'utf8');
+      expect(decryptedContent).toBe(testText);
+    });
+
     it('should throw error for missing parameters', async () => {
       await expect(
         crypto.decryptFile('', decryptedFilePath, testPassword)
       ).rejects.toThrow(CryptoError);
       await expect(
         crypto.decryptFile(encryptedFilePath, '', testPassword)
-      ).rejects.toThrow(CryptoError);
-      await expect(
-        crypto.decryptFile(encryptedFilePath, decryptedFilePath, '')
       ).rejects.toThrow(CryptoError);
     });
 
@@ -406,6 +522,12 @@ describe('CryptoManager', () => {
 
       // Cleanup
       await unlink(smallFile);
+    });
+
+    it('should throw error when no password provided and no default passphrase set', async () => {
+      await expect(
+        crypto.decryptFile(encryptedFilePath, decryptedFilePath)
+      ).rejects.toThrow(CryptoError);
     });
 
     it('should create output directory if it does not exist', async () => {
@@ -521,6 +643,26 @@ describe('CryptoManager', () => {
         timeCost: 1,
       });
       expect(lowCrypto.getSecurityLevel()).toBe(SecurityLevel.LOW);
+    });
+  });
+
+  describe('hasDefaultPassphrase', () => {
+    it('should return true when default passphrase is set', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      expect(cryptoWithDefault.hasDefaultPassphrase()).toBe(true);
+    });
+
+    it('should return false when no default passphrase is set', () => {
+      expect(crypto.hasDefaultPassphrase()).toBe(false);
+    });
+
+    it('should return false when default passphrase is empty string', () => {
+      const cryptoWithEmpty = new CryptoManager({
+        defaultPassphrase: '',
+      });
+      expect(cryptoWithEmpty.hasDefaultPassphrase()).toBe(false);
     });
   });
 });

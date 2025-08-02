@@ -50,9 +50,6 @@ pids/
 # Optional npm cache directory
 .npm
 
-# npmignore
-.npmignore
-
 # Optional eslint cache
 .eslintcache
 

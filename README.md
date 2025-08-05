@@ -30,6 +30,8 @@ npm install @hiprax/crypto
 
 ### Basic Usage
 
+#### Asynchronous Operations (Recommended)
+
 ```typescript
 import { CryptoManager } from '@hiprax/crypto';
 
@@ -44,6 +46,24 @@ console.log('Encrypted:', encrypted);
 
 // Decrypt text
 const decrypted = await crypto.decryptText(encrypted, 'MySecureP@ssw0rd123!');
+console.log('Decrypted:', decrypted);
+```
+
+#### Synchronous Operations
+
+For scenarios where you need synchronous operations (note: uses PBKDF2 instead of Argon2id for key derivation):
+
+```typescript
+import { CryptoManager } from '@hiprax/crypto';
+
+const crypto = new CryptoManager();
+
+// Encrypt text synchronously
+const encrypted = crypto.encryptTextSync('Hello World', 'MySecureP@ssw0rd123!');
+console.log('Encrypted:', encrypted);
+
+// Decrypt text synchronously
+const decrypted = crypto.decryptTextSync(encrypted, 'MySecureP@ssw0rd123!');
 console.log('Decrypted:', decrypted);
 ```
 
@@ -76,6 +96,8 @@ const encryptedWithCustom = await crypto.encryptText(
 
 ### File Encryption
 
+#### Asynchronous File Operations (Recommended)
+
 ```typescript
 import { CryptoManager } from '@hiprax/crypto';
 
@@ -88,7 +110,25 @@ await crypto.encryptFile('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
 await crypto.decryptFile('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
 ```
 
+#### Synchronous File Operations
+
+For scenarios where you need synchronous file operations (note: uses PBKDF2 instead of Argon2id for key derivation):
+
+```typescript
+import { CryptoManager } from '@hiprax/crypto';
+
+const crypto = new CryptoManager();
+
+// Encrypt file synchronously
+crypto.encryptFileSync('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
+
+// Decrypt file synchronously
+crypto.decryptFileSync('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
+```
+
 ### File Encryption with Default Passphrase
+
+#### Asynchronous Operations
 
 ```typescript
 import { CryptoManager } from '@hiprax/crypto';
@@ -106,6 +146,26 @@ await crypto.decryptFile('output.enc', 'decrypted.txt');
 
 // You can still override with a custom password
 await crypto.encryptFile('input.txt', 'output.enc', 'CustomP@ssw0rd456!');
+```
+
+#### Synchronous Operations
+
+```typescript
+import { CryptoManager } from '@hiprax/crypto';
+
+// Create instance with default passphrase
+const crypto = new CryptoManager({
+  defaultPassphrase: 'MySecureP@ssw0rd123!',
+});
+
+// Encrypt file synchronously without specifying password
+crypto.encryptFileSync('input.txt', 'output.enc');
+
+// Decrypt file synchronously without specifying password
+crypto.decryptFileSync('output.enc', 'decrypted.txt');
+
+// You can still override with a custom password
+crypto.encryptFileSync('input.txt', 'output.enc', 'CustomP@ssw0rd456!');
 ```
 
 ### Custom Configuration
@@ -174,6 +234,32 @@ const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
 const decrypted = await crypto.decryptText(encrypted);
 ```
 
+##### `encryptTextSync(text: string, password?: string): string`
+
+Synchronous version of text encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation.
+
+```typescript
+const encrypted = crypto.encryptTextSync('Hello World', 'MySecureP@ssw0rd123!');
+// Returns: base64 encoded string
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+const encrypted = crypto.encryptTextSync('Hello World');
+```
+
+##### `decryptTextSync(encryptedText: string, password?: string): string`
+
+Synchronous version of text decryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation.
+
+```typescript
+const decrypted = crypto.decryptTextSync(encrypted, 'MySecureP@ssw0rd123!');
+// Returns: original text
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+const decrypted = crypto.decryptTextSync(encrypted);
+```
+
 ##### `encryptFile(inputPath: string, outputPath: string, password?: string, progressCallback?: ProgressCallback): Promise<void>`
 
 Encrypts a file with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
@@ -198,6 +284,30 @@ const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
 await crypto.decryptFile('output.enc', 'decrypted.txt');
 ```
 
+##### `encryptFileSync(inputPath: string, outputPath: string, password?: string): void`
+
+Synchronous version of file encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation.
+
+```typescript
+crypto.encryptFileSync('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+crypto.encryptFileSync('input.txt', 'output.enc');
+```
+
+##### `decryptFileSync(inputPath: string, outputPath: string, password?: string): void`
+
+Synchronous version of file decryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation.
+
+```typescript
+crypto.decryptFileSync('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
+
+// With default passphrase
+const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
+crypto.decryptFileSync('output.enc', 'decrypted.txt');
+```
+
 ##### `validatePassword(password: string): boolean`
 
 Validates password strength.
@@ -213,6 +323,16 @@ Generates cryptographically secure random bytes.
 
 ```typescript
 const random = crypto.generateSecureRandom(32);
+// Returns: Buffer
+```
+
+##### `deriveKeySync(password: string, salt: Buffer): Buffer`
+
+Synchronous version of key derivation using PBKDF2 instead of Argon2id.
+
+```typescript
+const salt = crypto.generateSecureRandom(32);
+const key = crypto.deriveKeySync('MySecureP@ssw0rd123!', salt);
 // Returns: Buffer
 ```
 
@@ -332,6 +452,28 @@ console.log('Is Text:', fileInfo.isTextFile);
 ```
 
 ## 🔧 Configuration
+
+### Asynchronous vs Synchronous Operations
+
+The library provides both asynchronous and synchronous versions of encryption/decryption operations:
+
+#### Asynchronous Operations (Recommended)
+
+- Use **Argon2id** for key derivation (more secure)
+- Better for performance and scalability
+- Non-blocking operations
+- Methods: `encryptText()`, `decryptText()`, `encryptFile()`, `decryptFile()`
+
+#### Synchronous Operations
+
+- Use **PBKDF2** for key derivation (less secure but synchronous)
+- Blocking operations
+- Useful for simple scripts or when async/await is not available
+- Methods: `encryptTextSync()`, `decryptTextSync()`, `encryptFileSync()`, `decryptFileSync()`
+
+**Note**: Synchronous operations use PBKDF2 with 100,000 iterations for security, but Argon2id is still recommended for production use.
+
+**Important**: Synchronous and asynchronous functions are not compatible with each other due to different key derivation methods. Always use the same type (sync or async) for both encryption and decryption.
 
 ### Security Levels
 

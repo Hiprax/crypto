@@ -1,7 +1,7 @@
 import { CryptoManager } from '../crypto-manager';
-import { CryptoError, CryptoErrorType, SecurityLevel } from '../types';
+import { CryptoError, SecurityLevel } from '../types';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -663,6 +663,337 @@ describe('CryptoManager', () => {
         defaultPassphrase: '',
       });
       expect(cryptoWithEmpty.hasDefaultPassphrase()).toBe(false);
+    });
+  });
+
+  describe('deriveKeySync', () => {
+    it('should derive key successfully', () => {
+      const salt = crypto.generateSecureRandom(32);
+      const key = crypto.deriveKeySync(testPassword, salt);
+      expect(Buffer.isBuffer(key)).toBe(true);
+      expect(key.length).toBe(32);
+    });
+
+    it('should throw error for invalid password', () => {
+      const salt = crypto.generateSecureRandom(32);
+      expect(() => crypto.deriveKeySync('', salt)).toThrow(CryptoError);
+      expect(() =>
+        crypto.deriveKeySync(null as unknown as string, salt)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for invalid salt', () => {
+      const invalidSalt = Buffer.alloc(16); // Wrong length
+      expect(() => crypto.deriveKeySync(testPassword, invalidSalt)).toThrow(
+        CryptoError
+      );
+      expect(() =>
+        crypto.deriveKeySync(testPassword, null as unknown as Buffer)
+      ).toThrow(CryptoError);
+    });
+  });
+
+  describe('encryptTextSync', () => {
+    it('should encrypt text successfully', () => {
+      const result = crypto.encryptTextSync(testText, testPassword);
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+      expect(result).not.toBe(testText);
+    });
+
+    it('should encrypt text with default passphrase when no password provided', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      const result = cryptoWithDefault.encryptTextSync(testText);
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+      expect(result).not.toBe(testText);
+    });
+
+    it('should use provided password over default passphrase', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      const result = cryptoWithDefault.encryptTextSync(testText, testPassword);
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+      expect(result).not.toBe(testText);
+    });
+
+    it('should throw error for invalid text', () => {
+      expect(() => crypto.encryptTextSync('', testPassword)).toThrow(
+        CryptoError
+      );
+      expect(() =>
+        crypto.encryptTextSync(null as unknown as string, testPassword)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for invalid password', () => {
+      expect(() => crypto.encryptTextSync(testText, '')).toThrow(CryptoError);
+      expect(() =>
+        crypto.encryptTextSync(testText, null as unknown as string)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error when no password provided and no default passphrase set', () => {
+      expect(() => crypto.encryptTextSync(testText)).toThrow(CryptoError);
+    });
+  });
+
+  describe('decryptTextSync', () => {
+    it('should decrypt text successfully', () => {
+      const encrypted = crypto.encryptTextSync(testText, testPassword);
+      const decrypted = crypto.decryptTextSync(encrypted, testPassword);
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should decrypt text with default passphrase when no password provided', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      const encrypted = cryptoWithDefault.encryptTextSync(testText);
+      const decrypted = cryptoWithDefault.decryptTextSync(encrypted);
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should use provided password over default passphrase for decryption', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      const encrypted = crypto.encryptTextSync(testText, testPassword);
+      const decrypted = cryptoWithDefault.decryptTextSync(
+        encrypted,
+        testPassword
+      );
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should throw error for invalid encrypted text', () => {
+      expect(() => crypto.decryptTextSync('', testPassword)).toThrow(
+        CryptoError
+      );
+      expect(() =>
+        crypto.decryptTextSync(null as unknown as string, testPassword)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for invalid password', () => {
+      const encrypted = crypto.encryptTextSync(testText, testPassword);
+      expect(() => crypto.decryptTextSync(encrypted, '')).toThrow(CryptoError);
+      expect(() =>
+        crypto.decryptTextSync(encrypted, null as unknown as string)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for encrypted data too small', () => {
+      expect(() => crypto.decryptTextSync('invalid', testPassword)).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should throw error when no password provided and no default passphrase set', () => {
+      const encrypted = crypto.encryptTextSync(testText, testPassword);
+      expect(() => crypto.decryptTextSync(encrypted)).toThrow(CryptoError);
+    });
+  });
+
+  describe('encryptFileSync', () => {
+    const testFilePath = path.join(tempDir, 'test-encrypt-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-encrypted-sync.bin');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should encrypt file successfully', () => {
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+      expect(existsSync(encryptedFilePath)).toBe(true);
+
+      const stats = readFileSync(encryptedFilePath);
+      expect(stats.length).toBeGreaterThan(testText.length);
+    });
+
+    it('should encrypt file with default passphrase when no password provided', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      cryptoWithDefault.encryptFileSync(testFilePath, encryptedFilePath);
+      expect(existsSync(encryptedFilePath)).toBe(true);
+
+      const stats = readFileSync(encryptedFilePath);
+      expect(stats.length).toBeGreaterThan(testText.length);
+    });
+
+    it('should use provided password over default passphrase for file encryption', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      cryptoWithDefault.encryptFileSync(
+        testFilePath,
+        encryptedFilePath,
+        testPassword
+      );
+      expect(existsSync(encryptedFilePath)).toBe(true);
+
+      const stats = readFileSync(encryptedFilePath);
+      expect(stats.length).toBeGreaterThan(testText.length);
+    });
+
+    it('should throw error for missing parameters', () => {
+      expect(() =>
+        crypto.encryptFileSync('', encryptedFilePath, testPassword)
+      ).toThrow(CryptoError);
+      expect(() =>
+        crypto.encryptFileSync(testFilePath, '', testPassword)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for weak password', () => {
+      expect(() =>
+        crypto.encryptFileSync(testFilePath, encryptedFilePath, 'weak')
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for non-existent input file', () => {
+      expect(() =>
+        crypto.encryptFileSync(
+          'non-existent.txt',
+          encryptedFilePath,
+          testPassword
+        )
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error when no password provided and no default passphrase set', () => {
+      expect(() =>
+        crypto.encryptFileSync(testFilePath, encryptedFilePath)
+      ).toThrow(CryptoError);
+    });
+
+    it('should create output directory if it does not exist', () => {
+      const nestedDir = path.join(tempDir, 'nested', 'dir');
+      const nestedOutputPath = path.join(nestedDir, 'encrypted-sync.bin');
+
+      crypto.encryptFileSync(testFilePath, nestedOutputPath, testPassword);
+      expect(existsSync(nestedOutputPath)).toBe(true);
+
+      // Cleanup
+      unlinkSync(nestedOutputPath);
+    });
+  });
+
+  describe('decryptFileSync', () => {
+    const testFilePath = path.join(tempDir, 'test-decrypt-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-encrypted-sync.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-decrypted-sync.txt');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should decrypt file successfully', () => {
+      crypto.decryptFileSync(
+        encryptedFilePath,
+        decryptedFilePath,
+        testPassword
+      );
+      expect(existsSync(decryptedFilePath)).toBe(true);
+
+      const decryptedContent = readFileSync(decryptedFilePath, 'utf8');
+      expect(decryptedContent).toBe(testText);
+    });
+
+    it('should decrypt file with default passphrase when no password provided', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: testPassword,
+      });
+      cryptoWithDefault.decryptFileSync(encryptedFilePath, decryptedFilePath);
+      expect(existsSync(decryptedFilePath)).toBe(true);
+
+      const decryptedContent = readFileSync(decryptedFilePath, 'utf8');
+      expect(decryptedContent).toBe(testText);
+    });
+
+    it('should use provided password over default passphrase for file decryption', () => {
+      const cryptoWithDefault = new CryptoManager({
+        defaultPassphrase: 'DifferentP@ssw0rd123!',
+      });
+      cryptoWithDefault.decryptFileSync(
+        encryptedFilePath,
+        decryptedFilePath,
+        testPassword
+      );
+      expect(existsSync(decryptedFilePath)).toBe(true);
+
+      const decryptedContent = readFileSync(decryptedFilePath, 'utf8');
+      expect(decryptedContent).toBe(testText);
+    });
+
+    it('should throw error for missing parameters', () => {
+      expect(() =>
+        crypto.decryptFileSync('', decryptedFilePath, testPassword)
+      ).toThrow(CryptoError);
+      expect(() =>
+        crypto.decryptFileSync(encryptedFilePath, '', testPassword)
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for non-existent input file', () => {
+      expect(() =>
+        crypto.decryptFileSync(
+          'non-existent.bin',
+          decryptedFilePath,
+          testPassword
+        )
+      ).toThrow(CryptoError);
+    });
+
+    it('should throw error for file too small', () => {
+      const smallFile = path.join(tempDir, 'small-sync.bin');
+      writeFileSync(smallFile, Buffer.alloc(10)); // Too small
+
+      expect(() =>
+        crypto.decryptFileSync(smallFile, decryptedFilePath, testPassword)
+      ).toThrow(CryptoError);
+
+      // Cleanup
+      unlinkSync(smallFile);
+    });
+
+    it('should throw error when no password provided and no default passphrase set', () => {
+      expect(() =>
+        crypto.decryptFileSync(encryptedFilePath, decryptedFilePath)
+      ).toThrow(CryptoError);
+    });
+
+    it('should create output directory if it does not exist', () => {
+      const nestedDir = path.join(tempDir, 'nested', 'dir');
+      const nestedOutputPath = path.join(nestedDir, 'decrypted-sync.txt');
+
+      crypto.decryptFileSync(encryptedFilePath, nestedOutputPath, testPassword);
+      expect(existsSync(nestedOutputPath)).toBe(true);
+
+      // Cleanup
+      unlinkSync(nestedOutputPath);
     });
   });
 });

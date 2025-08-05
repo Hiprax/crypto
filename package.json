@@ -1,6 +1,6 @@
 {
   "name": "@hiprax/crypto",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "High-security encryption/decryption library using AES-256-GCM and Argon2id",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

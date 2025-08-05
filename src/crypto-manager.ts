@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import argon2 from 'argon2';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { dirname } from 'node:path';
@@ -121,6 +121,52 @@ export class CryptoManager {
         `Key derivation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
         CryptoErrorType.ENCRYPTION_FAILED,
         'KEY_DERIVATION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Derive encryption key from password using PBKDF2 (synchronous alternative to Argon2id)
+   * @param password - User password
+   * @param salt - Random salt
+   * @returns Derived key
+   * @throws CryptoError if derivation fails
+   */
+  public deriveKeySync(password: string, salt: Buffer): Buffer {
+    if (!password || typeof password !== 'string') {
+      throw new CryptoError(
+        'Password must be a non-empty string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
+    if (!Buffer.isBuffer(salt) || salt.length !== this.saltLength) {
+      throw new CryptoError(
+        `Invalid salt provided. Expected ${this.saltLength} bytes.`,
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_SALT'
+      );
+    }
+
+    try {
+      // Use PBKDF2 as a synchronous alternative to Argon2id
+      // Note: PBKDF2 is less secure than Argon2id but provides synchronous operation
+      const iterations = 100000; // High iteration count for security
+      const key = crypto.pbkdf2Sync(
+        password,
+        salt,
+        iterations,
+        this.keyLength,
+        'sha256'
+      );
+
+      return key;
+    } catch (error) {
+      throw new CryptoError(
+        `Synchronous key derivation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.ENCRYPTION_FAILED,
+        'SYNC_KEY_DERIVATION_FAILED'
       );
     }
   }
@@ -397,6 +443,152 @@ export class CryptoManager {
   }
 
   /**
+   * Encrypt text with password (synchronous version)
+   * @param text - Text to encrypt
+   * @param password - Encryption password (optional if default passphrase is set)
+   * @returns Base64 encoded encrypted data
+   * @throws CryptoError if encryption fails
+   */
+  public encryptTextSync(text: string, password?: string): string {
+    if (!text || typeof text !== 'string') {
+      throw new CryptoError(
+        'Text must be a non-empty string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_TEXT'
+      );
+    }
+
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
+    // Validate password strength
+    if (!this.validatePassword(finalPassword)) {
+      throw new CryptoError(
+        'Password does not meet security requirements',
+        CryptoErrorType.INVALID_PASSWORD,
+        'WEAK_PASSWORD'
+      );
+    }
+
+    try {
+      // Generate salt and IV
+      const salt = this.generateSecureRandom(this.saltLength);
+      const iv = this.generateSecureRandom(this.ivLength);
+
+      // Derive key from password (synchronous)
+      const key = this.deriveKeySync(finalPassword, salt);
+
+      // Encrypt the text
+      const textBuffer = Buffer.from(text, 'utf8');
+      const { encrypted, tag } = this.encryptData(textBuffer, key, iv);
+
+      // Combine all components: salt + iv + tag + encrypted data
+      const combined = Buffer.concat([salt, iv, tag, encrypted]);
+
+      // Clear sensitive data from memory
+      this.secureClear(key);
+      this.secureClear(textBuffer);
+
+      return combined.toString('base64');
+    } catch (error) {
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Synchronous text encryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.ENCRYPTION_FAILED,
+        'SYNC_TEXT_ENCRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Decrypt text with password (synchronous version)
+   * @param encryptedText - Base64 encoded encrypted text
+   * @param password - Decryption password (optional if default passphrase is set)
+   * @returns Decrypted text
+   * @throws CryptoError if decryption fails
+   */
+  public decryptTextSync(
+    encryptedText: string,
+    password?: string
+  ): string {
+    if (!encryptedText || typeof encryptedText !== 'string') {
+      throw new CryptoError(
+        'Encrypted text must be a non-empty string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_ENCRYPTED_TEXT'
+      );
+    }
+
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
+    try {
+      // Decode base64
+      const combined = Buffer.from(encryptedText, 'base64');
+
+      // Validate minimum size
+      const minSize = this.saltLength + this.ivLength + this.tagLength;
+      if (combined.length < minSize) {
+        throw new CryptoError(
+          'Encrypted data is too small to be valid',
+          CryptoErrorType.INVALID_INPUT,
+          'INVALID_ENCRYPTED_DATA_SIZE'
+        );
+      }
+
+      // Extract components
+      const salt = combined.subarray(0, this.saltLength);
+      const iv = combined.subarray(
+        this.saltLength,
+        this.saltLength + this.ivLength
+      );
+      const tag = combined.subarray(
+        this.saltLength + this.ivLength,
+        this.saltLength + this.ivLength + this.tagLength
+      );
+      const encrypted = combined.subarray(
+        this.saltLength + this.ivLength + this.tagLength
+      );
+
+      // Derive key from password (synchronous)
+      const key = this.deriveKeySync(finalPassword, salt);
+
+      // Decrypt the data
+      const decrypted = this.decryptData(encrypted, key, iv, tag);
+
+      // Clear sensitive data from memory
+      this.secureClear(key);
+
+      return decrypted.toString('utf8');
+    } catch (error) {
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Synchronous text decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.DECRYPTION_FAILED,
+        'SYNC_TEXT_DECRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
    * Encrypt file with password (streaming for large files)
    * @param inputPath - Input file path
    * @param outputPath - Output file path
@@ -626,6 +818,245 @@ export class CryptoManager {
         `File decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
         CryptoErrorType.DECRYPTION_FAILED,
         'FILE_DECRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Encrypt file with password (synchronous version)
+   * @param inputPath - Input file path
+   * @param outputPath - Output file path
+   * @param password - Encryption password (optional if default passphrase is set)
+   * @throws CryptoError if encryption fails
+   */
+  public encryptFileSync(
+    inputPath: string,
+    outputPath: string,
+    password?: string
+  ): void {
+    if (!inputPath || !outputPath) {
+      throw new CryptoError(
+        'Input path and output path are required',
+        CryptoErrorType.INVALID_INPUT,
+        'MISSING_REQUIRED_PARAMS'
+      );
+    }
+
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
+    // Validate password strength
+    if (!this.validatePassword(finalPassword)) {
+      throw new CryptoError(
+        'Password does not meet security requirements',
+        CryptoErrorType.INVALID_PASSWORD,
+        'WEAK_PASSWORD'
+      );
+    }
+
+    try {
+      // Check if input file exists
+      if (!existsSync(inputPath)) {
+        throw new CryptoError(
+          `Input file does not exist: ${inputPath}`,
+          CryptoErrorType.FILE_ERROR,
+          'INPUT_FILE_NOT_FOUND'
+        );
+      }
+
+      // Ensure output directory exists
+      const outputDir = dirname(outputPath);
+      if (!existsSync(outputDir)) {
+        try {
+          mkdirSync(outputDir, { recursive: true });
+        } catch (dirError) {
+          throw new CryptoError(
+            `Cannot create output directory: ${dirError instanceof Error ? dirError.message : 'Unknown error'}`,
+            CryptoErrorType.FILE_ERROR,
+            'OUTPUT_DIR_CREATION_FAILED'
+          );
+        }
+      }
+
+      // Generate salt and IV
+      const salt = this.generateSecureRandom(this.saltLength);
+      const iv = this.generateSecureRandom(this.ivLength);
+
+      // Derive key from password (synchronous)
+      const key = this.deriveKeySync(finalPassword, salt);
+
+      // Read input file
+      const inputData = readFileSync(inputPath);
+
+      // Create encryption transform
+      const cipher = crypto.createCipheriv(
+        this.algorithm,
+        key,
+        iv
+      ) as crypto.CipherGCM;
+      cipher.setAAD(this.aad);
+
+      // Encrypt the data
+      let encrypted = cipher.update(inputData);
+      encrypted = Buffer.concat([encrypted, cipher.final()]);
+
+      // Get authentication tag
+      const tag = cipher.getAuthTag();
+
+      // Write header: salt + iv
+      const header = Buffer.concat([salt, iv]);
+      writeFileSync(outputPath, header);
+
+      // Write encrypted data
+      writeFileSync(outputPath, encrypted, { flag: 'a' });
+
+      // Write authentication tag
+      writeFileSync(outputPath, tag, { flag: 'a' });
+
+      // Clear sensitive data
+      this.secureClear(key);
+    } catch (error) {
+      // Clean up partial output file if it exists
+      try {
+        if (existsSync(outputPath)) {
+          writeFileSync(outputPath, ''); // Clear the file
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Synchronous file encryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.ENCRYPTION_FAILED,
+        'SYNC_FILE_ENCRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Decrypt file with password (synchronous version)
+   * @param inputPath - Input file path
+   * @param outputPath - Output file path
+   * @param password - Decryption password (optional if default passphrase is set)
+   * @throws CryptoError if decryption fails
+   */
+  public decryptFileSync(
+    inputPath: string,
+    outputPath: string,
+    password?: string
+  ): void {
+    if (!inputPath || !outputPath) {
+      throw new CryptoError(
+        'Input path and output path are required',
+        CryptoErrorType.INVALID_INPUT,
+        'MISSING_REQUIRED_PARAMS'
+      );
+    }
+
+    // Use provided password or default passphrase
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
+    try {
+      // Check if input file exists
+      if (!existsSync(inputPath)) {
+        throw new CryptoError(
+          `Input file does not exist: ${inputPath}`,
+          CryptoErrorType.FILE_ERROR,
+          'INPUT_FILE_NOT_FOUND'
+        );
+      }
+
+      // Ensure output directory exists
+      const outputDir = dirname(outputPath);
+      if (!existsSync(outputDir)) {
+        try {
+          mkdirSync(outputDir, { recursive: true });
+        } catch (dirError) {
+          throw new CryptoError(
+            `Cannot create output directory: ${dirError instanceof Error ? dirError.message : 'Unknown error'}`,
+            CryptoErrorType.FILE_ERROR,
+            'OUTPUT_DIR_CREATION_FAILED'
+          );
+        }
+      }
+
+      // Read the entire file
+      const fileBuffer = readFileSync(inputPath);
+
+      // Calculate positions
+      const headerSize = this.saltLength + this.ivLength;
+      const tagStart = fileBuffer.length - this.tagLength;
+
+      // Validate file size
+      if (fileBuffer.length < headerSize + this.tagLength) {
+        throw new CryptoError(
+          'File is too small to be a valid encrypted file',
+          CryptoErrorType.INVALID_INPUT,
+          'INVALID_ENCRYPTED_FILE_SIZE'
+        );
+      }
+
+      // Extract components
+      const salt = fileBuffer.slice(0, this.saltLength);
+      const iv = fileBuffer.slice(this.saltLength, headerSize);
+      const tag = fileBuffer.slice(tagStart);
+      const encryptedData = fileBuffer.slice(headerSize, tagStart);
+
+      // Derive key from password (synchronous)
+      const key = this.deriveKeySync(finalPassword, salt);
+
+      // Create decryption transform
+      const decipher = crypto.createDecipheriv(
+        this.algorithm,
+        key,
+        iv
+      ) as crypto.DecipherGCM;
+      decipher.setAAD(this.aad);
+      decipher.setAuthTag(tag);
+
+      // Decrypt the data
+      let decrypted = decipher.update(encryptedData);
+      decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+      // Write decrypted data
+      writeFileSync(outputPath, decrypted);
+
+      // Clear sensitive data
+      this.secureClear(key);
+    } catch (error) {
+      // Clean up partial output file if it exists
+      try {
+        if (existsSync(outputPath)) {
+          writeFileSync(outputPath, ''); // Clear the file
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Synchronous file decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.DECRYPTION_FAILED,
+        'SYNC_FILE_DECRYPTION_FAILED'
       );
     }
   }

@@ -350,7 +350,7 @@ export class CryptoManager {
       this.secureClear(key);
       this.secureClear(textBuffer);
 
-      return combined.toString('base64');
+      return combined.toString('base64url');
     } catch (error) {
       if (error instanceof CryptoError) {
         throw error;
@@ -394,7 +394,7 @@ export class CryptoManager {
 
     try {
       // Decode base64
-      const combined = Buffer.from(encryptedText, 'base64');
+      const combined = Buffer.from(encryptedText, 'base64url');
 
       // Validate minimum size
       const minSize = this.saltLength + this.ivLength + this.tagLength;
@@ -496,7 +496,7 @@ export class CryptoManager {
       this.secureClear(key);
       this.secureClear(textBuffer);
 
-      return combined.toString('base64');
+      return combined.toString('base64url');
     } catch (error) {
       if (error instanceof CryptoError) {
         throw error;
@@ -516,10 +516,7 @@ export class CryptoManager {
    * @returns Decrypted text
    * @throws CryptoError if decryption fails
    */
-  public decryptTextSync(
-    encryptedText: string,
-    password?: string
-  ): string {
+  public decryptTextSync(encryptedText: string, password?: string): string {
     if (!encryptedText || typeof encryptedText !== 'string') {
       throw new CryptoError(
         'Encrypted text must be a non-empty string',
@@ -540,7 +537,7 @@ export class CryptoManager {
 
     try {
       // Decode base64
-      const combined = Buffer.from(encryptedText, 'base64');
+      const combined = Buffer.from(encryptedText, 'base64url');
 
       // Validate minimum size
       const minSize = this.saltLength + this.ivLength + this.tagLength;
@@ -775,10 +772,10 @@ export class CryptoManager {
       }
 
       // Extract components
-      const salt = fileBuffer.slice(0, this.saltLength);
-      const iv = fileBuffer.slice(this.saltLength, headerSize);
-      const tag = fileBuffer.slice(tagStart);
-      const encryptedData = fileBuffer.slice(headerSize, tagStart);
+      const salt = fileBuffer.subarray(0, this.saltLength);
+      const iv = fileBuffer.subarray(this.saltLength, headerSize);
+      const tag = fileBuffer.subarray(tagStart);
+      const encryptedData = fileBuffer.subarray(headerSize, tagStart);
 
       // Derive key from password
       const key = await this.deriveKey(finalPassword, salt);
@@ -1014,10 +1011,10 @@ export class CryptoManager {
       }
 
       // Extract components
-      const salt = fileBuffer.slice(0, this.saltLength);
-      const iv = fileBuffer.slice(this.saltLength, headerSize);
-      const tag = fileBuffer.slice(tagStart);
-      const encryptedData = fileBuffer.slice(headerSize, tagStart);
+      const salt = fileBuffer.subarray(0, this.saltLength);
+      const iv = fileBuffer.subarray(this.saltLength, headerSize);
+      const tag = fileBuffer.subarray(tagStart);
+      const encryptedData = fileBuffer.subarray(headerSize, tagStart);
 
       // Derive key from password (synchronous)
       const key = this.deriveKeySync(finalPassword, salt);

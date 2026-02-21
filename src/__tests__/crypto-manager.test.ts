@@ -1,9 +1,11 @@
 import { CryptoManager } from '../crypto-manager';
-import { CryptoError, SecurityLevel } from '../types';
+import { CryptoError, CryptoErrorType, SecurityLevel } from '../types';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import argon2Module from 'argon2';
+import nodeCrypto from 'node:crypto';
 
 describe('CryptoManager', () => {
   let crypto: CryptoManager;
@@ -48,6 +50,30 @@ describe('CryptoManager', () => {
 
     it('should not have default passphrase when not provided', () => {
       expect(crypto.hasDefaultPassphrase()).toBe(false);
+    });
+
+    it('should throw error for invalid memoryCost', () => {
+      expect(() => new CryptoManager({ memoryCost: -1 })).toThrow(CryptoError);
+      expect(() => new CryptoManager({ memoryCost: 0 })).toThrow(CryptoError);
+      expect(() => new CryptoManager({ memoryCost: 1.5 })).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should throw error for invalid timeCost', () => {
+      expect(() => new CryptoManager({ timeCost: -1 })).toThrow(CryptoError);
+      expect(() => new CryptoManager({ timeCost: 0 })).toThrow(CryptoError);
+      expect(() => new CryptoManager({ timeCost: 1.5 })).toThrow(CryptoError);
+    });
+
+    it('should throw error for invalid parallelism', () => {
+      expect(() => new CryptoManager({ parallelism: -1 })).toThrow(
+        CryptoError
+      );
+      expect(() => new CryptoManager({ parallelism: 0 })).toThrow(CryptoError);
+      expect(() => new CryptoManager({ parallelism: 1.5 })).toThrow(
+        CryptoError
+      );
     });
   });
 
@@ -994,6 +1020,1382 @@ describe('CryptoManager', () => {
 
       // Cleanup
       unlinkSync(nestedOutputPath);
+    });
+  });
+
+  describe('CryptoError', () => {
+    it('should use default type and code when not provided', () => {
+      const error = new CryptoError('test error');
+      expect(error.message).toBe('test error');
+      expect(error.type).toBe(CryptoErrorType.VALIDATION_ERROR);
+      expect(error.code).toBe('CRYPTO_ERROR');
+      expect(error.name).toBe('CryptoError');
+    });
+
+    it('should use default code when only type provided', () => {
+      const error = new CryptoError(
+        'test error',
+        CryptoErrorType.ENCRYPTION_FAILED
+      );
+      expect(error.type).toBe(CryptoErrorType.ENCRYPTION_FAILED);
+      expect(error.code).toBe('CRYPTO_ERROR');
+    });
+
+    it('should use all custom params', () => {
+      const error = new CryptoError(
+        'custom msg',
+        CryptoErrorType.FILE_ERROR,
+        'CUSTOM_CODE'
+      );
+      expect(error.message).toBe('custom msg');
+      expect(error.type).toBe(CryptoErrorType.FILE_ERROR);
+      expect(error.code).toBe('CUSTOM_CODE');
+    });
+
+    it('should be an instance of Error', () => {
+      const error = new CryptoError('test');
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(CryptoError);
+    });
+  });
+
+  describe('encryptText - weak password', () => {
+    it('should throw WEAK_PASSWORD for password without special chars', async () => {
+      await expect(
+        crypto.encryptText(testText, 'WeakPassword1')
+      ).rejects.toThrow(CryptoError);
+      try {
+        await crypto.encryptText(testText, 'WeakPassword1');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('WEAK_PASSWORD');
+      }
+    });
+
+    it('should throw WEAK_PASSWORD for password without uppercase', async () => {
+      await expect(
+        crypto.encryptText(testText, 'weakpassword1!')
+      ).rejects.toThrow(CryptoError);
+    });
+
+    it('should throw WEAK_PASSWORD for password without lowercase', async () => {
+      await expect(
+        crypto.encryptText(testText, 'WEAKPASSWORD1!')
+      ).rejects.toThrow(CryptoError);
+    });
+
+    it('should throw WEAK_PASSWORD for password without digits', async () => {
+      await expect(
+        crypto.encryptText(testText, 'WeakPassword!')
+      ).rejects.toThrow(CryptoError);
+    });
+
+    it('should throw WEAK_PASSWORD for short password', async () => {
+      await expect(crypto.encryptText(testText, 'Ab1!')).rejects.toThrow(
+        CryptoError
+      );
+    });
+  });
+
+  describe('encryptTextSync - weak password', () => {
+    it('should throw WEAK_PASSWORD for password without special chars', () => {
+      expect(() => crypto.encryptTextSync(testText, 'WeakPassword1')).toThrow(
+        CryptoError
+      );
+      try {
+        crypto.encryptTextSync(testText, 'WeakPassword1');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('WEAK_PASSWORD');
+      }
+    });
+
+    it('should throw WEAK_PASSWORD for password without uppercase', () => {
+      expect(() =>
+        crypto.encryptTextSync(testText, 'weakpassword1!')
+      ).toThrow(CryptoError);
+    });
+  });
+
+  describe('encryptFile - weak password', () => {
+    const testFilePath = path.join(tempDir, 'test-weak-pw.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-weak-pw.bin');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw WEAK_PASSWORD for password without special chars', async () => {
+      await expect(
+        crypto.encryptFile(testFilePath, encryptedFilePath, 'WeakPassword1')
+      ).rejects.toThrow(CryptoError);
+    });
+  });
+
+  describe('encryptFileSync - weak password', () => {
+    const testFilePath = path.join(tempDir, 'test-weak-pw-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-weak-pw-sync.bin');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw WEAK_PASSWORD for password without special chars', () => {
+      expect(() =>
+        crypto.encryptFileSync(testFilePath, encryptedFilePath, 'WeakPassword1')
+      ).toThrow(CryptoError);
+    });
+  });
+
+  describe('decryptText - wrong password', () => {
+    it('should throw CryptoError when decrypting with wrong password', async () => {
+      const encrypted = await crypto.encryptText(testText, testPassword);
+      await expect(
+        crypto.decryptText(encrypted, 'WrongP@ssw0rd123!')
+      ).rejects.toThrow(CryptoError);
+    });
+  });
+
+  describe('decryptTextSync - wrong password', () => {
+    it('should throw CryptoError when decrypting with wrong password', () => {
+      const encrypted = crypto.encryptTextSync(testText, testPassword);
+      expect(() =>
+        crypto.decryptTextSync(encrypted, 'WrongP@ssw0rd123!')
+      ).toThrow(CryptoError);
+    });
+  });
+
+  describe('decryptFile - wrong password', () => {
+    const testFilePath = path.join(tempDir, 'test-wrong-pw-dec.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-wrong-pw-enc.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-wrong-pw-out.txt');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw CryptoError when decrypting with wrong password', async () => {
+      await expect(
+        crypto.decryptFile(
+          encryptedFilePath,
+          decryptedFilePath,
+          'WrongP@ssw0rd123!'
+        )
+      ).rejects.toThrow(CryptoError);
+      // Output file should be cleaned up (deleted)
+      expect(existsSync(decryptedFilePath)).toBe(false);
+    });
+
+    it('should throw CryptoError for tampered encrypted file', async () => {
+      // Tamper with the encrypted file
+      const data = await readFile(encryptedFilePath);
+      data[data.length - 1] = (data[data.length - 1] ?? 0) ^ 0xff;
+      await writeFile(encryptedFilePath, data);
+
+      await expect(
+        crypto.decryptFile(encryptedFilePath, decryptedFilePath, testPassword)
+      ).rejects.toThrow(CryptoError);
+    });
+  });
+
+  describe('decryptFileSync - wrong password', () => {
+    const testFilePath = path.join(tempDir, 'test-wrong-pw-dec-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-wrong-pw-enc-sync.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-wrong-pw-out-sync.txt');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw CryptoError when decrypting with wrong password', () => {
+      expect(() =>
+        crypto.decryptFileSync(
+          encryptedFilePath,
+          decryptedFilePath,
+          'WrongP@ssw0rd123!'
+        )
+      ).toThrow(CryptoError);
+      // Output file should be cleaned up (deleted)
+      expect(existsSync(decryptedFilePath)).toBe(false);
+    });
+
+    it('should throw CryptoError for tampered encrypted file', () => {
+      const data = readFileSync(encryptedFilePath);
+      data[data.length - 1] = (data[data.length - 1] ?? 0) ^ 0xff;
+      writeFileSync(encryptedFilePath, data);
+
+      expect(() =>
+        crypto.decryptFileSync(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        )
+      ).toThrow(CryptoError);
+    });
+  });
+
+  describe('encryptText - error handling', () => {
+    it('should wrap non-CryptoError exceptions', async () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'generateSecureRandom').mockImplementation(() => {
+        throw new Error('Random generation hardware failure');
+      });
+
+      try {
+        await mockCrypto.encryptText(testText, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('TEXT_ENCRYPTION_FAILED');
+      }
+
+      jest.restoreAllMocks();
+    });
+
+    it('should re-throw CryptoError from inside try block', async () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
+        new CryptoError(
+          'Mock key derivation failure',
+          CryptoErrorType.ENCRYPTION_FAILED,
+          'MOCK_KEY_ERROR'
+        )
+      );
+
+      try {
+        await mockCrypto.encryptText(testText, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('MOCK_KEY_ERROR');
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('encryptTextSync - error handling', () => {
+    it('should wrap non-CryptoError exceptions', () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'generateSecureRandom').mockImplementation(() => {
+        throw new Error('Random generation hardware failure');
+      });
+
+      try {
+        mockCrypto.encryptTextSync(testText, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'SYNC_TEXT_ENCRYPTION_FAILED'
+        );
+      }
+
+      jest.restoreAllMocks();
+    });
+
+    it('should re-throw CryptoError from inside try block', () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new CryptoError(
+          'Mock key derivation failure',
+          CryptoErrorType.ENCRYPTION_FAILED,
+          'MOCK_KEY_ERROR'
+        );
+      });
+
+      try {
+        mockCrypto.encryptTextSync(testText, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('MOCK_KEY_ERROR');
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('decryptText - non-CryptoError wrapping', () => {
+    it('should wrap non-CryptoError exceptions', async () => {
+      const mockCrypto = new CryptoManager();
+      // Encrypt first with real implementation
+      const encrypted = await mockCrypto.encryptText(testText, testPassword);
+
+      // Now mock deriveKey to throw generic error
+      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
+        new Error('Key derivation hardware failure')
+      );
+
+      try {
+        await mockCrypto.decryptText(encrypted, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('TEXT_DECRYPTION_FAILED');
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('decryptTextSync - non-CryptoError wrapping', () => {
+    it('should wrap non-CryptoError exceptions', () => {
+      const mockCrypto = new CryptoManager();
+      const encrypted = mockCrypto.encryptTextSync(testText, testPassword);
+
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new Error('Key derivation hardware failure');
+      });
+
+      try {
+        mockCrypto.decryptTextSync(encrypted, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'SYNC_TEXT_DECRYPTION_FAILED'
+        );
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('encryptFile - non-CryptoError wrapping', () => {
+    const testFilePath = path.join(tempDir, 'test-enc-wrap.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-enc-wrap.bin');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should wrap non-CryptoError exceptions and clean up output', async () => {
+      const mockCrypto = new CryptoManager();
+      // Mock deriveKey to throw a generic Error
+      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
+        new Error('Key derivation hardware failure')
+      );
+
+      try {
+        await mockCrypto.encryptFile(
+          testFilePath,
+          encryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('FILE_ENCRYPTION_FAILED');
+      }
+      // Output file should be cleaned up
+      expect(existsSync(encryptedFilePath)).toBe(false);
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('decryptFile - non-CryptoError wrapping', () => {
+    const testFilePath = path.join(tempDir, 'test-dec-wrap.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-dec-wrap.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-dec-wrap-out.txt');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should wrap non-CryptoError exceptions', async () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
+        new Error('Key derivation hardware failure')
+      );
+
+      try {
+        await mockCrypto.decryptFile(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('FILE_DECRYPTION_FAILED');
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('encryptFileSync - non-CryptoError wrapping', () => {
+    const testFilePath = path.join(tempDir, 'test-enc-wrap-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-enc-wrap-sync.bin');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should wrap non-CryptoError exceptions and clean up output', () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new Error('Key derivation hardware failure');
+      });
+
+      try {
+        mockCrypto.encryptFileSync(
+          testFilePath,
+          encryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'SYNC_FILE_ENCRYPTION_FAILED'
+        );
+      }
+      // Output file should be cleaned up
+      expect(existsSync(encryptedFilePath)).toBe(false);
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('decryptFileSync - non-CryptoError wrapping', () => {
+    const testFilePath = path.join(tempDir, 'test-dec-wrap-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-dec-wrap-sync.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-dec-wrap-sync-out.txt');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should wrap non-CryptoError exceptions', () => {
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new Error('Key derivation hardware failure');
+      });
+
+      try {
+        mockCrypto.decryptFileSync(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'SYNC_FILE_DECRYPTION_FAILED'
+        );
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('encrypt/decrypt roundtrip edge cases', () => {
+    it('should handle unicode text', async () => {
+      const unicodeText = 'こんにちは世界 🌍 مرحبا بالعالم';
+      const encrypted = await crypto.encryptText(unicodeText, testPassword);
+      const decrypted = await crypto.decryptText(encrypted, testPassword);
+      expect(decrypted).toBe(unicodeText);
+    });
+
+    it('should handle very long text', async () => {
+      const longText = 'A'.repeat(100000);
+      const encrypted = await crypto.encryptText(longText, testPassword);
+      const decrypted = await crypto.decryptText(encrypted, testPassword);
+      expect(decrypted).toBe(longText);
+    });
+
+    it('should produce different ciphertext each time', async () => {
+      const enc1 = await crypto.encryptText(testText, testPassword);
+      const enc2 = await crypto.encryptText(testText, testPassword);
+      expect(enc1).not.toBe(enc2);
+    });
+
+    it('should handle unicode text sync', () => {
+      const unicodeText = 'Ünïcödé Têxt ñ é ü ö';
+      const encrypted = crypto.encryptTextSync(unicodeText, testPassword);
+      const decrypted = crypto.decryptTextSync(encrypted, testPassword);
+      expect(decrypted).toBe(unicodeText);
+    });
+
+    it('should produce different ciphertext each time sync', () => {
+      const enc1 = crypto.encryptTextSync(testText, testPassword);
+      const enc2 = crypto.encryptTextSync(testText, testPassword);
+      expect(enc1).not.toBe(enc2);
+    });
+  });
+
+  describe('file encrypt/decrypt roundtrip edge cases', () => {
+    const testFilePath = path.join(tempDir, 'test-roundtrip.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-roundtrip.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-roundtrip-out.txt');
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should handle binary file content', async () => {
+      const binaryData = Buffer.from(
+        Array.from({ length: 256 }, (_, i) => i)
+      );
+      await writeFile(testFilePath, binaryData);
+
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
+      await crypto.decryptFile(
+        encryptedFilePath,
+        decryptedFilePath,
+        testPassword
+      );
+
+      const decryptedData = await readFile(decryptedFilePath);
+      expect(decryptedData).toEqual(binaryData);
+    });
+
+    it('should handle binary file content sync', async () => {
+      const binaryData = Buffer.from(
+        Array.from({ length: 256 }, (_, i) => i)
+      );
+      await writeFile(testFilePath, binaryData);
+
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+      crypto.decryptFileSync(
+        encryptedFilePath,
+        decryptedFilePath,
+        testPassword
+      );
+
+      const decryptedData = readFileSync(decryptedFilePath);
+      expect(decryptedData).toEqual(binaryData);
+    });
+
+    it('should handle empty-ish file', async () => {
+      await writeFile(testFilePath, 'x');
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
+      await crypto.decryptFile(
+        encryptedFilePath,
+        decryptedFilePath,
+        testPassword
+      );
+      const content = await readFile(decryptedFilePath, 'utf8');
+      expect(content).toBe('x');
+    });
+  });
+
+  describe('cross-instance compatibility', () => {
+    it('should decrypt with same configuration async', async () => {
+      const crypto1 = new CryptoManager({ aad: 'app-v1' });
+      const crypto2 = new CryptoManager({ aad: 'app-v1' });
+
+      const encrypted = await crypto1.encryptText(testText, testPassword);
+      const decrypted = await crypto2.decryptText(encrypted, testPassword);
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should fail with different AAD', async () => {
+      const crypto1 = new CryptoManager({ aad: 'app-v1' });
+      const crypto2 = new CryptoManager({ aad: 'app-v2' });
+
+      const encrypted = await crypto1.encryptText(testText, testPassword);
+      await expect(
+        crypto2.decryptText(encrypted, testPassword)
+      ).rejects.toThrow(CryptoError);
+    });
+
+    it('should decrypt with same configuration sync', () => {
+      const crypto1 = new CryptoManager({ aad: 'app-v1' });
+      const crypto2 = new CryptoManager({ aad: 'app-v1' });
+
+      const encrypted = crypto1.encryptTextSync(testText, testPassword);
+      const decrypted = crypto2.decryptTextSync(encrypted, testPassword);
+      expect(decrypted).toBe(testText);
+    });
+
+    it('should fail with different AAD sync', () => {
+      const crypto1 = new CryptoManager({ aad: 'app-v1' });
+      const crypto2 = new CryptoManager({ aad: 'app-v2' });
+
+      const encrypted = crypto1.encryptTextSync(testText, testPassword);
+      expect(() =>
+        crypto2.decryptTextSync(encrypted, testPassword)
+      ).toThrow(CryptoError);
+    });
+  });
+
+  describe('Constructor - additional validation', () => {
+    it('should accept valid custom memoryCost', () => {
+      const cm = new CryptoManager({ memoryCost: 2 ** 14 });
+      const params = cm.getParameters();
+      expect(params.argon2Options.memoryCost).toBe(2 ** 14);
+    });
+
+    it('should accept valid custom timeCost', () => {
+      const cm = new CryptoManager({ timeCost: 5 });
+      const params = cm.getParameters();
+      expect(params.argon2Options.timeCost).toBe(5);
+    });
+
+    it('should accept valid custom parallelism', () => {
+      const cm = new CryptoManager({ parallelism: 2 });
+      const params = cm.getParameters();
+      expect(params.argon2Options.parallelism).toBe(2);
+    });
+
+    it('should reject NaN memoryCost', () => {
+      expect(() => new CryptoManager({ memoryCost: NaN })).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should reject NaN timeCost', () => {
+      expect(() => new CryptoManager({ timeCost: NaN })).toThrow(CryptoError);
+    });
+
+    it('should reject NaN parallelism', () => {
+      expect(() => new CryptoManager({ parallelism: NaN })).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should reject negative memoryCost', () => {
+      expect(() => new CryptoManager({ memoryCost: -100 })).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should reject float timeCost', () => {
+      expect(() => new CryptoManager({ timeCost: 2.5 })).toThrow(CryptoError);
+    });
+
+    it('should reject float parallelism', () => {
+      expect(() => new CryptoManager({ parallelism: 1.5 })).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should not store empty string as default passphrase', () => {
+      const cm = new CryptoManager({ defaultPassphrase: '' });
+      expect(cm.hasDefaultPassphrase()).toBe(false);
+    });
+  });
+
+  describe('generateSecureRandom - additional edge cases', () => {
+    it('should generate 1 byte', () => {
+      const random = crypto.generateSecureRandom(1);
+      expect(random.length).toBe(1);
+    });
+
+    it('should generate max 1024 bytes', () => {
+      const random = crypto.generateSecureRandom(1024);
+      expect(random.length).toBe(1024);
+    });
+
+    it('should throw for non-integer', () => {
+      expect(() => crypto.generateSecureRandom(1.5)).toThrow(CryptoError);
+      expect(() => crypto.generateSecureRandom(NaN)).toThrow(CryptoError);
+    });
+
+    it('should produce unique bytes', () => {
+      const a = crypto.generateSecureRandom(32);
+      const b = crypto.generateSecureRandom(32);
+      expect(a.equals(b)).toBe(false);
+    });
+  });
+
+  describe('deriveKey - consistent output', () => {
+    it('should produce same key for same password and salt', async () => {
+      const salt = crypto.generateSecureRandom(32);
+      const key1 = await crypto.deriveKey(testPassword, salt);
+      const key2 = await crypto.deriveKey(testPassword, salt);
+      expect(key1.equals(key2)).toBe(true);
+    });
+
+    it('should produce different keys for different salts', async () => {
+      const salt1 = crypto.generateSecureRandom(32);
+      const salt2 = crypto.generateSecureRandom(32);
+      const key1 = await crypto.deriveKey(testPassword, salt1);
+      const key2 = await crypto.deriveKey(testPassword, salt2);
+      expect(key1.equals(key2)).toBe(false);
+    });
+  });
+
+  describe('deriveKeySync - consistent output', () => {
+    it('should produce same key for same password and salt', () => {
+      const salt = crypto.generateSecureRandom(32);
+      const key1 = crypto.deriveKeySync(testPassword, salt);
+      const key2 = crypto.deriveKeySync(testPassword, salt);
+      expect(key1.equals(key2)).toBe(true);
+    });
+
+    it('should produce different keys for different passwords', () => {
+      const salt = crypto.generateSecureRandom(32);
+      const key1 = crypto.deriveKeySync(testPassword, salt);
+      const key2 = crypto.deriveKeySync('DifferentP@ssw0rd123!', salt);
+      expect(key1.equals(key2)).toBe(false);
+    });
+  });
+
+  describe('encryptData/decryptData roundtrip', () => {
+    it('should handle empty buffer', () => {
+      const data = Buffer.alloc(0);
+      const key = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+
+      const { encrypted, tag } = crypto.encryptData(data, key, iv);
+      const decrypted = crypto.decryptData(encrypted, key, iv, tag);
+      expect(decrypted).toEqual(data);
+    });
+
+    it('should handle large buffer', () => {
+      const data = crypto.generateSecureRandom(1024);
+      const key = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+
+      const { encrypted, tag } = crypto.encryptData(data, key, iv);
+      const decrypted = crypto.decryptData(encrypted, key, iv, tag);
+      expect(decrypted).toEqual(data);
+    });
+
+    it('should fail with wrong key', () => {
+      const data = Buffer.from('test data');
+      const key1 = crypto.generateSecureRandom(32);
+      const key2 = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+
+      const { encrypted, tag } = crypto.encryptData(data, key1, iv);
+      expect(() => crypto.decryptData(encrypted, key2, iv, tag)).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should fail with wrong iv', () => {
+      const data = Buffer.from('test data');
+      const key = crypto.generateSecureRandom(32);
+      const iv1 = crypto.generateSecureRandom(12);
+      const iv2 = crypto.generateSecureRandom(12);
+
+      const { encrypted, tag } = crypto.encryptData(data, key, iv1);
+      expect(() => crypto.decryptData(encrypted, key, iv2, tag)).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should fail with tampered ciphertext', () => {
+      const data = Buffer.from('test data');
+      const key = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+
+      const { encrypted, tag } = crypto.encryptData(data, key, iv);
+      encrypted[0] = (encrypted[0] ?? 0) ^ 0xff;
+      expect(() => crypto.decryptData(encrypted, key, iv, tag)).toThrow(
+        CryptoError
+      );
+    });
+
+    it('should fail with tampered tag', () => {
+      const data = Buffer.from('test data');
+      const key = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+
+      const { encrypted, tag } = crypto.encryptData(data, key, iv);
+      tag[0] = (tag[0] ?? 0) ^ 0xff;
+      expect(() => crypto.decryptData(encrypted, key, iv, tag)).toThrow(
+        CryptoError
+      );
+    });
+  });
+
+  describe('getSecurityLevel - boundary conditions', () => {
+    it('should return LOW when memoryCost is high but timeCost is low', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 18,
+        timeCost: 1,
+      });
+      expect(cm.getSecurityLevel()).toBe(SecurityLevel.LOW);
+    });
+
+    it('should return MEDIUM at exact boundary', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 14,
+        timeCost: 2,
+      });
+      expect(cm.getSecurityLevel()).toBe(SecurityLevel.MEDIUM);
+    });
+
+    it('should return MEDIUM when memoryCost is low but timeCost is high', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 14,
+        timeCost: 10,
+      });
+      expect(cm.getSecurityLevel()).toBe(SecurityLevel.MEDIUM);
+    });
+  });
+
+  describe('encryptFile - cleanup with pre-existing output', () => {
+    const testFilePath = path.join(tempDir, 'test-cleanup-enc.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-cleanup-enc.bin');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should delete pre-existing output file on error', async () => {
+      // Pre-create the output file
+      await writeFile(encryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(new Error('Key failure'));
+
+      await expect(
+        mockCrypto.encryptFile(testFilePath, encryptedFilePath, testPassword)
+      ).rejects.toThrow(CryptoError);
+
+      // Output file should be cleaned up (deleted)
+      expect(existsSync(encryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+
+    it('should re-throw CryptoError and clean up output', async () => {
+      // Pre-create the output file
+      await writeFile(encryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
+        new CryptoError(
+          'Mock failure',
+          CryptoErrorType.ENCRYPTION_FAILED,
+          'MOCK_ERROR'
+        )
+      );
+
+      try {
+        await mockCrypto.encryptFile(
+          testFilePath,
+          encryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('MOCK_ERROR');
+      }
+      expect(existsSync(encryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('decryptFile - cleanup with pre-existing output', () => {
+    const testFilePath = path.join(tempDir, 'test-cleanup-dec.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-cleanup-dec.bin');
+    const decryptedFilePath = path.join(tempDir, 'test-cleanup-dec-out.txt');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should delete pre-existing output file on error', async () => {
+      // Pre-create the output file
+      await writeFile(decryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(new Error('Key failure'));
+
+      await expect(
+        mockCrypto.decryptFile(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        )
+      ).rejects.toThrow(CryptoError);
+      expect(existsSync(decryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+
+    it('should re-throw CryptoError and clean up output', async () => {
+      await writeFile(decryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
+        new CryptoError(
+          'Mock failure',
+          CryptoErrorType.DECRYPTION_FAILED,
+          'MOCK_ERROR'
+        )
+      );
+
+      try {
+        await mockCrypto.decryptFile(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('MOCK_ERROR');
+      }
+      expect(existsSync(decryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('encryptFileSync - cleanup with pre-existing output', () => {
+    const testFilePath = path.join(tempDir, 'test-cleanup-enc-sync.txt');
+    const encryptedFilePath = path.join(
+      tempDir,
+      'test-cleanup-enc-sync.bin'
+    );
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should delete pre-existing output file on error', () => {
+      writeFileSync(encryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new Error('Key failure');
+      });
+
+      expect(() =>
+        mockCrypto.encryptFileSync(
+          testFilePath,
+          encryptedFilePath,
+          testPassword
+        )
+      ).toThrow(CryptoError);
+      expect(existsSync(encryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+
+    it('should re-throw CryptoError and clean up output', () => {
+      writeFileSync(encryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new CryptoError(
+          'Mock failure',
+          CryptoErrorType.ENCRYPTION_FAILED,
+          'MOCK_ERROR'
+        );
+      });
+
+      try {
+        mockCrypto.encryptFileSync(
+          testFilePath,
+          encryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('MOCK_ERROR');
+      }
+      expect(existsSync(encryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('decryptFileSync - cleanup with pre-existing output', () => {
+    const testFilePath = path.join(tempDir, 'test-cleanup-dec-sync.txt');
+    const encryptedFilePath = path.join(
+      tempDir,
+      'test-cleanup-dec-sync.bin'
+    );
+    const decryptedFilePath = path.join(
+      tempDir,
+      'test-cleanup-dec-sync-out.txt'
+    );
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should delete pre-existing output file on error', () => {
+      writeFileSync(decryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new Error('Key failure');
+      });
+
+      expect(() =>
+        mockCrypto.decryptFileSync(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        )
+      ).toThrow(CryptoError);
+      expect(existsSync(decryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+
+    it('should re-throw CryptoError and clean up output', () => {
+      writeFileSync(decryptedFilePath, 'pre-existing content');
+
+      const mockCrypto = new CryptoManager();
+      jest.spyOn(mockCrypto, 'deriveKeySync').mockImplementation(() => {
+        throw new CryptoError(
+          'Mock failure',
+          CryptoErrorType.DECRYPTION_FAILED,
+          'MOCK_ERROR'
+        );
+      });
+
+      try {
+        mockCrypto.decryptFileSync(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('MOCK_ERROR');
+      }
+      expect(existsSync(decryptedFilePath)).toBe(false);
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('encryptFile - mkdir error', () => {
+    const testFilePath = path.join(tempDir, 'test-mkdir-enc.txt');
+    const blockingFile = path.join(tempDir, 'blocking-file-enc');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      // Create a regular file that blocks directory creation
+      await writeFile(blockingFile, 'I am a file, not a directory');
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, blockingFile]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw when output directory cannot be created', async () => {
+      // Try to write output inside a regular file (not a directory)
+      const invalidOutputPath = path.join(
+        blockingFile,
+        'subdir',
+        'output.bin'
+      );
+
+      try {
+        await crypto.encryptFile(
+          testFilePath,
+          invalidOutputPath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'OUTPUT_DIR_CREATION_FAILED'
+        );
+      }
+    });
+  });
+
+  describe('decryptFile - mkdir error', () => {
+    const testFilePath = path.join(tempDir, 'test-mkdir-dec.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-mkdir-dec.bin');
+    const blockingFile = path.join(tempDir, 'blocking-file-dec');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
+      await writeFile(blockingFile, 'I am a file, not a directory');
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, blockingFile]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw when output directory cannot be created', async () => {
+      const invalidOutputPath = path.join(
+        blockingFile,
+        'subdir',
+        'output.txt'
+      );
+
+      try {
+        await crypto.decryptFile(
+          encryptedFilePath,
+          invalidOutputPath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'OUTPUT_DIR_CREATION_FAILED'
+        );
+      }
+    });
+  });
+
+  describe('encryptFileSync - mkdir error', () => {
+    const testFilePath = path.join(tempDir, 'test-mkdir-enc-sync.txt');
+    const blockingFile = path.join(tempDir, 'blocking-file-enc-sync');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      await writeFile(blockingFile, 'I am a file, not a directory');
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, blockingFile]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw when output directory cannot be created', () => {
+      const invalidOutputPath = path.join(
+        blockingFile,
+        'subdir',
+        'output.bin'
+      );
+
+      try {
+        crypto.encryptFileSync(testFilePath, invalidOutputPath, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'OUTPUT_DIR_CREATION_FAILED'
+        );
+      }
+    });
+  });
+
+  describe('decryptFileSync - mkdir error', () => {
+    const testFilePath = path.join(tempDir, 'test-mkdir-dec-sync.txt');
+    const encryptedFilePath = path.join(tempDir, 'test-mkdir-dec-sync.bin');
+    const blockingFile = path.join(tempDir, 'blocking-file-dec-sync');
+
+    beforeEach(async () => {
+      await writeFile(testFilePath, testText);
+      crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
+      await writeFile(blockingFile, 'I am a file, not a directory');
+    });
+
+    afterEach(async () => {
+      for (const file of [testFilePath, encryptedFilePath, blockingFile]) {
+        if (existsSync(file)) {
+          await unlink(file);
+        }
+      }
+    });
+
+    it('should throw when output directory cannot be created', () => {
+      const invalidOutputPath = path.join(
+        blockingFile,
+        'subdir',
+        'output.txt'
+      );
+
+      try {
+        crypto.decryptFileSync(
+          encryptedFilePath,
+          invalidOutputPath,
+          testPassword
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'OUTPUT_DIR_CREATION_FAILED'
+        );
+      }
+    });
+  });
+
+  describe('deriveKey - internal error wrapping', () => {
+    it('should wrap argon2 errors', async () => {
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('Argon2 internal failure'));
+
+      const salt = crypto.generateSecureRandom(32);
+      try {
+        await crypto.deriveKey(testPassword, salt);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('deriveKeySync - internal error wrapping', () => {
+    it('should wrap pbkdf2Sync errors', () => {
+      const original = nodeCrypto.pbkdf2Sync;
+      (nodeCrypto as Record<string, unknown>).pbkdf2Sync = (): never => {
+        throw new Error('PBKDF2 internal failure');
+      };
+
+      const salt = crypto.generateSecureRandom(32);
+      try {
+        crypto.deriveKeySync(testPassword, salt);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe(
+          'SYNC_KEY_DERIVATION_FAILED'
+        );
+      }
+
+      (nodeCrypto as Record<string, unknown>).pbkdf2Sync = original;
+    });
+  });
+
+  describe('encryptData - internal error wrapping', () => {
+    it('should wrap cipher errors', () => {
+      const originalCreateCipheriv = nodeCrypto.createCipheriv;
+      (nodeCrypto as Record<string, unknown>).createCipheriv = (): never => {
+        throw new Error('Cipher creation failure');
+      };
+
+      const data = Buffer.from('test');
+      const key = Buffer.alloc(32);
+      const iv = Buffer.alloc(12);
+
+      try {
+        crypto.encryptData(data, key, iv);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).code).toBe('ENCRYPTION_FAILED');
+      }
+
+      (nodeCrypto as Record<string, unknown>).createCipheriv =
+        originalCreateCipheriv;
+    });
+  });
+
+  describe('validatePassword - edge cases', () => {
+    it('should accept password at exactly 8 characters', () => {
+      expect(crypto.validatePassword('Ab1!cdef')).toBe(true);
+    });
+
+    it('should reject password at 7 characters', () => {
+      expect(crypto.validatePassword('Ab1!cde')).toBe(false);
+    });
+
+    it('should handle number input', () => {
+      expect(crypto.validatePassword(12345678 as unknown as string)).toBe(
+        false
+      );
+    });
+
+    it('should handle undefined input', () => {
+      expect(crypto.validatePassword(undefined as unknown as string)).toBe(
+        false
+      );
     });
   });
 });

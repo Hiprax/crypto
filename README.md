@@ -207,14 +207,14 @@ const crypto = new CryptoManager(options?: CryptoManagerOptions);
 
 ##### `encryptText(text: string, password?: string): Promise<string>`
 
-Encrypts text with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
+Encrypts text with a password using Argon2id key derivation. If no password is provided and a default passphrase is set, the default passphrase will be used.
 
 ```typescript
 const encrypted = await crypto.encryptText(
   'Hello World',
   'MySecureP@ssw0rd123!'
 );
-// Returns: base64 encoded string
+// Returns: base64url encoded string
 
 // With default passphrase
 const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
@@ -240,7 +240,7 @@ Synchronous version of text encryption. Uses PBKDF2 for key derivation instead o
 
 ```typescript
 const encrypted = crypto.encryptTextSync('Hello World', 'MySecureP@ssw0rd123!');
-// Returns: base64 encoded string
+// Returns: base64url encoded string
 
 // With default passphrase
 const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
@@ -260,9 +260,9 @@ const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
 const decrypted = crypto.decryptTextSync(encrypted);
 ```
 
-##### `encryptFile(inputPath: string, outputPath: string, password?: string, progressCallback?: ProgressCallback): Promise<void>`
+##### `encryptFile(inputPath: string, outputPath: string, password?: string): Promise<void>`
 
-Encrypts a file with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
+Encrypts a file with a password. Uses streaming for the encryption pipeline. If no password is provided and a default passphrase is set, the default passphrase will be used. Automatically creates the output directory if it doesn't exist.
 
 ```typescript
 await crypto.encryptFile('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
@@ -272,9 +272,9 @@ const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
 await crypto.encryptFile('input.txt', 'output.enc');
 ```
 
-##### `decryptFile(inputPath: string, outputPath: string, password?: string, progressCallback?: ProgressCallback): Promise<void>`
+##### `decryptFile(inputPath: string, outputPath: string, password?: string): Promise<void>`
 
-Decrypts a file with a password. If no password is provided and a default passphrase is set, the default passphrase will be used.
+Decrypts a file with a password. If no password is provided and a default passphrase is set, the default passphrase will be used. Automatically creates the output directory if it doesn't exist.
 
 ```typescript
 await crypto.decryptFile('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
@@ -326,14 +326,50 @@ const random = crypto.generateSecureRandom(32);
 // Returns: Buffer
 ```
 
+##### `deriveKey(password: string, salt: Buffer): Promise<Buffer>`
+
+Derives an encryption key from a password using Argon2id.
+
+```typescript
+const salt = crypto.generateSecureRandom(32);
+const key = await crypto.deriveKey('MySecureP@ssw0rd123!', salt);
+// Returns: 32-byte Buffer
+```
+
 ##### `deriveKeySync(password: string, salt: Buffer): Buffer`
 
-Synchronous version of key derivation using PBKDF2 instead of Argon2id.
+Synchronous version of key derivation using PBKDF2 (100,000 iterations, SHA-256) instead of Argon2id.
 
 ```typescript
 const salt = crypto.generateSecureRandom(32);
 const key = crypto.deriveKeySync('MySecureP@ssw0rd123!', salt);
-// Returns: Buffer
+// Returns: 32-byte Buffer
+```
+
+##### `encryptData(data: Buffer, key: Buffer, iv: Buffer): EncryptionResult`
+
+Low-level AES-256-GCM encryption. Returns `{ encrypted: Buffer, tag: Buffer }`.
+
+```typescript
+const key = crypto.generateSecureRandom(32);
+const iv = crypto.generateSecureRandom(12);
+const { encrypted, tag } = crypto.encryptData(Buffer.from('data'), key, iv);
+```
+
+##### `decryptData(encryptedData: Buffer, key: Buffer, iv: Buffer, tag: Buffer): Buffer`
+
+Low-level AES-256-GCM decryption. Returns the decrypted data as a Buffer.
+
+```typescript
+const decrypted = crypto.decryptData(encrypted, key, iv, tag);
+```
+
+##### `secureClear(buffer: Buffer): void`
+
+Securely zeroes a buffer to remove sensitive data from memory.
+
+```typescript
+crypto.secureClear(key);
 ```
 
 ##### `getParameters(): EncryptionParameters`
@@ -363,6 +399,28 @@ const hasDefault = crypto.hasDefaultPassphrase();
 // Returns: boolean indicating if default passphrase is set
 ```
 
+### Types and Enums
+
+The library exports all types, interfaces, and enums for TypeScript consumers:
+
+```typescript
+import {
+  // Error handling
+  CryptoError,
+  CryptoErrorType,
+  // Enums
+  SecurityLevel,
+  EncryptionAlgorithm,
+  // Interfaces
+  type CryptoManagerOptions,
+  type EncryptionResult,
+  type EncryptionParameters,
+  type ValidationResult,
+  type FileInfo,
+  type RetryConfig,
+} from '@hiprax/crypto';
+```
+
 ### Utility Functions
 
 Additional utility functions are also exported:
@@ -378,10 +436,12 @@ import {
   generateRandomHex,
   secureStringCompare,
   formatFileSize,
+  getFileExtension,
   isTextFile,
   sanitizeFilename,
   createBackupPath,
   isValidBase64,
+  isValidBase64Url,
   createProgressBar,
   sleep,
   retryWithBackoff,
@@ -417,6 +477,9 @@ const isEqual = secureStringCompare('secret', 'secret');
 // Format file size
 const size = formatFileSize(1024 * 1024); // "1 MB"
 
+// Get file extension (lowercase)
+const ext = getFileExtension('photo.JPG'); // ".jpg"
+
 // Check if file is text file
 const isText = isTextFile('document.txt');
 
@@ -428,6 +491,9 @@ const backupPath = createBackupPath('file.txt'); // "file_2024-01-01T12-00-00.ba
 
 // Validate base64
 const isValid = isValidBase64('SGVsbG8gV29ybGQ=');
+
+// Validate base64url (the format used by this library's encrypted output)
+const isValidUrl = isValidBase64Url('SGVsbG8gV29ybGQ');
 
 // Create progress bar
 const progress = createProgressBar(50, 100); // "[████████████████░░░░░░░░░░░░░░] 50%"

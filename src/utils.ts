@@ -44,8 +44,13 @@ export function validatePath(filePath: string): ValidationResult {
   }
 
   // Check for invalid characters (excluding backslashes for Windows compatibility)
+  // Strip Windows drive letter prefix (e.g., "C:") before checking for ":"
+  let pathToCheck = filePath;
+  if (process.platform === 'win32' && /^[a-zA-Z]:/.test(filePath)) {
+    pathToCheck = filePath.slice(2);
+  }
   const invalidChars = /[<>:"|?*]/;
-  if (invalidChars.test(filePath)) {
+  if (invalidChars.test(pathToCheck)) {
     return {
       isValid: false,
       error: 'File path contains invalid characters',
@@ -87,13 +92,16 @@ export function generateRandomString(length: number = 32): string {
 
   const chars =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const maxValid = 248; // Largest multiple of 62 fitting in a byte (248 = 62 * 4)
   let result = '';
-  const randomBytes = crypto.randomBytes(length);
 
-  for (let i = 0; i < length; i++) {
-    const randomByte = randomBytes[i];
-    if (randomByte !== undefined) {
-      result += chars.charAt(randomByte % chars.length);
+  while (result.length < length) {
+    const randomBytes = crypto.randomBytes(length - result.length + 16);
+    for (let i = 0; i < randomBytes.length && result.length < length; i++) {
+      const randomByte = randomBytes[i];
+      if (randomByte !== undefined && randomByte < maxValid) {
+        result += chars.charAt(randomByte % chars.length);
+      }
     }
   }
 
@@ -106,11 +114,14 @@ export function generateRandomString(length: number = 32): string {
  * @returns Formatted size string
  */
 export function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 Bytes';
+  if (bytes <= 0) return '0 Bytes';
 
   const k = 1024;
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(k)),
+    sizes.length - 1
+  );
 
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
@@ -212,6 +223,25 @@ export function isValidBase64(str: string): boolean {
 }
 
 /**
+ * Validate base64url string (URL-safe base64 without padding)
+ * @param str - String to validate
+ * @returns True if valid base64url
+ */
+export function isValidBase64Url(str: string): boolean {
+  if (!str || typeof str !== 'string') {
+    return false;
+  }
+
+  try {
+    const decoded = Buffer.from(str, 'base64url');
+    const reEncoded = decoded.toString('base64url');
+    return str === reEncoded;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Secure string comparison (constant time)
  * @param a - First string
  * @param b - Second string
@@ -222,16 +252,17 @@ export function secureStringCompare(a: string, b: string): boolean {
     return false;
   }
 
-  if (a.length !== b.length) {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+
+  if (bufA.length !== bufB.length) {
+    // Compare against a dummy buffer to avoid timing leaks on length
+    const dummy = Buffer.alloc(bufA.length);
+    crypto.timingSafeEqual(bufA, dummy);
     return false;
   }
 
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-
-  return result === 0;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 /**

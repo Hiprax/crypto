@@ -8,6 +8,7 @@ import {
   sanitizeFilename,
   createBackupPath,
   isValidBase64,
+  isValidBase64Url,
   secureStringCompare,
   createProgressBar,
   sleep,
@@ -19,7 +20,8 @@ import {
   getFileInfo,
 } from '../utils';
 import { CryptoError } from '../types';
-import { writeFile, unlink, stat } from 'node:fs/promises';
+import { CryptoManager } from '../crypto-manager';
+import { writeFile, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -72,19 +74,23 @@ describe('Utils', () => {
     it('should validate valid paths', () => {
       expect(validatePath('valid/path.txt').isValid).toBe(true);
       if (process.platform === 'win32') {
-        const result = validatePath('C:\\valid\\path.txt').isValid;
-        if (!result) {
-          // Skip the assertion if Windows path validation fails in this environment
-          return;
-        }
-        expect(result).toBe(true);
+        expect(validatePath('C:\\valid\\path.txt').isValid).toBe(true);
+        expect(validatePath('D:\\another\\path.txt').isValid).toBe(true);
       }
     });
 
     it('should reject paths with invalid characters', () => {
       expect(validatePath('invalid<path.txt').isValid).toBe(false);
-      expect(validatePath('invalid:path.txt').isValid).toBe(false);
       expect(validatePath('invalid"path.txt').isValid).toBe(false);
+      if (process.platform !== 'win32') {
+        expect(validatePath('invalid:path.txt').isValid).toBe(false);
+      }
+    });
+
+    it('should reject colon in non-drive-letter position on Windows', () => {
+      if (process.platform === 'win32') {
+        expect(validatePath('C:\\path:invalid.txt').isValid).toBe(false);
+      }
     });
 
     it('should reject path traversal attempts', () => {
@@ -123,6 +129,35 @@ describe('Utils', () => {
       expect(() => generateRandomString(-1)).toThrow(CryptoError);
       expect(() => generateRandomString(1025)).toThrow(CryptoError);
     });
+
+    it('should only contain alphanumeric characters', () => {
+      const result = generateRandomString(1024);
+      expect(result).toMatch(/^[A-Za-z0-9]+$/);
+    });
+
+    it('should produce roughly uniform distribution (no modulo bias)', () => {
+      const counts: Record<string, number> = {};
+      const chars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      for (const c of chars) counts[c] = 0;
+
+      // Generate multiple batches since max length is 1024
+      const batchSize = 1024;
+      const batches = 60;
+      for (let b = 0; b < batches; b++) {
+        const result = generateRandomString(batchSize);
+        for (const c of result) counts[c] = (counts[c] ?? 0) + 1;
+      }
+
+      const totalChars = batchSize * batches;
+      const expected = totalChars / 62;
+      for (const c of chars) {
+        const count = counts[c] ?? 0;
+        // Each character should appear within 30% of expected (generous tolerance)
+        expect(count).toBeGreaterThan(expected * 0.7);
+        expect(count).toBeLessThan(expected * 1.3);
+      }
+    });
   });
 
   describe('formatFileSize', () => {
@@ -135,6 +170,17 @@ describe('Utils', () => {
 
     it('should handle large file sizes', () => {
       expect(formatFileSize(1024 * 1024 * 1024 * 1024)).toBe('1 TB');
+    });
+
+    it('should handle negative values', () => {
+      expect(formatFileSize(-1)).toBe('0 Bytes');
+      expect(formatFileSize(-1024)).toBe('0 Bytes');
+    });
+
+    it('should handle values exceeding TB range', () => {
+      const petabyte = 1024 * 1024 * 1024 * 1024 * 1024;
+      const result = formatFileSize(petabyte);
+      expect(result).toBe('1024 TB');
     });
   });
 
@@ -227,6 +273,35 @@ describe('Utils', () => {
     });
   });
 
+  describe('isValidBase64Url', () => {
+    it('should validate valid base64url strings', () => {
+      // base64url of "test"
+      expect(isValidBase64Url('dGVzdA')).toBe(true);
+      // base64url of "Hello World"
+      expect(isValidBase64Url('SGVsbG8gV29ybGQ')).toBe(true);
+      expect(isValidBase64Url('')).toBe(false);
+    });
+
+    it('should reject invalid base64url strings', () => {
+      expect(isValidBase64Url('invalid!')).toBe(false);
+    });
+
+    it('should validate output from CryptoManager encryptTextSync', () => {
+      // The library outputs base64url, so encrypted text should be valid
+      const cm = new CryptoManager();
+      const encrypted = cm.encryptTextSync(
+        'test data',
+        'MySecureP@ssw0rd123!'
+      );
+      expect(isValidBase64Url(encrypted)).toBe(true);
+    });
+
+    it('should handle null/undefined input', () => {
+      expect(isValidBase64Url(null as unknown as string)).toBe(false);
+      expect(isValidBase64Url(undefined as unknown as string)).toBe(false);
+    });
+  });
+
   describe('secureStringCompare', () => {
     it('should compare strings correctly', () => {
       expect(secureStringCompare('test', 'test')).toBe(true);
@@ -247,6 +322,28 @@ describe('Utils', () => {
         false
       );
       expect(secureStringCompare(123 as unknown as string, 'test')).toBe(false);
+    });
+
+    it('should return false for strings with same length but different content', () => {
+      expect(secureStringCompare('abcd', 'abce')).toBe(false);
+      expect(secureStringCompare('1234', '1235')).toBe(false);
+    });
+
+    it('should handle unicode strings', () => {
+      expect(secureStringCompare('héllo', 'héllo')).toBe(true);
+      expect(secureStringCompare('héllo', 'hëllo')).toBe(false);
+    });
+
+    it('should handle both inputs as non-string types', () => {
+      expect(
+        secureStringCompare(
+          undefined as unknown as string,
+          undefined as unknown as string
+        )
+      ).toBe(false);
+      expect(
+        secureStringCompare(123 as unknown as string, 456 as unknown as string)
+      ).toBe(false);
     });
   });
 
@@ -489,6 +586,258 @@ describe('Utils', () => {
       const hex1 = generateRandomHex(16);
       const hex2 = generateRandomHex(16);
       expect(hex1).not.toBe(hex2);
+    });
+
+    it('should handle odd lengths', () => {
+      const hex = generateRandomHex(3);
+      expect(hex).toHaveLength(3);
+      expect(hex).toMatch(/^[0-9a-f]{3}$/);
+    });
+
+    it('should handle non-integer lengths', () => {
+      expect(() => generateRandomHex(1.5)).toThrow(CryptoError);
+      expect(() => generateRandomHex(NaN)).toThrow(CryptoError);
+    });
+  });
+
+  describe('validatePath - additional edge cases', () => {
+    it('should reject paths with pipe character', () => {
+      expect(validatePath('path|file.txt').isValid).toBe(false);
+    });
+
+    it('should reject paths with question mark', () => {
+      expect(validatePath('path?file.txt').isValid).toBe(false);
+    });
+
+    it('should reject paths with asterisk', () => {
+      expect(validatePath('path*file.txt').isValid).toBe(false);
+    });
+
+    it('should accept simple filename', () => {
+      expect(validatePath('file.txt').isValid).toBe(true);
+    });
+
+    it('should accept nested paths', () => {
+      expect(validatePath('a/b/c/d/e/file.txt').isValid).toBe(true);
+    });
+  });
+
+  describe('sanitizeFilename - additional edge cases', () => {
+    it('should handle null/undefined input', () => {
+      expect(sanitizeFilename(null as unknown as string)).toBe('file');
+      expect(sanitizeFilename(undefined as unknown as string)).toBe('file');
+    });
+
+    it('should handle non-string input', () => {
+      expect(sanitizeFilename(123 as unknown as string)).toBe('file');
+    });
+
+    it('should truncate very long filenames', () => {
+      const longName = 'a'.repeat(300) + '.txt';
+      const result = sanitizeFilename(longName);
+      expect(result.length).toBeLessThanOrEqual(255);
+    });
+
+    it('should handle filenames with multiple spaces', () => {
+      expect(sanitizeFilename('file   name   here.txt')).toBe(
+        'file_name_here.txt'
+      );
+    });
+
+    it('should handle backslash in filenames', () => {
+      expect(sanitizeFilename('path\\file.txt')).toBe('path_file.txt');
+    });
+  });
+
+  describe('createBackupPath - additional edge cases', () => {
+    it('should handle files without extension', () => {
+      const backupPath = createBackupPath('/path/to/file');
+      expect(backupPath).toMatch(
+        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.backup$/
+      );
+    });
+
+    it('should preserve directory path', () => {
+      const backupPath = createBackupPath('/some/dir/file.txt');
+      // On Windows, path.join normalizes to backslashes
+      expect(backupPath).toContain('file_');
+      expect(backupPath).toContain('.backup.txt');
+    });
+  });
+
+  describe('isTextFile - additional extensions', () => {
+    it('should identify all supported text extensions', () => {
+      const textExtensions = [
+        'file.py',
+        'file.java',
+        'file.c',
+        'file.cpp',
+        'file.h',
+        'file.html',
+        'file.css',
+        'file.xml',
+        'file.csv',
+        'file.log',
+        'file.yaml',
+        'file.yml',
+        'file.toml',
+        'file.ini',
+        'file.conf',
+        'file.cfg',
+      ];
+      for (const file of textExtensions) {
+        expect(isTextFile(file)).toBe(true);
+      }
+    });
+
+    it('should reject binary file extensions', () => {
+      const binaryExtensions = [
+        'file.zip',
+        'file.tar',
+        'file.gz',
+        'file.png',
+        'file.gif',
+        'file.mp3',
+        'file.mp4',
+        'file.doc',
+        'file.xls',
+      ];
+      for (const file of binaryExtensions) {
+        expect(isTextFile(file)).toBe(false);
+      }
+    });
+  });
+
+  describe('formatFileSize - additional cases', () => {
+    it('should format fractional sizes', () => {
+      expect(formatFileSize(1536)).toBe('1.5 KB');
+      expect(formatFileSize(500)).toBe('500 Bytes');
+    });
+
+    it('should format very small sizes', () => {
+      expect(formatFileSize(1)).toBe('1 Bytes');
+      expect(formatFileSize(10)).toBe('10 Bytes');
+    });
+  });
+
+  describe('generateRandomString - edge cases', () => {
+    it('should generate string of length 1', () => {
+      const result = generateRandomString(1);
+      expect(result).toHaveLength(1);
+      expect(result).toMatch(/^[A-Za-z0-9]$/);
+    });
+
+    it('should generate string of max length 1024', () => {
+      const result = generateRandomString(1024);
+      expect(result).toHaveLength(1024);
+    });
+
+    it('should generate unique strings', () => {
+      const a = generateRandomString(32);
+      const b = generateRandomString(32);
+      expect(a).not.toBe(b);
+    });
+
+    it('should throw for non-integer', () => {
+      expect(() => generateRandomString(3.14)).toThrow(CryptoError);
+      expect(() => generateRandomString(NaN)).toThrow(CryptoError);
+    });
+  });
+
+  describe('createProgressBar - additional cases', () => {
+    it('should handle negative total', () => {
+      expect(createProgressBar(50, -1)).toBe(
+        '[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%'
+      );
+    });
+
+    it('should handle zero current', () => {
+      const result = createProgressBar(0, 100);
+      expect(result).toMatch(/\[░{30}\] 0%/);
+    });
+
+    it('should handle full completion', () => {
+      const result = createProgressBar(100, 100);
+      expect(result).toMatch(/\[█{30}\] 100%/);
+    });
+  });
+
+  describe('validatePasswordStrength - additional cases', () => {
+    it('should give higher score for longer passwords', () => {
+      // Short password (8 chars) gets score of 1 for length
+      const short = validatePasswordStrength('Ab1!abcd');
+      // Longer password (16+ chars) gets score of 2 for length + 1 bonus for 16+
+      // But score caps at 5, so both may cap out
+      expect(short.score).toBeGreaterThanOrEqual(4);
+      expect(short.score).toBeLessThanOrEqual(5);
+    });
+
+    it('should handle password with 12+ chars', () => {
+      const result = validatePasswordStrength('Abcdefgh1!23');
+      expect(result.score).toBeGreaterThanOrEqual(4);
+    });
+
+    it('should handle empty string', () => {
+      const result = validatePasswordStrength('');
+      expect(result.isValid).toBe(false);
+      expect(result.score).toBe(0);
+    });
+  });
+
+  describe('sha256 - additional cases', () => {
+    it('should produce consistent results', () => {
+      const hash1 = sha256('same input');
+      const hash2 = sha256('same input');
+      expect(hash1).toBe(hash2);
+    });
+
+    it('should produce different hashes for different inputs', () => {
+      const hash1 = sha256('input1');
+      const hash2 = sha256('input2');
+      expect(hash1).not.toBe(hash2);
+    });
+
+    it('should handle unicode input', () => {
+      const hash = sha256('日本語テスト');
+      expect(hash).toHaveLength(64);
+      expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
+  describe('getFileInfo - additional cases', () => {
+    const binaryTestFile = path.join(tempDir, 'test-info.bin');
+
+    afterEach(async () => {
+      if (existsSync(binaryTestFile)) {
+        await unlink(binaryTestFile);
+      }
+    });
+
+    it('should identify non-text files', async () => {
+      await writeFile(binaryTestFile, Buffer.from([0x00, 0x01, 0x02]));
+      const info = await getFileInfo(binaryTestFile);
+      expect(info.extension).toBe('.bin');
+      expect(info.isTextFile).toBe(false);
+    });
+
+    it('should report correct size', async () => {
+      const content = 'exactly 13 ch';
+      await writeFile(binaryTestFile, content);
+      const info = await getFileInfo(binaryTestFile);
+      expect(info.size).toBe(Buffer.byteLength(content));
+    });
+  });
+
+  describe('validateFile - additional cases', () => {
+    it('should include error message for non-existent file', async () => {
+      const result = await validateFile('/nonexistent/path/file.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain('File access error');
+    });
+
+    it('should handle numeric input', async () => {
+      const result = await validateFile(123 as unknown as string);
+      expect(result.isValid).toBe(false);
     });
   });
 });

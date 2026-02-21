@@ -1,7 +1,13 @@
 import crypto from 'node:crypto';
 import argon2 from 'argon2';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  unlinkSync,
+} from 'node:fs';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { dirname } from 'node:path';
@@ -38,6 +44,38 @@ export class CryptoManager {
     this.ivLength = 12; // 96 bits for GCM
     this.saltLength = 32; // 256 bits
     this.tagLength = 16; // 128 bits for GCM
+
+    // Validate numeric options
+    if (
+      options.memoryCost !== undefined &&
+      (!Number.isInteger(options.memoryCost) || options.memoryCost <= 0)
+    ) {
+      throw new CryptoError(
+        'memoryCost must be a positive integer',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_MEMORY_COST'
+      );
+    }
+    if (
+      options.timeCost !== undefined &&
+      (!Number.isInteger(options.timeCost) || options.timeCost <= 0)
+    ) {
+      throw new CryptoError(
+        'timeCost must be a positive integer',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_TIME_COST'
+      );
+    }
+    if (
+      options.parallelism !== undefined &&
+      (!Number.isInteger(options.parallelism) || options.parallelism <= 0)
+    ) {
+      throw new CryptoError(
+        'parallelism must be a positive integer',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PARALLELISM'
+      );
+    }
 
     // Store default passphrase if provided and not empty
     if (
@@ -425,11 +463,13 @@ export class CryptoManager {
 
       // Decrypt the data
       const decrypted = this.decryptData(encrypted, key, iv, tag);
+      const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory
       this.secureClear(key);
+      this.secureClear(decrypted);
 
-      return decrypted.toString('utf8');
+      return result;
     } catch (error) {
       if (error instanceof CryptoError) {
         throw error;
@@ -568,11 +608,13 @@ export class CryptoManager {
 
       // Decrypt the data
       const decrypted = this.decryptData(encrypted, key, iv, tag);
+      const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory
       this.secureClear(key);
+      this.secureClear(decrypted);
 
-      return decrypted.toString('utf8');
+      return result;
     } catch (error) {
       if (error instanceof CryptoError) {
         throw error;
@@ -684,7 +726,7 @@ export class CryptoManager {
       // Clean up partial output file if it exists
       try {
         if (existsSync(outputPath)) {
-          await writeFile(outputPath, ''); // Clear the file
+          await unlink(outputPath);
         }
       } catch {
         // Ignore cleanup errors
@@ -702,7 +744,7 @@ export class CryptoManager {
   }
 
   /**
-   * Decrypt file with password (streaming for large files)
+   * Decrypt file with password (reads entire file into memory)
    * @param inputPath - Input file path
    * @param outputPath - Output file path
    * @param password - Decryption password (optional if default passphrase is set)
@@ -798,11 +840,13 @@ export class CryptoManager {
 
       // Clear sensitive data
       this.secureClear(key);
+      this.secureClear(decrypted);
+      this.secureClear(fileBuffer);
     } catch (error) {
       // Clean up partial output file if it exists
       try {
         if (existsSync(outputPath)) {
-          await writeFile(outputPath, ''); // Clear the file
+          await unlink(outputPath);
         }
       } catch {
         // Ignore cleanup errors
@@ -919,11 +963,12 @@ export class CryptoManager {
 
       // Clear sensitive data
       this.secureClear(key);
+      this.secureClear(inputData);
     } catch (error) {
       // Clean up partial output file if it exists
       try {
         if (existsSync(outputPath)) {
-          writeFileSync(outputPath, ''); // Clear the file
+          unlinkSync(outputPath);
         }
       } catch {
         // Ignore cleanup errors
@@ -1037,11 +1082,13 @@ export class CryptoManager {
 
       // Clear sensitive data
       this.secureClear(key);
+      this.secureClear(decrypted);
+      this.secureClear(fileBuffer);
     } catch (error) {
       // Clean up partial output file if it exists
       try {
         if (existsSync(outputPath)) {
-          writeFileSync(outputPath, ''); // Clear the file
+          unlinkSync(outputPath);
         }
       } catch {
         // Ignore cleanup errors

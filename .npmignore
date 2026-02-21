@@ -70,6 +70,11 @@ logs/
 tmp/
 temp/
 
+# AI
+.claude/
+claude/
+CLAUDE.md
+
 # Cache directories
 .npm
 .eslintcache

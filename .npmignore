@@ -4,6 +4,9 @@ __tests__/
 *.ts
 !*.d.ts
 
+# Benchmark suite (development-only — runs against dist/ on the host machine)
+bench/
+
 # Development and build configuration
 tsconfig.json
 jest.config.js
@@ -36,10 +39,12 @@ example-*.ts
 examples/
 demo/
 
-# Documentation (keep README.md and LICENSE as they're in package.json files)
+# Documentation (keep README.md, SECURITY.md, and CHANGELOG.md as they're in package.json files)
 docs/
 *.md
 !README.md
+!SECURITY.md
+!CHANGELOG.md
 
 # IDE and editor files
 .vscode/

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Cancel previous in-progress runs of this workflow on the same ref so
+# that pushes that supersede each other don't pile up the queue.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Run every (os, node) combination to completion even if one fails so we
+      # see the full failure surface rather than the first failing combo.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` performs a clean install from the lockfile and runs lifecycle
+      # scripts. The `argon2` native dependency is in `optionalDependencies` so
+      # if its prebuild + node-gyp fallback fail on a specific runner we still
+      # install the rest of the package and the sync (PBKDF2) tests run.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      # Run after build/test/lint so failures from earlier steps don't get
+      # masked by an audit failure (and vice-versa). `--audit-level=high`
+      # matches the policy in SECURITY.md: high+critical block the build,
+      # moderate+low are tracked but non-blocking.
+      - name: Audit dependencies (high+critical only)
+        run: npm audit --audit-level=high

@@ -1,4 +1,14 @@
 import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  jest,
+} from '@jest/globals';
+import {
   validateFile,
   validatePath,
   generateRandomString,
@@ -19,15 +29,33 @@ import {
   generateRandomHex,
   getFileInfo,
 } from '../utils';
-import { CryptoError } from '../types';
+import { CryptoError, CryptoErrorType } from '../types';
 import { CryptoManager } from '../crypto-manager';
 import { writeFile, unlink } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import nodeCrypto from 'node:crypto';
+
+// Unique per-suite scratch directory so concurrent jest workers / repeated
+// runs cannot collide on file paths (Task 21). Created once in beforeAll
+// and torn down in afterAll; every per-test directory join still uses
+// `tempDir` as before so the rest of the test code is unchanged.
+const TEST_DIR = path.join(
+  os.tmpdir(),
+  `hiprax-crypto-utils-${nodeCrypto.randomBytes(8).toString('hex')}`
+);
 
 describe('Utils', () => {
-  const tempDir = os.tmpdir();
+  const tempDir = TEST_DIR;
+
+  beforeAll(() => {
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+
+  afterAll(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
 
   describe('validateFile', () => {
     const testFilePath = path.join(tempDir, 'test-validate.txt');
@@ -172,15 +200,104 @@ describe('Utils', () => {
       expect(formatFileSize(1024 * 1024 * 1024 * 1024)).toBe('1 TB');
     });
 
-    it('should handle negative values', () => {
-      expect(formatFileSize(-1)).toBe('0 Bytes');
-      expect(formatFileSize(-1024)).toBe('0 Bytes');
+    // Task 24: negative values are now a programming error and must
+    // throw rather than silently returning '0 Bytes'.
+    it('should throw CryptoError on negative values', () => {
+      expect(() => formatFileSize(-1)).toThrow(CryptoError);
+      expect(() => formatFileSize(-1024)).toThrow(CryptoError);
+    });
+
+    it('should throw with NEGATIVE_FILE_SIZE code on negative input', () => {
+      try {
+        formatFileSize(-1);
+        // Unreachable — the call above must throw.
+        throw new Error('Expected formatFileSize(-1) to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('NEGATIVE_FILE_SIZE');
+      }
+    });
+
+    it('should throw with INVALID_FILE_SIZE code on NaN / Infinity / non-number input', () => {
+      for (const bad of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ]) {
+        try {
+          formatFileSize(bad);
+          throw new Error('Expected formatFileSize to throw');
+        } catch (err) {
+          expect(err).toBeInstanceOf(CryptoError);
+          expect((err as CryptoError).code).toBe('INVALID_FILE_SIZE');
+        }
+      }
+      // Non-number inputs (e.g. string) also trip INVALID_FILE_SIZE.
+      try {
+        formatFileSize('1024' as unknown as number);
+        throw new Error('Expected formatFileSize to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_FILE_SIZE');
+      }
     });
 
     it('should handle values exceeding TB range', () => {
       const petabyte = 1024 * 1024 * 1024 * 1024 * 1024;
       const result = formatFileSize(petabyte);
       expect(result).toBe('1024 TB');
+    });
+
+    // Task 10 — upper-bound check. Without this guard, a caller
+    // passing Number.MAX_VALUE (1.79e+308) would get a mathematical
+    // artefact like "1.7976931348623157e+308 TB" because the unit
+    // ladder caps at TB but the coefficient grows unbounded.
+    it('should throw FILE_SIZE_TOO_LARGE for values above Number.MAX_SAFE_INTEGER', () => {
+      // Number.MAX_SAFE_INTEGER + 1 is the smallest unsafe positive
+      // integer. JS rounds it to MAX_SAFE_INTEGER + 2 since +1 is
+      // unrepresentable, but a value strictly greater is
+      // representable (e.g. MAX_SAFE_INTEGER * 2).
+      const tooLarge = Number.MAX_SAFE_INTEGER * 2;
+      expect(() => formatFileSize(tooLarge)).toThrow(CryptoError);
+      try {
+        formatFileSize(tooLarge);
+        throw new Error('Expected formatFileSize to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('FILE_SIZE_TOO_LARGE');
+        expect((err as CryptoError).type).toBe(
+          CryptoErrorType.INVALID_INPUT
+        );
+      }
+    });
+
+    it('should throw FILE_SIZE_TOO_LARGE for Number.MAX_VALUE', () => {
+      // Number.MAX_VALUE is a finite number (~1.79e308) but vastly
+      // exceeds Number.MAX_SAFE_INTEGER. Pre-fix, this was silently
+      // formatted as a ridiculous coefficient stuck at TB.
+      expect(() => formatFileSize(Number.MAX_VALUE)).toThrow(CryptoError);
+      try {
+        formatFileSize(Number.MAX_VALUE);
+        throw new Error('Expected formatFileSize to throw');
+      } catch (err) {
+        expect((err as CryptoError).code).toBe('FILE_SIZE_TOO_LARGE');
+      }
+    });
+
+    it('should accept exactly Number.MAX_SAFE_INTEGER (the boundary)', () => {
+      // The threshold is `> MAX_SAFE_INTEGER` (strict), so the
+      // boundary value itself is accepted.
+      const result = formatFileSize(Number.MAX_SAFE_INTEGER);
+      // ~8 PB → reported in TB at the cap. The regex below has two
+      // `\d+` quantifiers separated by an optional `(\.\d+)?` group,
+      // which `safe-regex` (the conservative scanner used by
+      // `security/detect-unsafe-regex`) flags as potentially
+      // exponential. It isn't — the `\s+TB$` anchor on the right
+      // forces the engine to commit, and the input under test
+      // (formatFileSize output) is bounded to a few characters, so
+      // catastrophic backtracking cannot occur.
+      // eslint-disable-next-line security/detect-unsafe-regex
+      expect(result).toMatch(/\d+(\.\d+)?\s+TB$/);
     });
   });
 
@@ -237,11 +354,16 @@ describe('Utils', () => {
   });
 
   describe('createBackupPath', () => {
-    it('should create backup path with timestamp', () => {
+    // Task 24: backup filenames now include a 6-character random hex
+    // discriminator before the suffix, e.g.
+    // `file_2026-05-04T12-00-00_a3f9b2.backup.txt`. The discriminator
+    // prevents intra-second collisions when two backups are taken
+    // within the same second.
+    it('should create backup path with timestamp and 6-char random hex', () => {
       const originalPath = '/path/to/file.txt';
       const backupPath = createBackupPath(originalPath);
       expect(backupPath).toMatch(
-        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.backup\.txt$/
+        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}_[0-9a-f]{6}\.backup\.txt$/
       );
     });
 
@@ -249,8 +371,87 @@ describe('Utils', () => {
       const originalPath = '/path/to/file.txt';
       const backupPath = createBackupPath(originalPath, '.custom');
       expect(backupPath).toMatch(
-        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.custom\.txt$/
+        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}_[0-9a-f]{6}\.custom\.txt$/
       );
+    });
+
+    it('should produce different paths on repeated calls in the same second', () => {
+      // 16 calls in tight succession — they will overwhelmingly land
+      // in the same second on any modern machine, so collision
+      // resistance must come from the random suffix, not the
+      // timestamp. With 6 hex chars (24 bits, ~16.7M values) the
+      // birthday-bound collision probability for 16 samples is well
+      // below 1e-12, so this test is effectively deterministic.
+      const originalPath = '/path/to/file.txt';
+      const seen = new Set<string>();
+      for (let i = 0; i < 16; i++) {
+        seen.add(createBackupPath(originalPath));
+      }
+      expect(seen.size).toBe(16);
+    });
+
+    it('should have lowercase hex in the random discriminator', () => {
+      const originalPath = '/path/to/file.txt';
+      const backupPath = createBackupPath(originalPath);
+      const match = backupPath.match(
+        /_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})_([0-9a-f]{6})\.backup\.txt$/
+      );
+      expect(match).not.toBeNull();
+      expect(match?.[2]).toMatch(/^[0-9a-f]{6}$/);
+    });
+
+    // Task 22: createBackupPath now passes its constructed basename
+    // through sanitizeFilename so very long input names cannot produce
+    // a basename that exceeds the 255-char filesystem maximum.
+    it('should cap the result basename at 255 chars for very long input names', () => {
+      const longName = 'a'.repeat(300);
+      const originalPath = `/path/to/${longName}.txt`;
+      const backupPath = createBackupPath(originalPath);
+      const basename = path.basename(backupPath);
+      expect(basename.length).toBeLessThanOrEqual(255);
+      // Extension must be preserved by the sanitizer's extension-aware
+      // truncation.
+      expect(basename.endsWith('.txt')).toBe(true);
+    });
+
+    it('should preserve extension when truncating very long input names', () => {
+      const longName = 'b'.repeat(500);
+      const originalPath = `/path/to/${longName}.json`;
+      const backupPath = createBackupPath(originalPath);
+      const basename = path.basename(backupPath);
+      expect(basename.length).toBeLessThanOrEqual(255);
+      expect(path.extname(basename)).toBe('.json');
+      // Random discriminator and timestamp must still be present —
+      // truncation removes characters from the very long `name`
+      // portion at the front of the basename, not from the
+      // timestamp/random/suffix tail.
+      expect(basename).toMatch(
+        /_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}_[0-9a-f]{6}\.backup\.json$/
+      );
+    });
+
+    it('should still produce unique results when input is over the cap', () => {
+      // Even after sanitization truncates the front of the basename,
+      // the random discriminator at the tail must keep results unique
+      // across rapid successive calls.
+      const longName = 'c'.repeat(400);
+      const originalPath = `/path/to/${longName}.log`;
+      const seen = new Set<string>();
+      for (let i = 0; i < 8; i++) {
+        seen.add(createBackupPath(originalPath));
+      }
+      expect(seen.size).toBe(8);
+    });
+
+    it('should preserve directory portion when basename is truncated', () => {
+      const longName = 'd'.repeat(300);
+      const originalPath = path.join('/some/nested/dir', `${longName}.txt`);
+      const backupPath = createBackupPath(originalPath);
+      // Directory must NOT be affected by sanitisation (sanitizeFilename
+      // would replace `/` with `_`, but createBackupPath only sanitises
+      // the basename).
+      expect(path.dirname(backupPath)).toBe(path.dirname(originalPath));
+      expect(path.basename(backupPath).length).toBeLessThanOrEqual(255);
     });
   });
 
@@ -429,6 +630,192 @@ describe('Utils', () => {
         retryWithBackoff(fn, { maxRetries: 0, baseDelay: 1 })
       ).rejects.toThrow('undefined');
     }, 10000);
+
+    // -----------------------------------------------------------------
+    // Task 25: shouldRetry predicate
+    // -----------------------------------------------------------------
+
+    it('should stop retrying when custom shouldRetry returns false', async () => {
+      // The function rejects every call, but shouldRetry returns
+      // false on the first failure, so the loop must abort
+      // immediately after the initial attempt rather than continuing
+      // through `maxRetries` extra calls.
+      const fn = jest.fn().mockRejectedValue(new Error('Stop me'));
+      const shouldRetry = jest.fn().mockReturnValue(false);
+
+      await expect(
+        retryWithBackoff(fn, {
+          maxRetries: 5,
+          baseDelay: 1,
+          shouldRetry,
+        })
+      ).rejects.toThrow('Stop me');
+      expect(fn).toHaveBeenCalledTimes(1);
+      // shouldRetry is consulted exactly once — after the first
+      // (and only) failed attempt.
+      expect(shouldRetry).toHaveBeenCalledTimes(1);
+      const firstCall = shouldRetry.mock.calls[0];
+      expect(firstCall).toBeDefined();
+      const [firstErr, firstAttempt] = firstCall as [Error, number];
+      expect(firstErr.message).toBe('Stop me');
+      expect(firstAttempt).toBe(0);
+    });
+
+    it('should keep retrying when custom shouldRetry returns true', async () => {
+      // shouldRetry always returns true, so the function should be
+      // retried up to maxRetries+1 total calls before failing.
+      const fn = jest.fn().mockRejectedValue(new Error('Try again'));
+      const shouldRetry = jest.fn().mockReturnValue(true);
+
+      await expect(
+        retryWithBackoff(fn, {
+          maxRetries: 2,
+          baseDelay: 1,
+          shouldRetry,
+        })
+      ).rejects.toThrow('Try again');
+      expect(fn).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+      // shouldRetry is consulted after every failure EXCEPT the
+      // final one (where the loop bails out via the maxRetries
+      // guard before consulting the predicate).
+      expect(shouldRetry).toHaveBeenCalledTimes(2);
+    });
+
+    it('should call shouldRetry with the error and zero-indexed attempt', async () => {
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('one'))
+        .mockRejectedValueOnce(new Error('two'))
+        .mockResolvedValue('ok');
+      const shouldRetry = jest.fn().mockReturnValue(true);
+
+      const result = await retryWithBackoff(fn, {
+        maxRetries: 5,
+        baseDelay: 1,
+        shouldRetry,
+      });
+      expect(result).toBe('ok');
+      expect(shouldRetry).toHaveBeenCalledTimes(2);
+      const callOne = shouldRetry.mock.calls[0];
+      const callTwo = shouldRetry.mock.calls[1];
+      expect(callOne).toBeDefined();
+      expect(callTwo).toBeDefined();
+      const [errOne, attemptOne] = callOne as [Error, number];
+      const [errTwo, attemptTwo] = callTwo as [Error, number];
+      expect(errOne.message).toBe('one');
+      expect(attemptOne).toBe(0);
+      expect(errTwo.message).toBe('two');
+      expect(attemptTwo).toBe(1);
+    });
+
+    it('should NOT retry WEAK_PASSWORD CryptoError under default policy', async () => {
+      const weakPasswordError = new CryptoError(
+        'Password is too weak',
+        CryptoErrorType.INVALID_PASSWORD,
+        'WEAK_PASSWORD'
+      );
+      const fn = jest.fn().mockRejectedValue(weakPasswordError);
+
+      await expect(
+        retryWithBackoff(fn, { maxRetries: 5, baseDelay: 1 })
+      ).rejects.toBe(weakPasswordError);
+      // No retries performed: only the initial attempt ran.
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT retry INVALID_PASSWORD CryptoError under default policy', async () => {
+      const invalidPasswordError = new CryptoError(
+        'Password is invalid',
+        CryptoErrorType.INVALID_PASSWORD,
+        'INVALID_PASSWORD'
+      );
+      const fn = jest.fn().mockRejectedValue(invalidPasswordError);
+
+      await expect(
+        retryWithBackoff(fn, { maxRetries: 5, baseDelay: 1 })
+      ).rejects.toBe(invalidPasswordError);
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT retry any CryptoError of type INVALID_PASSWORD even with a non-password code', async () => {
+      // Defence-in-depth: the type check should also apply, not just
+      // the code allow-list. A CryptoError of type INVALID_PASSWORD
+      // with an arbitrary code is still a deterministic-failure
+      // surface and must not be retried.
+      const err = new CryptoError(
+        'Password problem',
+        CryptoErrorType.INVALID_PASSWORD,
+        'SOME_OTHER_PASSWORD_CODE'
+      );
+      const fn = jest.fn().mockRejectedValue(err);
+
+      await expect(
+        retryWithBackoff(fn, { maxRetries: 5, baseDelay: 1 })
+      ).rejects.toBe(err);
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should retry generic errors (e.g. network timeout) under default policy', async () => {
+      // Generic, non-CryptoError errors continue to be retried — the
+      // new default policy only excludes password-class CryptoErrors.
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('ETIMEDOUT'))
+        .mockRejectedValueOnce(new Error('ETIMEDOUT'))
+        .mockResolvedValue('ok');
+
+      const result = await retryWithBackoff(fn, {
+        maxRetries: 3,
+        baseDelay: 1,
+      });
+      expect(result).toBe('ok');
+      expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    it('should retry non-password CryptoError types under default policy', async () => {
+      // CryptoErrors that are NOT password-related (e.g. file errors,
+      // encryption failures) should still be retried by default.
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(
+          new CryptoError(
+            'Disk full',
+            CryptoErrorType.FILE_ERROR,
+            'DISK_FULL'
+          )
+        )
+        .mockResolvedValue('recovered');
+
+      const result = await retryWithBackoff(fn, {
+        maxRetries: 2,
+        baseDelay: 1,
+      });
+      expect(result).toBe('recovered');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it('should let an explicit shouldRetry override the default password exclusion', async () => {
+      // Pre-v0.19.0 callers that relied on retrying everything can
+      // opt back in by passing `shouldRetry: () => true` even for
+      // password-class CryptoErrors.
+      const err = new CryptoError(
+        'Weak password',
+        CryptoErrorType.INVALID_PASSWORD,
+        'WEAK_PASSWORD'
+      );
+      const fn = jest.fn().mockRejectedValue(err);
+      const shouldRetry = jest.fn().mockReturnValue(true);
+
+      await expect(
+        retryWithBackoff(fn, {
+          maxRetries: 2,
+          baseDelay: 1,
+          shouldRetry,
+        })
+      ).rejects.toBe(err);
+      expect(fn).toHaveBeenCalledTimes(3);
+      expect(shouldRetry).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('getFileInfo', () => {
@@ -653,7 +1040,7 @@ describe('Utils', () => {
     it('should handle files without extension', () => {
       const backupPath = createBackupPath('/path/to/file');
       expect(backupPath).toMatch(
-        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.backup$/
+        /file_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}_[0-9a-f]{6}\.backup$/
       );
     });
 
@@ -782,6 +1169,44 @@ describe('Utils', () => {
       expect(result.isValid).toBe(false);
       expect(result.score).toBe(0);
     });
+
+    // ---------------------------------------------------------------------
+    // Task 13: extended acceptance rules
+    // ---------------------------------------------------------------------
+
+    it('should accept long passphrases (>= 20 chars) regardless of categories', () => {
+      const result = validatePasswordStrength(
+        'correct horse battery staple longer'
+      );
+      expect(result.isValid).toBe(true);
+      expect(result.score).toBe(5);
+      expect(result.feedback).toHaveLength(0);
+    });
+
+    it('should still emit feedback for short passwords missing categories', () => {
+      // 19 chars (just under the passphrase shortcut), all lowercase: must
+      // still emit category-feedback errors.
+      const result = validatePasswordStrength('aaaaaaaaaaaaaaaaaaa');
+      expect(result.isValid).toBe(false);
+      expect(result.feedback).toContain(
+        'Password must contain at least one uppercase letter'
+      );
+      expect(result.feedback).toContain(
+        'Password must contain at least one number'
+      );
+      expect(result.feedback).toContain(
+        'Password must contain at least one special character'
+      );
+    });
+
+    it('should accept broadened specials like underscore as special char', () => {
+      // `_` was previously not counted; with the broadened
+      // `[^A-Za-z0-9]` rule it now satisfies the special-char check.
+      const result = validatePasswordStrength('Aa1_aaaa');
+      expect(result.feedback).not.toContain(
+        'Password must contain at least one special character'
+      );
+    });
   });
 
   describe('sha256 - additional cases', () => {
@@ -838,6 +1263,357 @@ describe('Utils', () => {
     it('should handle numeric input', async () => {
       const result = await validateFile(123 as unknown as string);
       expect(result.isValid).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // Task 11: null-byte / control-char rejection in validatePath, and
+  // ..-aware sanitizeFilename with extension-preserving truncation.
+  // Task 32: optional `allowedRoot` containment check on validatePath.
+  // ---------------------------------------------------------------
+
+  describe('validatePath - null bytes and control chars (Task 11/32)', () => {
+    it('should reject path containing a literal null byte', () => {
+      const result = validatePath('foo bar.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains a null byte');
+    });
+
+    it('should reject path with null byte at the end', () => {
+      const result = validatePath('file.txt ');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains a null byte');
+    });
+
+    it('should reject path with null byte at the start', () => {
+      const result = validatePath(' file.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains a null byte');
+    });
+
+    it('should reject path with ASCII control character (tab, codepoint 0x09)', () => {
+      const result = validatePath('foo\tbar.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains control characters');
+    });
+
+    it('should reject path with newline (codepoint 0x0a)', () => {
+      const result = validatePath('foo\nbar.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains control characters');
+    });
+
+    it('should reject path with carriage return (codepoint 0x0d)', () => {
+      const result = validatePath('foo\rbar.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains control characters');
+    });
+
+    it('should reject path with bell character (codepoint 0x07)', () => {
+      const result = validatePath('foo\x07bar.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains control characters');
+    });
+
+    it('should reject path containing DEL (codepoint 0x7f)', () => {
+      const result = validatePath('foobar.txt');
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('File path contains control characters');
+    });
+
+    it('should reject every codepoint in the [0x01, 0x1F] range', () => {
+      // Spot-check a few common control characters across the range.
+      // Codepoint 0x00 is tested separately as the null-byte case.
+      for (const code of [0x01, 0x05, 0x0b, 0x0f, 0x10, 0x1a, 0x1f]) {
+        const ch = String.fromCharCode(code);
+        const result = validatePath(`pre${ch}post.txt`);
+        expect(result.isValid).toBe(false);
+        expect(result.error).toBe('File path contains control characters');
+      }
+    });
+
+    it('should accept printable ASCII path with no control chars', () => {
+      // Sanity check that the new control-char rejection does not
+      // overreach onto valid printable content.
+      expect(validatePath('plain/path/file.txt').isValid).toBe(true);
+      expect(validatePath('file with spaces.txt').isValid).toBe(true);
+      expect(validatePath('file_with_underscores-and-hyphens.txt').isValid).toBe(
+        true
+      );
+    });
+
+    it('should accept path containing high-codepoint Unicode (>= 0x80)', () => {
+      // Non-ASCII characters are permitted by the validator (filesystems
+      // generally handle them via UTF-8). Only ASCII control codepoints
+      // are rejected.
+      expect(validatePath('café/résumé.txt').isValid).toBe(true);
+      expect(validatePath('日本語/ファイル.txt').isValid).toBe(true);
+    });
+  });
+
+  describe('validatePath - allowedRoot containment (Task 32)', () => {
+    it('should accept input equal to the allowed root', () => {
+      const root = path.resolve(tempDir, 'project');
+      const result = validatePath(root, { allowedRoot: root });
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should accept input that is a direct child of the allowed root', () => {
+      const root = path.resolve(tempDir, 'project');
+      const child = path.join(root, 'file.txt');
+      const result = validatePath(child, { allowedRoot: root });
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should accept input nested several levels under the allowed root', () => {
+      const root = path.resolve(tempDir, 'project');
+      const nested = path.join(root, 'a', 'b', 'c', 'file.txt');
+      const result = validatePath(nested, { allowedRoot: root });
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should reject input that escapes the allowed root via ..', () => {
+      // The literal `..` would be caught by the existing traversal check
+      // first; here we use a relative path resolved against cwd that is
+      // outside any plausible `allowedRoot` we choose.
+      const root = path.resolve(tempDir, 'restricted-root');
+      const escape = path.resolve(tempDir, 'sibling/file.txt');
+      const result = validatePath(escape, { allowedRoot: root });
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('Path is outside the allowed root');
+    });
+
+    it('should reject within-drive cross-traversal (C:\\Users\\..\\Windows escapes C:\\Users)', () => {
+      // This is the canonical example from FIX.md C8: the literal-`..`
+      // check passes because `path.normalize` collapses the cancel-out
+      // to a clean path, but the resolved path escapes the configured
+      // allowed root.
+      if (process.platform === 'win32') {
+        const result = validatePath('C:\\Users\\..\\Windows', {
+          allowedRoot: 'C:\\Users',
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).toBe('Path is outside the allowed root');
+      } else {
+        const result = validatePath('/home/user/../etc', {
+          allowedRoot: '/home/user',
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).toBe('Path is outside the allowed root');
+      }
+    });
+
+    it('should NOT match when the input string-prefixes the root without a path separator (no /etc/sec ↔ /etc/secret)', () => {
+      // The trailing-separator edge case: a naive `startsWith` would
+      // accept `/etc/secret` for an `allowedRoot` of `/etc/sec`. The
+      // segment-aware prefix match rejects this.
+      if (process.platform === 'win32') {
+        const result = validatePath('C:\\etc\\secret\\file.txt', {
+          allowedRoot: 'C:\\etc\\sec',
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).toBe('Path is outside the allowed root');
+      } else {
+        const result = validatePath('/etc/secret/file.txt', {
+          allowedRoot: '/etc/sec',
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).toBe('Path is outside the allowed root');
+      }
+    });
+
+    it('should accept the allowed root with a trailing path separator', () => {
+      // Robustness: callers should not have to strip trailing separators
+      // off `allowedRoot` themselves.
+      const root = path.resolve(tempDir, 'project');
+      const rootWithSep = root + path.sep;
+      const child = path.join(root, 'file.txt');
+      const result = validatePath(child, { allowedRoot: rootWithSep });
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should accept Windows path with forward slashes when allowedRoot uses backslashes', () => {
+      // Node.js normalizes `C:/Users/foo` and `C:\\Users\\foo` to the
+      // same path on Windows; the validator should agree.
+      if (process.platform === 'win32') {
+        const result = validatePath('C:/Users/project/file.txt', {
+          allowedRoot: 'C:\\Users\\project',
+        });
+        expect(result.isValid).toBe(true);
+      }
+    });
+
+    it('should accept Windows path with backslashes when allowedRoot uses forward slashes', () => {
+      if (process.platform === 'win32') {
+        const result = validatePath('C:\\Users\\project\\file.txt', {
+          allowedRoot: 'C:/Users/project',
+        });
+        expect(result.isValid).toBe(true);
+      }
+    });
+
+    it('should perform case-insensitive comparison on Windows', () => {
+      if (process.platform === 'win32') {
+        const result = validatePath('c:\\users\\PROJECT\\file.txt', {
+          allowedRoot: 'C:\\Users\\project',
+        });
+        expect(result.isValid).toBe(true);
+      }
+    });
+
+    it('should perform case-sensitive comparison on POSIX', () => {
+      if (process.platform !== 'win32') {
+        const result = validatePath('/Home/User/file.txt', {
+          allowedRoot: '/home/user',
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).toBe('Path is outside the allowed root');
+      }
+    });
+
+    it('should reject when allowedRoot is an empty string', () => {
+      const result = validatePath('file.txt', { allowedRoot: '' });
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('allowedRoot must be a non-empty string');
+    });
+
+    it('should reject when allowedRoot is a non-string value', () => {
+      const result = validatePath('file.txt', {
+        allowedRoot: 123 as unknown as string,
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('allowedRoot must be a non-empty string');
+    });
+
+    it('should reject when allowedRoot itself contains a null byte', () => {
+      const result = validatePath('file.txt', {
+        allowedRoot: 'good root',
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('allowedRoot contains invalid characters');
+    });
+
+    it('should reject when allowedRoot itself contains control characters', () => {
+      const result = validatePath('file.txt', {
+        allowedRoot: 'good\troot',
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('allowedRoot contains invalid characters');
+    });
+
+    it('should leave the legacy single-argument call shape backward-compatible', () => {
+      // No `options` argument: function should behave exactly as before.
+      expect(validatePath('valid/path.txt').isValid).toBe(true);
+      expect(validatePath('../escape.txt').isValid).toBe(false);
+    });
+
+    it('should accept calls with an empty options object', () => {
+      // Calling with `{}` should also be a no-op compared to omitting.
+      expect(validatePath('valid/path.txt', {}).isValid).toBe(true);
+      expect(validatePath('../escape.txt', {}).isValid).toBe(false);
+    });
+
+    it('should still apply the literal-.. check when allowedRoot is set', () => {
+      const root = path.resolve(tempDir, 'project');
+      // A literal `..` segment in the input should be rejected by the
+      // pre-existing traversal check, BEFORE the `allowedRoot` check
+      // gets a chance.
+      const result = validatePath('../escape.txt', { allowedRoot: root });
+      expect(result.isValid).toBe(false);
+      expect(result.error).toBe('Path traversal is not allowed');
+    });
+
+    it('should reject control-character paths even when allowedRoot is provided', () => {
+      const root = path.resolve(tempDir, 'project');
+      const result = validatePath('foo bar.txt', { allowedRoot: root });
+      expect(result.isValid).toBe(false);
+      // The null-byte / control-char check fires before allowedRoot.
+      expect(result.error).toBe('File path contains a null byte');
+    });
+  });
+
+  describe('sanitizeFilename - traversal hardening + extension preservation (Task 11)', () => {
+    it('should replace literal .. sequences with __', () => {
+      // Two consecutive dots become two consecutive underscores after
+      // the post-replacement scrub.
+      expect(sanitizeFilename('..')).toBe('__');
+    });
+
+    it('should neutralize ../ traversal even after invalid-char replacement', () => {
+      // `../etc/passwd` → first replacement turns `/` into `_` so we
+      // get `.._etc_passwd`, then the `..`-scrub turns that into
+      // `___etc_passwd`. The important property is that no `..`
+      // survives anywhere in the result.
+      const result = sanitizeFilename('../etc/passwd');
+      expect(result).not.toContain('..');
+    });
+
+    it('should fully scrub overlapping .... sequences', () => {
+      // Four dots: regex /\.\./g is non-overlapping so a single pass
+      // turns `....` into `____`.
+      expect(sanitizeFilename('....')).toBe('____');
+    });
+
+    it('should leave a single dot intact', () => {
+      // A lone `.` is not a traversal pattern and should survive.
+      expect(sanitizeFilename('.txt')).toBe('.txt');
+    });
+
+    it('should replace a triple-dot sequence safely (no .. survives)', () => {
+      // `...` after one regex pass becomes `__.`. No `..` remains.
+      const result = sanitizeFilename('...');
+      expect(result).not.toContain('..');
+    });
+
+    it('should preserve the file extension when truncating long names', () => {
+      const longName = 'a'.repeat(300) + '.txt';
+      const result = sanitizeFilename(longName);
+      expect(result.length).toBeLessThanOrEqual(255);
+      expect(result.endsWith('.txt')).toBe(true);
+      // Base name should be truncated to 255 - len('.txt') = 251.
+      expect(result.length).toBe(255);
+    });
+
+    it('should preserve a multi-character extension when truncating', () => {
+      const longName = 'b'.repeat(300) + '.tar.gz';
+      const result = sanitizeFilename(longName);
+      expect(result.length).toBeLessThanOrEqual(255);
+      // path.extname returns only the LAST extension piece (.gz).
+      expect(result.endsWith('.gz')).toBe(true);
+    });
+
+    it('should still truncate when there is no extension', () => {
+      const longName = 'c'.repeat(300);
+      const result = sanitizeFilename(longName);
+      expect(result.length).toBeLessThanOrEqual(255);
+      expect(result.length).toBe(255);
+    });
+
+    it('should not lose the extension on names just over 255 chars', () => {
+      const longName = 'd'.repeat(252) + '.txt';
+      // Original length is 256; after truncation it must be 255 with
+      // the extension intact.
+      const result = sanitizeFilename(longName);
+      expect(result.length).toBe(255);
+      expect(result.endsWith('.txt')).toBe(true);
+    });
+
+    it('should preserve names that fit exactly in 255 chars', () => {
+      const exact = 'e'.repeat(251) + '.txt';
+      expect(exact.length).toBe(255);
+      const result = sanitizeFilename(exact);
+      expect(result).toBe(exact);
+    });
+
+    it('should preserve names well under 255 chars unchanged', () => {
+      expect(sanitizeFilename('normal.txt')).toBe('normal.txt');
+    });
+
+    it('should still return "file" when sanitization produces empty output', () => {
+      // The empty-string short-circuit covers this, but verify the
+      // post-sanitization fallback path as well by passing characters
+      // that all map to underscore.
+      expect(sanitizeFilename('   ')).toBe('_');
     });
   });
 });

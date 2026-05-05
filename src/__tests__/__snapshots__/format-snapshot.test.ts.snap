@@ -1,0 +1,25 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`v1 ciphertext format snapshot tests (Task 13) Argon2id v1 ciphertext (async) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + KDF output: argon2id auth tag (16 bytes) 1`] = `"63a5d08f4b3595d24167ebcf9b52376b"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) Argon2id v1 ciphertext (async) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + KDF output: argon2id ciphertext body 1`] = `"e48b463bc79c5e41a47d2364c0890187b5496860846009b7"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) Argon2id v1 ciphertext (async) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + KDF output: argon2id full hex dump 1`] = `"48504352010000004000000000010001000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbb63a5d08f4b3595d24167ebcf9b52376be48b463bc79c5e41a47d2364c0890187b5496860846009b7"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) Argon2id v1 ciphertext (async) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + KDF output: argon2id header (22 bytes) 1`] = `"48504352010000004000000000010001000000000000"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) Argon2id v1 ciphertext (async) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + KDF output: argon2id iv (12 bytes) 1`] = `"bbbbbbbbbbbbbbbbbbbbbbbb"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) Argon2id v1 ciphertext (async) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + KDF output: argon2id salt (32 bytes) 1`] = `"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) PBKDF2-SHA256 v1 ciphertext (sync) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + iteration count: pbkdf2 auth tag (16 bytes) 1`] = `"21fc67b82e7518b4dfe552950f9d3a17"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) PBKDF2-SHA256 v1 ciphertext (sync) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + iteration count: pbkdf2 ciphertext body 1`] = `"fd845e57be3f51d5148a537d26193654aed3af89ac2d3460"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) PBKDF2-SHA256 v1 ciphertext (sync) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + iteration count: pbkdf2 full hex dump 1`] = `"485043520101000003e8000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbb21fc67b82e7518b4dfe552950f9d3a17fd845e57be3f51d5148a537d26193654aed3af89ac2d3460"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) PBKDF2-SHA256 v1 ciphertext (sync) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + iteration count: pbkdf2 header (22 bytes) 1`] = `"485043520101000003e8000000000000000000000000"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) PBKDF2-SHA256 v1 ciphertext (sync) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + iteration count: pbkdf2 iv (12 bytes) 1`] = `"bbbbbbbbbbbbbbbbbbbbbbbb"`;
+
+exports[`v1 ciphertext format snapshot tests (Task 13) PBKDF2-SHA256 v1 ciphertext (sync) produces a stable v1 byte layout for fixed plaintext + password + salt + IV + iteration count: pbkdf2 salt (32 bytes) 1`] = `"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`;

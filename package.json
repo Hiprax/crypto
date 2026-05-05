@@ -1,6 +1,6 @@
 {
   "name": "@hiprax/crypto",
-  "version": "0.9.5",
+  "version": "1.3.1",
   "description": "High-security encryption/decryption library using AES-256-GCM and Argon2id",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,33 +8,32 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.js"
+      "import": "./dist/index.js"
     },
     "./crypto-manager": {
       "types": "./dist/crypto-manager.d.ts",
-      "import": "./dist/crypto-manager.js",
-      "require": "./dist/crypto-manager.js"
+      "import": "./dist/crypto-manager.js"
     },
     "./utils": {
       "types": "./dist/utils.d.ts",
-      "import": "./dist/utils.js",
-      "require": "./dist/utils.js"
-    }
+      "import": "./dist/utils.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "clean": "rimraf dist",
     "prebuild": "npm run clean",
-    "test": "jest",
-    "test:coverage": "jest --coverage",
-    "test:watch": "jest --watch",
-    "lint": "eslint src --ext .ts",
-    "lint:fix": "eslint src --ext .ts --fix",
+    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:coverage": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --coverage",
+    "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --watch",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
     "format": "prettier --write src/**/*.ts",
     "type-check": "tsc --noEmit",
-    "prepublishOnly": "npm run build && npm run test",
+    "bench": "node bench/index.mjs",
+    "prepublishOnly": "npm run lint && npm run type-check && npm run build && npm test",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -42,41 +41,52 @@
     "decryption",
     "security",
     "aes",
+    "aes-gcm",
     "argon2",
+    "argon2id",
+    "pbkdf2",
+    "authenticated-encryption",
     "crypto",
     "password",
     "file",
     "text",
-    "typescript"
+    "typescript",
+    "esm"
   ],
   "author": "Hiprax",
   "license": "MIT",
-  "dependencies": {
-    "argon2": "^0.43.0"
+  "optionalDependencies": {
+    "argon2": "^0.44.0",
+    "hash-wasm": "^4.12.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/jest": "^30.0.0",
-    "@types/node": "^24.0.4",
-    "@typescript-eslint/eslint-plugin": "^8.35.0",
-    "@typescript-eslint/parser": "^8.35.0",
-    "cross-env": "^7.0.3",
-    "eslint": "^9.29.0",
-    "eslint-config-prettier": "^10.1.5",
-    "eslint-plugin-prettier": "^5.5.1",
-    "jest": "^30.0.3",
+    "@types/node": "^25.6.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.2",
+    "@typescript-eslint/parser": "^8.59.2",
+    "cross-env": "^10.1.0",
+    "eslint": "^10.3.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "eslint-plugin-security": "^4.0.0",
+    "fast-check": "^4.7.0",
+    "jest": "^30.3.0",
     "jiti": "^2.6.1",
-    "prettier": "^3.6.2",
-    "rimraf": "^6.0.1",
-    "ts-jest": "^29.4.0",
+    "prettier": "^3.8.3",
+    "rimraf": "^6.1.3",
+    "tinybench": "^6.0.1",
+    "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.3"
+    "typescript": "^6.0.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Hiprax/crypto"
+    "url": "git+https://github.com/Hiprax/crypto.git"
   },
   "bugs": {
     "url": "https://github.com/Hiprax/crypto/issues"
@@ -85,7 +95,9 @@
   "files": [
     "dist/**/*",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"

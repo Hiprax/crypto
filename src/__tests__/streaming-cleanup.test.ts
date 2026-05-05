@@ -1,0 +1,660 @@
+/**
+ * Iteration 2 Task 18 — Cover the remaining streaming-cleanup branches
+ * left uncovered by iteration 1. The branches under test are real failure
+ * modes in production but rarely fire on a fast development filesystem
+ * with normal-sized inputs:
+ *
+ *  1. `atomicRename` copy-fallback path — fires on Windows when
+ *     `fs.rename` fails because the target file is locked but the
+ *     destination directory is still writeable. The fallback then runs
+ *     `fs.copyFile + fs.unlink` to maximise the chance the operation
+ *     completes.
+ *
+ *  2. Drain-backpressure handling in async streams — fires when the
+ *     write stream's `write()` returns `false` (its internal buffer
+ *     filled past the highWaterMark) and the producer must wait for the
+ *     `'drain'` event before sending the next chunk.
+ *
+ *  3. `progressError` tagging in encrypt vs decrypt — when a user-supplied
+ *     progress callback throws mid-stream, the error must be tagged via
+ *     `tagProgressThrow` so the outer catch block re-throws it with
+ *     identity preserved (rather than wrapping in `FILE_*_FAILED`). The
+ *     tag fires on both the encrypt and decrypt code paths via two
+ *     distinct branches.
+ *
+ *  4. `decryptFile` zero-body path — when the input ciphertext has a
+ *     v1 header + salt + iv + tag but ZERO body bytes (i.e. the
+ *     plaintext was an empty buffer), `decryptFile` skips the read
+ *     stream entirely and just calls `decipher.final()` to authenticate.
+ *     We verify this path produces a zero-byte output file and the
+ *     atomic-rename contract still holds.
+ *
+ * Each describe block is isolated in its own jest module-reset bubble so
+ * the per-suite ESM mocks (for `node:fs/promises` and similar) don't
+ * leak across tests.
+ *
+ * Note on mocking strategy: the Node ESM namespace for `node:fs` and
+ * `node:fs/promises` is read-only — `jest.spyOn` cannot mutate it
+ * directly. We use `jest.unstable_mockModule` (which works under
+ * jest's --experimental-vm-modules ESM mode) to intercept the named
+ * imports inside `crypto-manager.ts` at module-load time. Each test
+ * that needs mocked fs primitives MUST `jest.resetModules()` before
+ * installing its mocks AND before importing `../crypto-manager`, so
+ * the mocks are observable to the manager's named imports.
+ */
+import { jest } from '@jest/globals';
+import path from 'node:path';
+import os from 'node:os';
+import nodeCrypto from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  unlinkSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
+import { writeFile, unlink, readFile } from 'node:fs/promises';
+
+const TEST_DIR = path.join(
+  os.tmpdir(),
+  `hiprax-crypto-cleanup-${nodeCrypto.randomBytes(8).toString('hex')}`
+);
+
+const TEST_PASSWORD = 'MySecureP@ssw0rd123!';
+
+beforeAll(() => {
+  mkdirSync(TEST_DIR, { recursive: true });
+});
+
+afterAll(() => {
+  rmSync(TEST_DIR, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// 1. atomicRename copy-fallback path
+// ---------------------------------------------------------------------------
+
+describe('atomicRename copy-fallback (Task 18)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it('async: encryptFile uses copyFile fallback when rename fails', async () => {
+    // Capture the unmocked `node:fs/promises` BEFORE installing the
+    // mock so we can delegate from the mock to the real implementation
+    // for everything except `rename` (which we want to fail).
+    const realFsPromises = jest.requireActual<
+      typeof import('node:fs/promises')
+    >('node:fs/promises');
+
+    let renameCalls = 0;
+    let copyFileCalls = 0;
+    let unlinkCalls = 0;
+
+    jest.unstable_mockModule('node:fs/promises', () => ({
+      ...realFsPromises,
+      rename: jest.fn(async () => {
+        renameCalls += 1;
+        const e = new Error('EBUSY: simulated rename failure');
+        (e as Error & { code?: string }).code = 'EBUSY';
+        throw e;
+      }),
+      copyFile: jest.fn(async (...args: unknown[]) => {
+        copyFileCalls += 1;
+        return (
+          realFsPromises.copyFile as unknown as (
+            ...a: unknown[]
+          ) => Promise<void>
+        )(...args);
+      }),
+      unlink: jest.fn(async (...args: unknown[]) => {
+        unlinkCalls += 1;
+        return (
+          realFsPromises.unlink as unknown as (
+            ...a: unknown[]
+          ) => Promise<void>
+        )(...args);
+      }),
+    }));
+
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12, // 4 MiB — keep test fast
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'rename-fallback-input.txt');
+    const outputPath = path.join(TEST_DIR, 'rename-fallback-output.bin');
+    await writeFile(inputPath, 'hello copy-fallback');
+
+    try {
+      await cm.encryptFile(inputPath, outputPath, TEST_PASSWORD);
+
+      // Even though rename failed, the file ends up at the canonical
+      // path via copyFile fallback.
+      expect(existsSync(outputPath)).toBe(true);
+      expect(renameCalls).toBeGreaterThan(0);
+      expect(copyFileCalls).toBeGreaterThan(0);
+      // The fallback's safeUnlink call removes the temp file.
+      expect(unlinkCalls).toBeGreaterThan(0);
+
+      // The temp file is gone after the fallback ran.
+      const stray = readdirSync(TEST_DIR).filter(
+        (e) =>
+          e.startsWith('rename-fallback-output.bin.') && e.endsWith('.tmp')
+      );
+      expect(stray).toEqual([]);
+    } finally {
+      for (const p of [inputPath, outputPath]) {
+        if (existsSync(p)) await unlink(p);
+      }
+    }
+  });
+
+  it('sync: encryptFileSync uses copyFileSync fallback when renameSync fails', async () => {
+    const realFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+
+    let renameSyncCalls = 0;
+    let copyFileSyncCalls = 0;
+    let unlinkSyncCalls = 0;
+
+    jest.unstable_mockModule('node:fs', () => ({
+      ...realFs,
+      renameSync: jest.fn(() => {
+        renameSyncCalls += 1;
+        const e = new Error('EBUSY: simulated renameSync failure');
+        (e as Error & { code?: string }).code = 'EBUSY';
+        throw e;
+      }),
+      copyFileSync: jest.fn((...args: unknown[]) => {
+        copyFileSyncCalls += 1;
+        return (
+          realFs.copyFileSync as unknown as (...a: unknown[]) => void
+        )(...args);
+      }),
+      unlinkSync: jest.fn((...args: unknown[]) => {
+        unlinkSyncCalls += 1;
+        return (
+          realFs.unlinkSync as unknown as (...a: unknown[]) => void
+        )(...args);
+      }),
+    }));
+
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      pbkdf2Iterations: 1000, // Fast
+    });
+
+    const inputPath = path.join(TEST_DIR, 'rename-fallback-sync-input.txt');
+    const outputPath = path.join(TEST_DIR, 'rename-fallback-sync-output.bin');
+    writeFileSync(inputPath, 'hello sync copy-fallback');
+
+    try {
+      cm.encryptFileSync(inputPath, outputPath, TEST_PASSWORD);
+
+      expect(existsSync(outputPath)).toBe(true);
+      expect(renameSyncCalls).toBeGreaterThan(0);
+      expect(copyFileSyncCalls).toBeGreaterThan(0);
+      expect(unlinkSyncCalls).toBeGreaterThan(0);
+
+      // Verify temp file cleaned up.
+      const stray = readdirSync(TEST_DIR).filter(
+        (e) =>
+          e.startsWith('rename-fallback-sync-output.bin.') &&
+          e.endsWith('.tmp')
+      );
+      expect(stray).toEqual([]);
+    } finally {
+      for (const p of [inputPath, outputPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  });
+
+  it('async: surfaces ORIGINAL rename error when copyFile ALSO fails', async () => {
+    // The fallback is best-effort: if BOTH rename AND copyFile fail, the
+    // catch block re-throws the original rename error. We exercise that
+    // path so the line `throw error;` inside the inner catch is covered.
+    const realFsPromises = jest.requireActual<
+      typeof import('node:fs/promises')
+    >('node:fs/promises');
+
+    jest.unstable_mockModule('node:fs/promises', () => ({
+      ...realFsPromises,
+      rename: jest.fn(async () => {
+        throw new Error('rename boom');
+      }),
+      copyFile: jest.fn(async () => {
+        throw new Error('copy boom');
+      }),
+    }));
+
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(
+      TEST_DIR,
+      'rename-double-fail-input.txt'
+    );
+    const outputPath = path.join(
+      TEST_DIR,
+      'rename-double-fail-output.bin'
+    );
+    await writeFile(inputPath, 'expect both to fail');
+
+    try {
+      await expect(
+        cm.encryptFile(inputPath, outputPath, TEST_PASSWORD)
+      ).rejects.toThrow();
+      // The output never lands at the canonical path.
+      expect(existsSync(outputPath)).toBe(false);
+    } finally {
+      if (existsSync(inputPath)) await unlink(inputPath);
+      // Clean up temp files left behind because both rename + copyFile
+      // throwing means our safeUnlink never ran on the success path.
+      const stray = readdirSync(TEST_DIR).filter(
+        (e) => e.startsWith('rename-double-fail-') && e.endsWith('.tmp')
+      );
+      for (const e of stray) unlinkSync(path.join(TEST_DIR, e));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. Drain-backpressure handling
+// ---------------------------------------------------------------------------
+
+describe('drain backpressure (Task 18)', () => {
+  // The encryptFile body uses createWriteStream with the default 64 KiB
+  // highWaterMark. The trailing-tag write (`writeChunk(cipher.getAuthTag())`)
+  // lands in the internal write queue right after the body finishes
+  // streaming, which on a slow disk / large file will return false from
+  // `write()` and force the producer to await the 'drain' event. We
+  // simulate that condition by wrapping `createWriteStream` to use a tiny
+  // highWaterMark, then encrypting a >1 KiB input — the write queue fills
+  // up almost immediately and the drain branch reliably fires.
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it('encryptFile: handles writeStream backpressure (drain event)', async () => {
+    const realFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+    const realFsPromises = jest.requireActual<
+      typeof import('node:fs/promises')
+    >('node:fs/promises');
+    const originalCreateWriteStream = realFs.createWriteStream;
+
+    // Reinstall passthrough mocks for all fs modules so any leftover mock
+    // state from previous suites does NOT bleed in (ESM module-mock
+    // registrations from `jest.unstable_mockModule` persist beyond
+    // `jest.resetModules()`; explicitly re-registering with passthroughs
+    // for both modules ensures only OUR `createWriteStream` override
+    // takes effect).
+    jest.unstable_mockModule('node:fs', () => ({
+      ...realFs,
+      createWriteStream: jest.fn(
+        (
+          p: Parameters<typeof originalCreateWriteStream>[0],
+          opts?: Parameters<typeof originalCreateWriteStream>[1]
+        ) => {
+          // Force a tiny highWaterMark so write queue fills on the first
+          // chunk and `write()` returns false, exercising the
+          // outputStream.once('drain', ...) branch.
+          const merged = {
+            ...(opts as object),
+            highWaterMark: 16,
+          };
+          return originalCreateWriteStream(
+            p,
+            merged as Parameters<typeof originalCreateWriteStream>[1]
+          );
+        }
+      ),
+    }));
+    jest.unstable_mockModule('node:fs/promises', () => ({
+      ...realFsPromises,
+    }));
+
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'drain-input.bin');
+    const outputPath = path.join(TEST_DIR, 'drain-output.bin');
+    const decryptedPath = path.join(TEST_DIR, 'drain-decrypted.bin');
+    const payload = nodeCrypto.randomBytes(64 * 1024);
+    await writeFile(inputPath, payload);
+
+    try {
+      await cm.encryptFile(inputPath, outputPath, TEST_PASSWORD);
+      expect(existsSync(outputPath)).toBe(true);
+
+      // Round-trip: decrypt and assert byte equality. If the drain
+      // handling drops or reorders bytes, this fails. The decrypt path
+      // also creates write streams with the same shrunken highWaterMark
+      // so drain handling on the decrypt side is exercised too.
+      await cm.decryptFile(outputPath, decryptedPath, TEST_PASSWORD);
+      const decrypted = await readFile(decryptedPath);
+      expect(decrypted.equals(payload)).toBe(true);
+    } finally {
+      for (const p of [inputPath, outputPath, decryptedPath]) {
+        if (existsSync(p)) await unlink(p);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. progressError tagging — encrypt vs decrypt
+// ---------------------------------------------------------------------------
+
+describe('progressError tagging (Task 18)', () => {
+  // The encrypt and decrypt streaming paths each have their own `data`
+  // event listener that captures the user's throw via `tagProgressThrow`.
+  // Iteration 1 covered a single throw path generally; this fills in
+  // explicit per-direction coverage so a future regression in one but
+  // not the other surfaces. We also verify that the throw IDENTITY is
+  // preserved (i.e. the outer catch re-throws the user's class, not a
+  // CryptoError wrapper).
+  //
+  // Unlike the other Task 18 sub-suites, this one does NOT mock fs —
+  // the throw happens at the user-supplied callback, not at any fs
+  // boundary, so we exercise the real-fs path end to end.
+
+  const inputPath = path.join(TEST_DIR, 'progresstag-input.bin');
+  const encryptedPath = path.join(TEST_DIR, 'progresstag-encrypted.bin');
+  const decryptedPath = path.join(TEST_DIR, 'progresstag-decrypted.bin');
+
+  beforeEach(async () => {
+    jest.resetModules();
+    // Reinstall passthrough mocks for fs modules. ESM module-mock
+    // registrations from previous suites persist beyond
+    // `jest.resetModules()`, so we explicitly install identity-passthrough
+    // mocks here to ensure no rename-throwing mock from the
+    // atomicRename suite (above) bleeds into THIS suite's encryptFile
+    // round-trip.
+    const realFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+    const realFsPromises = jest.requireActual<
+      typeof import('node:fs/promises')
+    >('node:fs/promises');
+    jest.unstable_mockModule('node:fs', () => ({ ...realFs }));
+    jest.unstable_mockModule('node:fs/promises', () => ({
+      ...realFsPromises,
+    }));
+    // 256 KiB so the data event fires multiple times via 64 KiB chunks.
+    await writeFile(inputPath, nodeCrypto.randomBytes(256 * 1024));
+  });
+  afterEach(async () => {
+    for (const p of [inputPath, encryptedPath, decryptedPath]) {
+      if (existsSync(p)) await unlink(p);
+    }
+    jest.resetModules();
+  });
+
+  it('encryptFile: tags throw from a chunk-level progress callback (preserves identity)', async () => {
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    class EncryptBoom extends Error {
+      public override readonly name = 'EncryptBoom';
+    }
+
+    let chunkEventCount = 0;
+    let caught: unknown;
+    try {
+      await cm.encryptFile(
+        inputPath,
+        encryptedPath,
+        TEST_PASSWORD,
+        (processed) => {
+          // Skip the initial (0, total) bracket event — we want the
+          // throw to fire from the chunk-level data listener so we
+          // exercise the `progressError = tagProgressThrow(err)` branch
+          // (NOT the early invokeProgress(progress, 0, totalBytes)
+          // branch which goes through invokeProgress's own try/catch).
+          if (processed === 0) {
+            return;
+          }
+          chunkEventCount += 1;
+          if (chunkEventCount === 1) {
+            throw new EncryptBoom('mid-encrypt boom');
+          }
+        }
+      );
+      throw new Error('encryptFile should have rejected');
+    } catch (err) {
+      caught = err;
+    }
+
+    // Identity preserved: the user's class is what bubbles out, NOT a
+    // CryptoError wrapper.
+    expect(caught).toBeInstanceOf(EncryptBoom);
+    // Output never landed (atomic-rename contract holds).
+    expect(existsSync(encryptedPath)).toBe(false);
+  });
+
+  it('decryptFile: tags throw from a chunk-level progress callback (preserves identity)', async () => {
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+    // First, produce a valid ciphertext so we have something to decrypt.
+    await cm.encryptFile(inputPath, encryptedPath, TEST_PASSWORD);
+
+    class DecryptBoom extends Error {
+      public override readonly name = 'DecryptBoom';
+    }
+
+    let chunkEventCount = 0;
+    let caught: unknown;
+    try {
+      await cm.decryptFile(
+        encryptedPath,
+        decryptedPath,
+        TEST_PASSWORD,
+        (processed) => {
+          if (processed === 0) {
+            return;
+          }
+          chunkEventCount += 1;
+          if (chunkEventCount === 1) {
+            throw new DecryptBoom('mid-decrypt boom');
+          }
+        }
+      );
+      throw new Error('decryptFile should have rejected');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(DecryptBoom);
+    expect(existsSync(decryptedPath)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. decryptFile zero-body path
+// ---------------------------------------------------------------------------
+
+describe('decryptFile zero-body path (Task 18)', () => {
+  // When the plaintext is an empty buffer, encryption produces a v1
+  // header + salt + iv + tag with ZERO body bytes. decryptFile detects
+  // `bodyLen === 0` and skips the read-stream entirely, calling
+  // `decipher.final()` directly to verify the tag. The async + sync
+  // paths both have this branch.
+
+  const emptyInputPath = path.join(TEST_DIR, 'zero-body-input.bin');
+  const encryptedPath = path.join(TEST_DIR, 'zero-body-encrypted.bin');
+  const decryptedPath = path.join(TEST_DIR, 'zero-body-decrypted.bin');
+
+  beforeEach(() => {
+    jest.resetModules();
+    // Identity passthroughs for fs modules — see notes in the
+    // progressError tagging suite for the rationale.
+    const realFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+    const realFsPromises = jest.requireActual<
+      typeof import('node:fs/promises')
+    >('node:fs/promises');
+    jest.unstable_mockModule('node:fs', () => ({ ...realFs }));
+    jest.unstable_mockModule('node:fs/promises', () => ({
+      ...realFsPromises,
+    }));
+  });
+  afterEach(async () => {
+    for (const p of [emptyInputPath, encryptedPath, decryptedPath]) {
+      if (existsSync(p)) await unlink(p);
+    }
+    jest.resetModules();
+  });
+
+  it('async: decryptFile round-trips an empty plaintext correctly', async () => {
+    // Use the encrypt path WITHOUT going through encryptFile (which
+    // emits no chunk-level data events for an empty input). Construct
+    // the v1 ciphertext manually using the public encryptData primitive
+    // and the v1 header packer, mirroring exactly what encryptFile
+    // would have produced for an empty input.
+    const { CryptoManager } = await import('../crypto-manager');
+    const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    // Build a v1 header matching the manager's configured Argon2id params.
+    const header = packHeader(KDF_ID_ARGON2ID, {
+      kind: 'argon2id',
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+    const salt = cm.generateSecureRandom(32);
+    const iv = cm.generateSecureRandom(12);
+    const key = await cm.deriveKey(TEST_PASSWORD, salt);
+    const aad = Buffer.concat([
+      Buffer.from('secure-crypto-tool-v2', 'utf8'),
+      header,
+    ]);
+    const { encrypted, tag } = cm.encryptData(
+      Buffer.alloc(0),
+      key,
+      iv,
+      aad
+    );
+    expect(encrypted.length).toBe(0); // body IS zero
+    expect(tag.length).toBe(16);
+
+    // Layout: [header][salt][iv][body=empty][tag]
+    const ciphertext = Buffer.concat([header, salt, iv, encrypted, tag]);
+    await writeFile(encryptedPath, ciphertext);
+
+    // Decrypt — exercises the bodyLen === 0 branch.
+    await cm.decryptFile(encryptedPath, decryptedPath, TEST_PASSWORD);
+    const out = await readFile(decryptedPath);
+    expect(out.length).toBe(0);
+  });
+
+  it('sync: decryptFileSync round-trips an empty plaintext correctly', async () => {
+    const { CryptoManager } = await import('../crypto-manager');
+    const { packHeader, KDF_ID_PBKDF2_SHA256 } = await import('../format');
+    const cm = new CryptoManager({
+      pbkdf2Iterations: 1000,
+    });
+
+    const header = packHeader(KDF_ID_PBKDF2_SHA256, {
+      kind: 'pbkdf2-sha256',
+      iterations: 1000,
+    });
+    const salt = cm.generateSecureRandom(32);
+    const iv = cm.generateSecureRandom(12);
+    const key = cm.deriveKeySync(TEST_PASSWORD, salt);
+    const aad = Buffer.concat([
+      Buffer.from('secure-crypto-tool-v2', 'utf8'),
+      header,
+    ]);
+    const { encrypted, tag } = cm.encryptData(
+      Buffer.alloc(0),
+      key,
+      iv,
+      aad
+    );
+    expect(encrypted.length).toBe(0);
+
+    const ciphertext = Buffer.concat([header, salt, iv, encrypted, tag]);
+    writeFileSync(encryptedPath, ciphertext);
+
+    cm.decryptFileSync(encryptedPath, decryptedPath, TEST_PASSWORD);
+    const out = readFileSync(decryptedPath);
+    expect(out.length).toBe(0);
+    // Also check the on-disk file is exactly zero bytes via stat.
+    expect(statSync(decryptedPath).size).toBe(0);
+  });
+
+  it('async: decryptFile fails authentication when zero-body ciphertext is tampered', async () => {
+    // Defence-in-depth: even with no body bytes to corrupt, tampering
+    // with the salt or tag must still cause decryption to throw. This
+    // exercises the `decipher.final()` path with a deliberately-bad tag.
+    const { CryptoManager } = await import('../crypto-manager');
+    const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+    const { CryptoError } = await import('../types');
+
+    const header = packHeader(KDF_ID_ARGON2ID, {
+      kind: 'argon2id',
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+    const salt = cm.generateSecureRandom(32);
+    const iv = cm.generateSecureRandom(12);
+    const key = await cm.deriveKey(TEST_PASSWORD, salt);
+    const aad = Buffer.concat([
+      Buffer.from('secure-crypto-tool-v2', 'utf8'),
+      header,
+    ]);
+    const { encrypted, tag } = cm.encryptData(
+      Buffer.alloc(0),
+      key,
+      iv,
+      aad
+    );
+    // Flip a bit in the tag so authentication fails.
+    const tag0 = tag[0] ?? 0;
+    tag[0] = tag0 ^ 0x01;
+    const ciphertext = Buffer.concat([header, salt, iv, encrypted, tag]);
+    await writeFile(encryptedPath, ciphertext);
+
+    await expect(
+      cm.decryptFile(encryptedPath, decryptedPath, TEST_PASSWORD)
+    ).rejects.toThrow(CryptoError);
+    // Cleanup contract: no orphan output file.
+    expect(existsSync(decryptedPath)).toBe(false);
+  });
+});

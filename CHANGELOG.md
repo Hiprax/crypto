@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-05-12 (v1.3.3 — Clear Node-20-action deprecation warnings on workflow runs)
+
+Hygiene-only patch release shipped within minutes of v1.3.2. No source changes, no public API changes, no wire-format changes, no devDependency changes. The published tarball is bit-identical to v1.3.2.
+
+### What changed
+
+The v1.3.2 release run surfaced a GitHub-side deprecation warning that the project's pinned action majors still ran on Node.js 20, which GitHub is removing from runners on 2026-09-16 (forced to Node 24 from 2026-06-02). The action authors all have stable Node-24-native majors available; this release moves to them.
+
+| Action | v1.3.2 | v1.3.3 | Latest at pin time |
+| --- | --- | --- | --- |
+| `actions/checkout` | `@v4` | `@v6` | v6.0.2 |
+| `actions/setup-node` | `@v4` | `@v6` | v6.4.0 |
+| `softprops/action-gh-release` | `@v2` | `@v3` | v3.0.0 |
+| `github/codeql-action/init` | `@v3` | `@v4` | v4.35.4 |
+| `github/codeql-action/analyze` | `@v3` | `@v4` | v4.35.4 |
+
+No breaking surface in any of the upgrades — all are major versions whose release notes explicitly list the runtime move (Node 20 → Node 24) as the primary motivation, with the action's own inputs/outputs unchanged.
+
+### Files changed
+
+- `.github/workflows/ci.yml` — `checkout @v4 → @v6`, `setup-node @v4 → @v6`.
+- `.github/workflows/release.yml` — `checkout @v4 → @v6`, `setup-node @v4 → @v6`, `action-gh-release @v2 → @v3`.
+- `.github/workflows/codeql.yml` — `checkout @v4 → @v6`, `codeql-action/init @v3 → @v4`, `codeql-action/analyze @v3 → @v4`.
+- `package.json` — version `1.3.2` → `1.3.3`.
+- `CHANGELOG.md` — this entry.
+
+### Verification
+
+`build`, `lint`, `type-check`, and the full 598-test suite pass identically to v1.3.2 (the changes are workflow-file-only and the published tarball is unchanged). The release.yml run for this tag is the actual verification that the upgraded actions still chain correctly end-to-end.
+
 ## 2026-05-12 (v1.3.2 — Routine devDependency refresh + CI/release pipeline modernization)
 
 Patch release. No source changes, no public API changes, no wire-format changes; v1 ciphertexts produced by v1.3.1 round-trip unchanged under v1.3.2 and vice versa. Runtime `optionalDependencies` (`argon2`, `hash-wasm`) are unchanged at `^0.44.0` and `^4.12.0` respectively — both already at the npm `latest` dist-tag. The published tarball is bit-identical to what v1.3.2 would have produced under the previous workflow.

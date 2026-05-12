@@ -1,0 +1,151 @@
+name: Release
+
+# Tag-driven release pipeline. Pushing an annotated `vX.Y.Z` tag triggers the
+# full pipeline: gates → tarball check → npm publish (with provenance) →
+# GitHub Release (notes pulled from the matching CHANGELOG.md section).
+#
+# `workflow_dispatch` provides a manual fallback to re-run a previously
+# pushed tag without having to delete + re-push it (e.g. if NPM_TOKEN was
+# expired on the first run).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v1.3.2). Required for manual runs."
+        required: true
+        type: string
+
+# `id-token: write` is required for npm provenance via OIDC.
+# `contents: write` is required for `softprops/action-gh-release` to create
+# the GitHub Release object. Both are kept at the workflow level (not job
+# level) so any future job added to this workflow inherits the minimum it
+# needs — there is no other job here that should run with fewer rights.
+permissions:
+  contents: write
+  id-token: write
+
+# Tag refs are immutable, so the practical effect of this group is to
+# serialize manual re-runs against the same tag. `cancel-in-progress: false`
+# means a second dispatch waits rather than killing an in-flight publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # On push-tag the ref is already the tag; on manual dispatch we
+          # check out the user-supplied tag explicitly so the workflow run
+          # operates on the tagged commit, not the latest main.
+          ref: ${{ inputs.tag || github.ref }}
+          # Full history so the CHANGELOG extraction step has access to the
+          # complete file regardless of how shallow the default fetch is.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Pin to current Active LTS. Matches the engines.node floor
+          # (>=22.0.0); a publish job has no value running on multiple
+          # Node versions since the artifact is identical.
+          node-version: 22
+          # Must be set explicitly so the npm auth handshake targets the
+          # public npm registry rather than any internal/proxy registry
+          # the runner may default to.
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Verify tag matches package.json version
+        # Run on both tag pushes AND manual dispatches. The shell guard below
+        # validates that `git push origin v1.3.2` only ever publishes the
+        # version recorded in package.json — protects against the
+        # "forgot to bump package.json before tagging" foot-gun.
+        run: |
+          REF="${{ inputs.tag || github.ref_name }}"
+          TAG_VERSION="${REF#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Tag version:     $TAG_VERSION"
+          echo "Package version: $PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION). Refusing to publish."
+            exit 1
+          fi
+
+      - name: Verify tarball contents (dry run)
+        # Catches accidental inclusion of source maps, .env files, fixtures,
+        # etc. before the artifact reaches the registry. The `.npmignore`
+        # and the `"files"` field in package.json govern the result.
+        run: npm pack --dry-run
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Extract changelog notes for this release
+        id: changelog
+        run: |
+          REF="${{ inputs.tag || github.ref_name }}"
+          VERSION="${REF#v}"
+          # CHANGELOG entries are written either as `## [X.Y.Z] - DATE` (the
+          # Keep-a-Changelog convention assumed by softprops/action-gh-release
+          # tooling) OR as `## DATE (vX.Y.Z — title)` (this project's existing
+          # style). The awk script accepts both shapes so notes are populated
+          # regardless of which heading style a release ships with.
+          notes="$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\["ver"\\]" || $0 ~ "\\(v"ver"( |\\)|\\u2014| - )" { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md)"
+          if [ -z "$notes" ]; then
+            notes="See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
+          fi
+          {
+            echo "notes<<__EOF__"
+            printf "%s\n" "$notes"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          body: ${{ steps.changelog.outputs.notes }}
+          draft: false
+          prerelease: false
+
+      - name: Summary
+        run: |
+          PKG_NAME="$(node -p "require('./package.json').name")"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          {
+            echo "### Published \`$PKG_NAME@$PKG_VERSION\`"
+            echo ""
+            echo "- npm: <https://www.npmjs.com/package/$PKG_NAME/v/$PKG_VERSION>"
+            echo "- Release: <https://github.com/${{ github.repository }}/releases/tag/${{ inputs.tag || github.ref_name }}>"
+          } >> "$GITHUB_STEP_SUMMARY"

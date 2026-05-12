@@ -6,16 +6,27 @@ on:
   pull_request:
     branches: [main, master]
 
-# Cancel previous in-progress runs of this workflow on the same ref so
-# that pushes that supersede each other don't pile up the queue.
+# Cancel previous in-progress runs of this workflow on the same ref so that
+# pushes that supersede each other don't pile up the queue. Tag pushes
+# (handled by release.yml) are excluded by the branch filter above; this
+# group only collapses branch/PR runs.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Least-privilege default. The test job only reads the repo and uploads
+# nothing back to GitHub; if a future step needs more (e.g. coverage
+# upload that writes a PR comment), grant it at the job level.
+permissions:
+  contents: read
 
 jobs:
   test:
     name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
+    # Cap each leg so a hung native build (argon2 node-gyp on Windows is the
+    # historical offender) cannot burn the default 6-hour runner budget.
+    timeout-minutes: 20
 
     strategy:
       # Run every (os, node) combination to completion even if one fails so we
@@ -28,6 +39,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # No history needed for CI — tests don't read git log/blame.
+          persist-credentials: false
 
       - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4

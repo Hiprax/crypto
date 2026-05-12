@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose a new feature, API, option, or behaviour for @hiprax/crypto.
+title: "feat: <one-line summary>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request, please check existing issues and the
+        CHANGELOG. For breaking changes to the public API or wire format, please
+        outline the migration path explicitly.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "What problem are you trying to solve?"
+      description: "Describe the use case, not the proposed solution. Why does the current API fall short?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed solution"
+      description: "API shape, new options, new methods. Sketch the signature if possible."
+      render: typescript
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: "Other approaches you weighed and why you ruled them out."
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: "Is this a breaking change?"
+      options:
+        - "No — additive only"
+        - "Yes — removes/renames public API"
+        - "Yes — changes wire format"
+        - "Yes — raises Node floor"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: "Confirmations"
+      options:
+        - label: "I searched existing issues and discussions for duplicates."
+          required: true
+        - label: "I am willing to help implement this (optional, but lets us prioritise)."
+          required: false

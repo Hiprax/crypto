@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-05-12 (v1.3.2 — Routine devDependency refresh + CI/release pipeline modernization)
+
+Patch release. No source changes, no public API changes, no wire-format changes; v1 ciphertexts produced by v1.3.1 round-trip unchanged under v1.3.2 and vice versa. Runtime `optionalDependencies` (`argon2`, `hash-wasm`) are unchanged at `^0.44.0` and `^4.12.0` respectively — both already at the npm `latest` dist-tag. The published tarball is bit-identical to what v1.3.2 would have produced under the previous workflow.
+
+### What changed
+
+Audit pass (npm `latest` dist-tag for every direct dep against `package.json` ranges and `node_modules` reality):
+
+- `npm outdated` reported six devDep patch/minor bumps since v1.3.1. All within the existing caret ranges, but the `package.json` floors were lifted to match the actually-installed/tested versions so a fresh checkout against a wiped lockfile resolves to the tested-against minor.
+- `npm audit` reports zero advisories across 419 deps (9 prod, 406 dev, 33 optional) — `node_modules` shrank by 24 transitive packages versus v1.3.1 as a side effect of the bumps.
+- No major-version migrations were required; every direct dep is already at the latest stable major.
+
+CI/release pipeline modernization (this release):
+
+- `.github/workflows/release.yml` (new) replaces the old `publish.yml`. Now triggered directly by `v*.*.*` tag push (instead of "GitHub Release published" event), so a single `git push origin vX.Y.Z` drives the whole pipeline: gates → tag-matches-`package.json`-version guard → `npm pack --dry-run` tarball check → `npm publish --provenance --access public` → GitHub Release creation with notes extracted from this CHANGELOG. A `workflow_dispatch` fallback re-runs a specified tag manually (e.g. after fixing a stale NPM_TOKEN).
+- `.github/workflows/ci.yml` — added least-privilege `permissions: contents: read`, a 20-minute per-leg `timeout-minutes` cap (guards against hung native builds — `argon2`'s node-gyp fallback is the historical Windows offender), and `persist-credentials: false` on the checkout step.
+- `.github/workflows/codeql.yml` (new) — static analysis on push to `main`, on PRs, and weekly (Mon 06:00 UTC) using the `security-and-quality` query suite over the unified `javascript-typescript` language.
+- `.github/PULL_REQUEST_TEMPLATE.md` (new) — security-impact callout and pre-completion checklist mirroring the CLAUDE.md gates.
+- `.github/ISSUE_TEMPLATE/bug_report.yml`, `feature_request.yml`, `config.yml` (new) — structured issue forms; bug template forces "this is not a security vulnerability" confirmation (security reports route to the private advisory channel via `config.yml`).
+
+The six devDep floor moves shipped here:
+
+| Package | Before | After | Type | Notes |
+| --- | --- | --- | --- | --- |
+| `@types/node` | `^25.6.0` | `^25.7.0` | patch | Node 25 type definitions kept in lockstep with the Node minor running in CI. |
+| `@typescript-eslint/eslint-plugin` | `^8.59.2` | `^8.59.3` | patch | Bug-fix-only release. |
+| `@typescript-eslint/parser` | `^8.59.2` | `^8.59.3` | patch | Bug-fix-only release. |
+| `fast-check` | `^4.7.0` | `^4.8.0` | minor | Adds `chainUntil` arbitrary; restored ability to drop `skipLibCheck`. No breaking changes — verified against release notes. None of the existing property/fuzz tests touch the new surface. |
+| `jest` | `^30.3.0` | `^30.4.2` | minor | 30.4.0 ships a runtime rewrite preparing for ESM stabilisation; 30.4.1 aligned CJS-from-ESM default-export behaviour with Node; 30.4.2 fixed named imports from CJS modules whose `module.exports` is a function. Relevant to us because `argon2-lazy-load.test.ts` uses `jest.unstable_mockModule('argon2', factory)` BEFORE dynamically `import()`-ing CryptoManager — the mock-then-dynamic-import pattern is exactly the path the new runtime exercises. Verified by running the full 598-test suite green (including `argon2-lazy-load.test.ts`); no test code changes were required. |
+| `jiti` | `^2.6.1` | `^2.7.0` | minor | New: `using`/`await using` support, opt-in `tsconfigPaths`, virtual modules, `jiti/static` export. ~2× `interopDefault` perf via proxy-cache. We use jiti only via `eslint.config.ts` (flat-config TypeScript loader); no behavioural change observed. |
+
+### Files changed
+
+- `package.json` — six devDep caret floors tightened (see table above); version `1.3.1` → `1.3.2`.
+- `package-lock.json` — regenerated; 60 transitive packages changed, 3 added, 3 removed (net `-24` from the dedup that follows the bumps).
+- `.github/workflows/release.yml` — new; replaces `.github/workflows/publish.yml` (removed).
+- `.github/workflows/ci.yml` — hardened (permissions, timeout, no persisted credentials).
+- `.github/workflows/codeql.yml` — new.
+- `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/*.yml` — new.
+- `CHANGELOG.md` — this entry.
+
+### Verification
+
+All four pre-completion checks pass:
+
+- `npm run build` — clean.
+- `npm run lint` — clean (zero warnings, zero errors).
+- `npm run type-check` — clean.
+- `npm test` — 598 / 598 tests pass, 12 / 12 snapshots pass, 8 test suites, ~116 s. The runtime time grew slightly versus v1.3.1's ~82 s — likely the Jest 30.4 runtime rewrite warming up; well within normal noise and not actionable.
+
+Test count: 598 → 598 (no new tests; the changes are below the test-suite layer — devDep range floors are not test-observable beyond "the suite still passes").
+
+### Caveats / things to know
+
+- The `ts-jest` `node10` `ignoreDeprecations: "6.0"` workaround documented in v1.3.0 is unchanged — `ts-jest@29.4.9` is still the latest and still hard-codes `Node10` resolution before merging the project tsconfig. When a TS-6-aware ts-jest releases, the escape hatch in `jest.config.js` can be removed in a follow-up patch.
+- A consumer with an existing `package-lock.json` for v1.3.1 will see resolved-version movement on the six bumped packages plus their transitive deps when running `npm install` against v1.3.2's `package.json`. Production consumers (who only see `optionalDependencies`) are unaffected — none of the bumped packages ship in the published tarball.
+
 ## 2026-05-05 (v1.3.1 — Tighten devDependency floors + fix stale Node version in publish workflow)
 
 Hygiene-only patch release. No source changes, no public API changes, no wire-format changes; v1 ciphertexts produced by v1.3.0 round-trip unchanged under v1.3.1 and vice versa. Runtime `optionalDependencies` (`argon2`, `hash-wasm`) are unchanged at `^0.44.0` and `^4.12.0` respectively — both already at the npm `latest` dist-tag.

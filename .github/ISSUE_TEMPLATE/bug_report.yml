@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a defect in @hiprax/crypto — incorrect behaviour, crash, regression, wire-format mismatch, type error.
+title: "bug: <one-line summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more concrete the repro,
+        the faster we can fix it. **Do not report security vulnerabilities
+        here** — see `SECURITY.md` for the private disclosure channel.
+
+  - type: input
+    id: version
+    attributes:
+      label: "@hiprax/crypto version"
+      placeholder: "e.g. 1.3.2"
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: "Node.js version"
+      placeholder: "e.g. 22.11.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: "Operating system"
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: "What happened?"
+      description: "Describe the bug. Include the actual behaviour AND what you expected."
+      placeholder: "When I call encryptTextSync(...), it throws CryptoError(INVALID_INPUT, 'INVALID_SALT') even though I'm passing a 32-byte salt."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: "Minimal reproduction"
+      description: "Smallest code sample that reproduces the issue. Inline is fine; gist/repo links also OK."
+      render: typescript
+      placeholder: |
+        import { CryptoManager } from '@hiprax/crypto';
+        const cm = new CryptoManager();
+        // ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Error output / stack trace"
+      description: "Paste the full error, stack trace, or relevant log output. Strip any real secrets/passwords."
+      render: shell
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: "Confirmations"
+      options:
+        - label: "I searched existing issues and this is not a duplicate."
+          required: true
+        - label: "I am on a supported Node version (>=22.0.0)."
+          required: true
+        - label: "This is not a security vulnerability (I would email per SECURITY.md instead)."
+          required: true

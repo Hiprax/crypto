@@ -1,0 +1,60 @@
+name: CodeQL
+
+# Static analysis on every push to main, on PRs against main, and weekly so
+# new query versions and freshly-disclosed patterns are surfaced even if the
+# code hasn't changed. The Monday 06:00 UTC slot avoids GitHub's peak hours.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      # Required so the analyze step can upload SARIF results to the
+      # security tab.
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `javascript-typescript` is the unified language identifier; it
+          # covers both .js and .ts without requiring two matrix legs.
+          # `build-mode: none` is correct for a pure-TypeScript library
+          # where CodeQL can analyse the source directly without invoking
+          # `npm run build`.
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # `security-and-quality` is the broader suite; for a crypto
+          # library the quality queries (e.g. tainted-data flows through
+          # string normalisation) are worth the extra analyse time.
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

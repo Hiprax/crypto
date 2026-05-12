@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-05-12 (v1.3.5 — CodeQL alert triage, drop Dependencies badge)
+
+Hygiene-only patch release. No source changes, no public API changes, no wire-format changes, no devDependency changes. The published tarball is bit-identical to v1.3.4 (the changes are README + GitHub-side alert state only).
+
+### What changed
+
+CodeQL alerts on `main` (all 98 open warnings) triaged and dismissed:
+
+- **91 × `js/insecure-temporary-file`** — dismissed as `used in tests` (87) or `false positive` (4).
+  - The 87 test alerts flag the documented per-suite scratch-directory pattern: `path.join(os.tmpdir(), 'hiprax-crypto-${randomBytes(8).hex}')`. 64 bits of entropy in the suffix make CWE-377-style pre-existing-file collision infeasible; the pattern is the project's standard testing convention (see CLAUDE.md).
+  - The 4 source-tree alerts flag `tempPath = this.buildTempOutputPath(outputPath)` in `src/crypto-manager.ts`. `buildTempOutputPath` returns `${outputPath}.<8 hex bytes>.tmp` — a sibling of the user-supplied output path, **not** a file in `os.tmpdir()`. CodeQL misclassified on the `randomBytes + .tmp` signature.
+- **5 × `js/file-system-race`** — dismissed as `won't fix`. Atomic rename with a random temp suffix is the canonical defense for this TOCTOU class; `validateFile` is documented as syntactic-only and not symlink-aware (callers needing strict containment use `validatePath` with the `allowedRoot` option). Two of the five are in a test-only `filesEqualSync` helper.
+- **2 × `js/missing-await`** — dismissed as `false positive`. Both flag `src/crypto-manager.ts:592`, which is the intentional compare-and-swap on the in-flight Argon2 module cache slot (`argon2ModuleCache === inFlight`). The comparison is on promise identity, not resolved value; awaiting would defeat the CAS pattern.
+
+README:
+
+- Dropped the libraries.io "Dependencies" badge. Signal isn't worth the row in the badge strip for a single-runtime-dep package.
+
+### Files changed
+
+- `README.md` — removed the `librariesio/release/npm/@hiprax/crypto` badge from the header.
+- `package.json` — version `1.3.4` → `1.3.5`.
+- `CHANGELOG.md` — this entry.
+
+### Verification
+
+`build`, `lint`, `type-check`, and the full test suite pass identically to v1.3.4. No source files were touched.
+
 ## 2026-05-12 (v1.3.4 — Codecov integration, repo-side hardening, README badge sweep)
 
 Hygiene-only patch release. No source changes, no public API changes, no wire-format changes, no devDependency changes. The published tarball is bit-identical to v1.3.3 (the changes are CI-config and repo-settings only).

@@ -5,6 +5,8 @@
 [![CI](https://github.com/Hiprax/crypto/actions/workflows/ci.yml/badge.svg)](https://github.com/Hiprax/crypto/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Hiprax/crypto/branch/main/graph/badge.svg)](https://codecov.io/gh/Hiprax/crypto)
 [![CodeQL](https://github.com/Hiprax/crypto/actions/workflows/codeql.yml/badge.svg)](https://github.com/Hiprax/crypto/actions/workflows/codeql.yml)
+[![Dependencies](https://img.shields.io/librariesio/release/npm/@hiprax/crypto)](https://libraries.io/npm/@hiprax%2Fcrypto)
+[![npm provenance](https://img.shields.io/badge/npm-provenance-brightgreen?logo=npm&logoColor=white)](https://www.npmjs.com/package/@hiprax/crypto)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![npm version](https://img.shields.io/npm/v/@hiprax/crypto)](https://www.npmjs.com/package/@hiprax/crypto)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8.3-blue.svg)](https://www.typescriptlang.org/)

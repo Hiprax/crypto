@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-05-12 (v1.3.4 — Codecov integration, repo-side hardening, README badge sweep)
+
+Hygiene-only patch release. No source changes, no public API changes, no wire-format changes, no devDependency changes. The published tarball is bit-identical to v1.3.3 (the changes are CI-config and repo-settings only).
+
+### What changed
+
+CI / repo automation:
+
+- `ci.yml` — Ubuntu / Node 22 leg now runs `npm test -- --coverage` and uploads `coverage/lcov.info` to Codecov via `codecov/codecov-action@v6`. Other matrix legs stay on plain `npm test`. The upload step is gated to non-fork PRs so secret-less fork runs don't emit warnings.
+- `codecov.yml` (new) — Codecov configured as a visualization-only layer: project + patch targets at 80% with `if_ci_failed: success` and `if_not_found: success`, so Codecov can never block a merge by itself. The local Jest `coverageThreshold` (80% across branches/functions/lines/statements) remains the actual gate. Ignore patterns cover `dist/`, `bench/`, tests, `.d.ts`, and `node_modules`.
+
+GitHub repo hardening (applied via `gh api`, not file-based — listed here so future maintainers know what's configured server-side):
+
+- Branch ruleset for `main` — block force-push and deletion; require status checks `Test (ubuntu-latest, Node 22)`, `Test (ubuntu-latest, Node 24)`, `Test (windows-latest, Node 22)`, `Test (windows-latest, Node 24)`, and `Analyze (javascript-typescript)` to pass before merge; require a pull request before merging (0 required approvals — solo maintainers can self-merge). Repository admin role has `bypass_mode: always` so the maintainer can still push directly to `main` for releases.
+- Tag ruleset for `v*` — block deletion, update, and force-push of release tags so tagged release history cannot be rewritten.
+- Discussions enabled (the issue-template `config.yml` already routes "question / discussion" links there).
+- Dependabot security alerts enabled (security-advisory alerts only — automatic version-bump PRs are intentionally NOT enabled per project policy).
+- `delete_branch_on_merge: true` — auto-cleanup of merged feature branches.
+- `allow_auto_merge: true`, `allow_update_branch: true` — convenience options for the eventual flow once contributors land.
+- Secret scanning + secret-push-protection were already enabled and are confirmed retained.
+
+README badges:
+
+- Codecov, CodeQL — backfilled (Codecov was new this release; CodeQL should have shipped with v1.3.2 but the badge was missed).
+- Dependencies — `librariesio/release` badge linking to libraries.io; will stay green as long as no direct dep has an outdated release.
+- npm provenance — static badge linking to the npm package page (every release since v1.3.2 ships with `--provenance` attestation via OIDC; the badge advertises the guarantee).
+
+### Files changed
+
+- `.github/workflows/ci.yml` — Codecov upload step (shipped in 9115a17, between v1.3.3 and v1.3.4).
+- `codecov.yml` (new) — Codecov config.
+- `README.md` — five badge additions: Codecov, CodeQL, Dependencies, npm provenance, plus the existing CI / license / npm / TypeScript / Node.js row.
+- `package.json` — version `1.3.3` → `1.3.4`.
+- `CHANGELOG.md` — this entry.
+
+### Verification
+
+`build`, `lint`, `type-check`, and the full 598-test suite pass identically to v1.3.3. Coverage upload to Codecov on the v1.3.4-precursor commit (9115a17) reported 96.18% statements / 90.01% branches / 97.61% functions / 96.15% lines — well above the 80% floor. The release-workflow run for this tag is the end-to-end verification that the rulesets-enabled `main` branch still accepts the maintainer-direct release push (admin bypass on the PR-required rule).
+
 ## 2026-05-12 (v1.3.3 — Clear Node-20-action deprecation warnings on workflow runs)
 
 Hygiene-only patch release shipped within minutes of v1.3.2. No source changes, no public API changes, no wire-format changes, no devDependency changes. The published tarball is bit-identical to v1.3.2.

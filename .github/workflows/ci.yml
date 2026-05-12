@@ -65,11 +65,42 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Collect coverage on the Ubuntu / Node 22 leg only — uploading from
+      # every (os, node) cell would clutter the Codecov UI and double-count
+      # lines that are identical across runners. Other matrix legs still
+      # run the suite without `--coverage` to keep their runtime short.
+      - name: Test (with coverage)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: npm test -- --coverage
+
       - name: Test
+        if: matrix.os != 'ubuntu-latest' || matrix.node != 22
         run: npm test
 
-      # Run after build/test/lint so failures from earlier steps don't get
-      # masked by an audit failure (and vice-versa). `--audit-level=high`
+      # Skip the upload on PRs from forks: `CODECOV_TOKEN` is not exposed to
+      # fork-PR runs, so the action would warn and fail soft anyway. Public
+      # repos can technically upload tokenlessly, but the gate keeps the
+      # logs clean and avoids a future regression if Codecov tightens that.
+      - name: Upload coverage to Codecov
+        if: |
+          matrix.os == 'ubuntu-latest' &&
+          matrix.node == 22 &&
+          (github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository)
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unittests
+          # `fail_ci_if_error: false` means a transient Codecov outage cannot
+          # fail an otherwise-green CI run. The local Jest threshold (80%
+          # across all four metrics) already enforces the floor; Codecov is
+          # the visualization layer, not the gate.
+          fail_ci_if_error: false
+          slug: Hiprax/crypto
+
+      # Run after build/test/lint/coverage so failures from earlier steps don't
+      # get masked by an audit failure (and vice-versa). `--audit-level=high`
       # matches the policy in SECURITY.md: high+critical block the build,
       # moderate+low are tracked but non-blocking.
       - name: Audit dependencies (high+critical only)

@@ -1,0 +1,64 @@
+# Codecov configuration for @hiprax/crypto.
+# Reference: https://docs.codecov.com/docs/codecov-yaml
+#
+# Philosophy: the local Jest threshold (80% across branches/functions/lines/
+# statements) is the gate that fails CI. Codecov here is for visualization
+# and PR feedback, not for re-running the gate. So Codecov's own status
+# checks are configured to be informational: they report movement but they
+# don't independently fail the build.
+
+coverage:
+  precision: 2
+  round: down
+  range: "80...100"
+
+  status:
+    project:
+      default:
+        # Match the local Jest floor so the badge and the CI gate agree.
+        target: 80%
+        # Allow a 1% downward drift between commits before Codecov flags
+        # the status as failing. Jest already enforces 80% strictly — this
+        # threshold absorbs noise from line-counting differences between
+        # the local run and Codecov's report parser.
+        threshold: 1%
+        # Don't fail PRs while Codecov is still uploading the first run.
+        if_ci_failed: success
+        # Report against the base commit on PRs; against the previous
+        # commit on direct pushes to main.
+        if_not_found: success
+    patch:
+      default:
+        # Patches (the changed lines in a PR) should be ~at-or-above the
+        # project's floor. Allow a 5% drift so a single under-tested
+        # one-liner doesn't block an otherwise-fine PR.
+        target: 80%
+        threshold: 5%
+        if_ci_failed: success
+        if_not_found: success
+
+comment:
+  # Concise PR comment: header (with the project + patch deltas), a short
+  # file-by-file diff table, and the standard footer. Skip the
+  # "components" block (we don't define components) and "tree" (the file
+  # table is enough signal without a full repo tree).
+  layout: "header, diff, files, footer"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+
+# Files / paths Codecov should not measure. Tests cover themselves trivially;
+# the bench harness is not production code; build output and node_modules
+# are obvious excludes. Keeping the ignore list here (instead of only in
+# jest.config.js' `collectCoverageFrom`) means Codecov's UI also hides them
+# from the file tree, not just from percentages.
+ignore:
+  - "dist/**/*"
+  - "node_modules/**/*"
+  - "coverage/**/*"
+  - "bench/**/*"
+  - "src/__tests__/**/*"
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "**/*.d.ts"

@@ -8,7 +8,6 @@ import {
 } from 'node:fs/promises';
 import {
   existsSync,
-  readFileSync,
   writeFileSync,
   mkdirSync,
   unlinkSync,
@@ -2581,17 +2580,21 @@ export class CryptoManager {
    * Output is written to a sibling temp file (`${outputPath}.<random>.tmp`)
    * and atomically renamed to `outputPath` only on success.
    *
+   * Reads the input in fixed 64 KiB chunks via `fs.readSync`, feeds each
+   * chunk through `cipher.update()`, and writes the resulting ciphertext
+   * chunk via `fs.writeFileSync(fd, ...)`. This keeps peak memory
+   * proportional to the chunk size regardless of input file size —
+   * matching the bounded-memory model already used by `decryptFileSync`.
+   * The on-disk layout `[v1 header][salt][iv][ciphertext body][auth tag]`
+   * is byte-identical to the previous single-read implementation.
+   *
    * **Progress reporting:** if a `progress` callback is supplied, it is
    * invoked once with `(0, totalBytes)` before encryption starts and once
    * with `(totalBytes, totalBytes)` after the temp file has been atomically
-   * renamed to the canonical `outputPath`. The sync encrypt path reads the
-   * full input into memory in a single `readFileSync` call (because the
-   * sync surface needs to be predictable for callers that don't want
-   * streaming), so per-chunk progress would be misleading — the two
-   * bracketing events accurately describe the synchronous "before" and
-   * "after" boundary. `totalBytes` equals the input file size in bytes. If
-   * the callback throws, the throw aborts the operation. See
-   * {@link ProgressCallback}.
+   * renamed to the canonical `outputPath`. No per-chunk events are emitted
+   * — the two bracketing calls preserve the contract callers already depend
+   * on. `totalBytes` equals the input file size in bytes. If the callback
+   * throws, the throw aborts the operation. See {@link ProgressCallback}.
    *
    * @example
    * ```typescript
@@ -2643,6 +2646,8 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let inputFd: number | null = null;
+    let outputFd: number | null = null;
     let key: Buffer | null = null;
 
     try {
@@ -2686,9 +2691,6 @@ export class CryptoManager {
       // Derive key from password (synchronous)
       key = this.deriveKeySync(finalPassword, salt);
 
-      // Read input file
-      const inputData = readFileSync(inputPath);
-
       // Build v1 header for sync file (PBKDF2 KDF identifier). Built
       // BEFORE the cipher so we can include its on-disk bytes in the AAD
       // — see encryptText for the full rationale on header-binding.
@@ -2702,25 +2704,73 @@ export class CryptoManager {
       ) as crypto.CipherGCM;
       cipher.setAAD(this.aadForV1(versionHeader));
 
-      // Encrypt the data
-      let encrypted = cipher.update(inputData);
-      encrypted = Buffer.concat([encrypted, cipher.final()]);
+      // Open the input for reading and the temp file for writing.
+      inputFd = openSync(inputPath, 'r');
+      outputFd = openSync(tempPath, 'w');
 
-      // Get authentication tag
+      // Write the prefix: [v1 header][salt][iv]. These three fields are
+      // always written together up front; the ciphertext body follows
+      // chunk by chunk, and the auth tag is appended last.
+      writeFileSync(outputFd, Buffer.concat([versionHeader, salt, iv]));
+
+      // Stream the plaintext in fixed-size chunks. The reuse buffer keeps
+      // peak memory proportional to the chunk size regardless of input size.
+      const chunk = Buffer.alloc(this.SYNC_ENCRYPT_CHUNK_SIZE);
+      let inputOffset = 0;
+
+      while (inputOffset < totalBytes) {
+        const bytesToRead = Math.min(
+          this.SYNC_ENCRYPT_CHUNK_SIZE,
+          totalBytes - inputOffset
+        );
+        const bytesRead = readSync(
+          inputFd,
+          chunk,
+          0,
+          bytesToRead,
+          inputOffset
+        );
+        if (bytesRead <= 0) {
+          // Should never happen given the bounds checks above; treat as a
+          // concurrently truncated or corrupted input file.
+          throw new CryptoError(
+            'Unexpected EOF while reading plaintext body',
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_READ_FAILED'
+          );
+        }
+        const inSlice =
+          bytesRead === chunk.length
+            ? chunk
+            : chunk.subarray(0, bytesRead);
+        const outSlice = cipher.update(inSlice);
+        if (outSlice.length > 0) {
+          writeFileSync(outputFd, outSlice);
+        }
+        inputOffset += bytesRead;
+      }
+
+      // Finalize the cipher — for AES-GCM this returns an empty Buffer
+      // because CTR mode flushes on each update(), but we write it for
+      // completeness in case mode changes.
+      const finalBuf = cipher.final();
+      if (finalBuf.length > 0) {
+        writeFileSync(outputFd, finalBuf);
+      }
+
+      // Append the GCM auth tag. Must be called AFTER cipher.final().
       const tag = cipher.getAuthTag();
+      writeFileSync(outputFd, tag);
 
-      // Write header: [v1 header][salt][iv][encrypted][tag] in one file open
-      // to keep things atomic-ish before the rename. Three appends would
-      // multiply the chance of a partial-write window before rename, so we
-      // stage the full payload and write it once.
-      const fullPayload = Buffer.concat([
-        versionHeader,
-        salt,
-        iv,
-        encrypted,
-        tag,
-      ]);
-      writeFileSync(tempPath, fullPayload);
+      // Close the output file BEFORE the rename so Windows lets us replace
+      // the destination.
+      closeSync(outputFd);
+      outputFd = null;
+
+      // Close the input fd (holding it open through the rename is
+      // unnecessary).
+      closeSync(inputFd);
+      inputFd = null;
 
       // Atomic rename — final outputPath now reflects the full ciphertext.
       this.atomicRenameSync(tempPath, outputPath);
@@ -2729,19 +2779,27 @@ export class CryptoManager {
       // Final progress event after the rename has succeeded.
       this.invokeProgress(progress, totalBytes, totalBytes);
 
-      // Clear sensitive data. `encrypted`, `tag`, and `fullPayload` are
-      // public ciphertext components rather than secret material, but the
-      // cipher's internal state lingers in those buffers until GC and
-      // clearing them keeps the sync encrypt path symmetric with the
-      // async one. See Task 14 (FIX.md Iteration 2) for rationale.
+      // Scrub the plaintext reuse buffer and the derived key.
+      this.secureClear(chunk);
       this.secureClear(key);
-      this.secureClear(inputData);
-      this.secureClear(encrypted);
-      this.secureClear(tag);
-      this.secureClear(fullPayload);
     } catch (error) {
       if (key !== null) {
         this.secureClear(key);
+      }
+      // Make sure we drop any open file descriptors before unlinking.
+      if (outputFd !== null) {
+        try {
+          closeSync(outputFd);
+        } catch {
+          // ignore
+        }
+      }
+      if (inputFd !== null) {
+        try {
+          closeSync(inputFd);
+        } catch {
+          // ignore
+        }
       }
       // Clean up the temp file. Never touch outputPath: it either was the
       // caller's pre-existing data (which we must not delete) or it never
@@ -2765,6 +2823,13 @@ export class CryptoManager {
       );
     }
   }
+
+  /**
+   * Chunk size used by the synchronous streaming encryption path. Matches
+   * `SYNC_DECRYPT_CHUNK_SIZE` and `fs.createReadStream`'s default
+   * `highWaterMark` so the two sync I/O paths are symmetric.
+   */
+  private readonly SYNC_ENCRYPT_CHUNK_SIZE = 64 * 1024;
 
   /**
    * Chunk size used by the synchronous streaming decryption path. 64 KiB is

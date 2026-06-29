@@ -1521,18 +1521,30 @@ describe('CryptoManager', () => {
   describe('decryptText - wrong password', () => {
     it('should throw CryptoError when decrypting with wrong password', async () => {
       const encrypted = await crypto.encryptText(testText, testPassword);
-      await expect(
-        crypto.decryptText(encrypted, 'WrongP@ssw0rd123!')
-      ).rejects.toThrow(CryptoError);
+      let caught: CryptoError | undefined;
+      try {
+        await crypto.decryptText(encrypted, 'WrongP@ssw0rd123!');
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
   });
 
   describe('decryptTextSync - wrong password', () => {
     it('should throw CryptoError when decrypting with wrong password', () => {
       const encrypted = crypto.encryptTextSync(testText, testPassword);
-      expect(() =>
-        crypto.decryptTextSync(encrypted, 'WrongP@ssw0rd123!')
-      ).toThrow(CryptoError);
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptTextSync(encrypted, 'WrongP@ssw0rd123!');
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
   });
 
@@ -1555,26 +1567,38 @@ describe('CryptoManager', () => {
     });
 
     it('should throw CryptoError when decrypting with wrong password', async () => {
-      await expect(
-        crypto.decryptFile(
+      let caught: CryptoError | undefined;
+      try {
+        await crypto.decryptFile(
           encryptedFilePath,
           decryptedFilePath,
           'WrongP@ssw0rd123!'
-        )
-      ).rejects.toThrow(CryptoError);
+        );
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('FILE_DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
       // Output file should be cleaned up (deleted)
       expect(existsSync(decryptedFilePath)).toBe(false);
     });
 
     it('should throw CryptoError for tampered encrypted file', async () => {
-      // Tamper with the encrypted file
+      // Tamper with the encrypted file (flip last byte of the auth tag)
       const data = await readFile(encryptedFilePath);
       data[data.length - 1] = (data[data.length - 1] ?? 0) ^ 0xff;
       await writeFile(encryptedFilePath, data);
 
-      await expect(
-        crypto.decryptFile(encryptedFilePath, decryptedFilePath, testPassword)
-      ).rejects.toThrow(CryptoError);
+      let caught: CryptoError | undefined;
+      try {
+        await crypto.decryptFile(encryptedFilePath, decryptedFilePath, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('FILE_DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
   });
 
@@ -1597,13 +1621,19 @@ describe('CryptoManager', () => {
     });
 
     it('should throw CryptoError when decrypting with wrong password', () => {
-      expect(() =>
+      let caught: CryptoError | undefined;
+      try {
         crypto.decryptFileSync(
           encryptedFilePath,
           decryptedFilePath,
           'WrongP@ssw0rd123!'
-        )
-      ).toThrow(CryptoError);
+        );
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('SYNC_FILE_DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
       // Output file should be cleaned up (deleted)
       expect(existsSync(decryptedFilePath)).toBe(false);
     });
@@ -1613,13 +1643,19 @@ describe('CryptoManager', () => {
       data[data.length - 1] = (data[data.length - 1] ?? 0) ^ 0xff;
       writeFileSync(encryptedFilePath, data);
 
-      expect(() =>
+      let caught: CryptoError | undefined;
+      try {
         crypto.decryptFileSync(
           encryptedFilePath,
           decryptedFilePath,
           testPassword
-        )
-      ).toThrow(CryptoError);
+        );
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('SYNC_FILE_DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
   });
 
@@ -2182,9 +2218,15 @@ describe('CryptoManager', () => {
       const iv = crypto.generateSecureRandom(12);
 
       const { encrypted, tag } = crypto.encryptData(data, key1, iv);
-      expect(() => crypto.decryptData(encrypted, key2, iv, tag)).toThrow(
-        CryptoError
-      );
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptData(encrypted, key2, iv, tag);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
 
     it('should fail with wrong iv', () => {
@@ -2194,9 +2236,15 @@ describe('CryptoManager', () => {
       const iv2 = crypto.generateSecureRandom(12);
 
       const { encrypted, tag } = crypto.encryptData(data, key, iv1);
-      expect(() => crypto.decryptData(encrypted, key, iv2, tag)).toThrow(
-        CryptoError
-      );
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptData(encrypted, key, iv2, tag);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
 
     it('should fail with tampered ciphertext', () => {
@@ -2206,9 +2254,15 @@ describe('CryptoManager', () => {
 
       const { encrypted, tag } = crypto.encryptData(data, key, iv);
       encrypted[0] = (encrypted[0] ?? 0) ^ 0xff;
-      expect(() => crypto.decryptData(encrypted, key, iv, tag)).toThrow(
-        CryptoError
-      );
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptData(encrypted, key, iv, tag);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
 
     it('should fail with tampered tag', () => {
@@ -2218,9 +2272,15 @@ describe('CryptoManager', () => {
 
       const { encrypted, tag } = crypto.encryptData(data, key, iv);
       tag[0] = (tag[0] ?? 0) ^ 0xff;
-      expect(() => crypto.decryptData(encrypted, key, iv, tag)).toThrow(
-        CryptoError
-      );
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptData(encrypted, key, iv, tag);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPTION_FAILED');
+      expect(caught?.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
     });
 
     it('encryptData with reused (key, iv) is deterministic — security boundary documentation (Task 17 / M17)', () => {

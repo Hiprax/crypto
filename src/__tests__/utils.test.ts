@@ -30,7 +30,7 @@ import {
   getFileInfo,
 } from '../utils';
 import { CryptoError, CryptoErrorType } from '../types';
-import { CryptoManager } from '../crypto-manager';
+import { CryptoManager, isValidPassword } from '../crypto-manager';
 import { writeFile, unlink } from 'node:fs/promises';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -1206,6 +1206,59 @@ describe('Utils', () => {
       expect(result.feedback).not.toContain(
         'Password must contain at least one special character'
       );
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // Phase 4 (pw-parity): validatePasswordStrength.isValid must agree
+  // exactly with isValidPassword across all inputs. Repeat-character
+  // penalties (score/feedback) must NOT affect isValid.
+  // -----------------------------------------------------------------
+  describe('validatePasswordStrength ⟷ isValidPassword parity', () => {
+    it('isValid must equal isValidPassword for every input in the battery', () => {
+      // Battery covers the two regression cases plus representative
+      // accept/reject inputs for both acceptance rules.
+      const battery: Array<string | null> = [
+        // Regression: repeat-char penalties previously flipped isValid vs isValidPassword
+        'Aaaa1234_', // repeat 'aaa' — isValidPassword=true, old isValid was false
+        'Passw0rd!!!', // repeat '!!!' — isValidPassword=true, old isValid was false
+        // 8+ chars, all 4 categories, has repeats — still valid
+        'Ab1!aaaa',
+        // Cases isValidPassword rejects
+        'aaaaaaaa', // 8 lower-only, no upper/digit/special
+        'short1!', // 7 chars — too short
+        '', // empty string
+        // Passphrase rule: 20 lowercase 'a's
+        'aaaaaaaaaaaaaaaaaaaa',
+        // 8 chars, all 4 categories, no repeats
+        'Ab1!dcef',
+      ];
+      expect.assertions(battery.length + 1); // +1 for the null case below
+      for (const pw of battery) {
+        expect(validatePasswordStrength(pw as string).isValid).toBe(
+          isValidPassword(pw as string)
+        );
+      }
+      // Non-string: both functions must return false
+      expect(
+        validatePasswordStrength(null as unknown as string).isValid
+      ).toBe(isValidPassword(null as unknown as string));
+    });
+
+    it('regression: Aaaa1234_ is valid under both validators', () => {
+      expect(validatePasswordStrength('Aaaa1234_').isValid).toBe(true);
+      expect(isValidPassword('Aaaa1234_')).toBe(true);
+    });
+
+    it('regression: Passw0rd!!! is valid under both validators', () => {
+      expect(validatePasswordStrength('Passw0rd!!!').isValid).toBe(true);
+      expect(isValidPassword('Passw0rd!!!')).toBe(true);
+    });
+
+    it('repeat-char feedback does not affect isValid when acceptance rules are met', () => {
+      const result = validatePasswordStrength('Aaaa1234_');
+      expect(result.isValid).toBe(true);
+      expect(result.feedback).toContain('Avoid repeated characters');
     });
   });
 

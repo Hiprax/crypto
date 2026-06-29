@@ -761,10 +761,22 @@ export async function getFileInfo(filePath: string): Promise<FileInfo> {
 /**
  * Validate password strength with detailed feedback.
  *
- * Mirrors the binary acceptance rules used by `CryptoManager.validatePassword`
- * (long passphrase OR 8+ chars with all four character categories) but
- * additionally returns a 0-5 score and human-readable feedback messages
- * suitable for surfacing in UIs.
+ * `isValid` is computed from the same two acceptance rules as
+ * `isValidPassword` in `crypto-manager.ts` — a password is accepted if
+ * EITHER:
+ *
+ *  1. **Passphrase rule (NIST SP 800-63B style):** length ≥ 20, regardless
+ *     of character composition.
+ *  2. **Composition rule:** length ≥ 8 AND contains at least one uppercase
+ *     letter, one lowercase letter, one digit, and one non-alphanumeric
+ *     character (`[^A-Za-z0-9]`).
+ *
+ * `score` (0–5) and `feedback` are **advisory** — they surface stylistic
+ * weaknesses such as repeated-character patterns that `isValid` intentionally
+ * ignores. A password may have `isValid: true` while still carrying a
+ * `feedback` entry (e.g. "Avoid repeated characters") or a score below 5.
+ * UI code should gate on `isValid` and use `score` / `feedback` for
+ * guidance only.
  *
  * The "special character" check accepts any character outside the
  * alphanumeric class (`[^A-Za-z0-9]`), broader than the previous narrow
@@ -772,7 +784,8 @@ export async function getFileInfo(filePath: string): Promise<FileInfo> {
  * `]`, and non-ASCII punctuation all count.
  *
  * @param password - Password to validate
- * @returns Object with validation result and feedback
+ * @returns Object with `isValid` (mirrors `isValidPassword` exactly),
+ *          `score` (advisory, 0–5), and `feedback` (advisory strings)
  */
 export function validatePasswordStrength(password: string): {
   isValid: boolean;
@@ -801,7 +814,26 @@ export function validatePasswordStrength(password: string): {
     };
   }
 
-  // Length check
+  // Pre-compute category booleans — used both for isValid (below) and for
+  // the advisory score/feedback checks, so each regex runs exactly once.
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumbers = /\d/.test(password);
+  // Any non-alphanumeric character counts as "special" — broader than the
+  // previous narrow allow-list and consistent with `isValidPassword`.
+  const hasSpecialChar = /[^A-Za-z0-9]/.test(password);
+
+  // Binary validity: mirrors the composition rule of `isValidPassword` exactly.
+  // Repeat-character penalties below may add to `feedback` and reduce `score`
+  // without affecting this verdict — they are advisory strength signals only.
+  const isValid =
+    password.length >= 8 &&
+    hasUpperCase &&
+    hasLowerCase &&
+    hasNumbers &&
+    hasSpecialChar;
+
+  // Length check (advisory)
   if (password.length < 8) {
     feedback.push('Password must be at least 8 characters long');
   } else if (password.length >= 12) {
@@ -810,35 +842,32 @@ export function validatePasswordStrength(password: string): {
     score += 1;
   }
 
-  // Character variety checks
-  if (/[A-Z]/.test(password)) {
+  // Character variety checks (advisory score and feedback)
+  if (hasUpperCase) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one uppercase letter');
   }
 
-  if (/[a-z]/.test(password)) {
+  if (hasLowerCase) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one lowercase letter');
   }
 
-  if (/\d/.test(password)) {
+  if (hasNumbers) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one number');
   }
 
-  // Broader "special character" rule: any non-alphanumeric character. This
-  // matches `CryptoManager.validatePassword` so the two validators do not
-  // disagree on the same input.
-  if (/[^A-Za-z0-9]/.test(password)) {
+  if (hasSpecialChar) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one special character');
   }
 
-  // Additional strength checks
+  // Additional strength checks (advisory)
   if (password.length >= 16) {
     score += 1;
   }
@@ -852,8 +881,6 @@ export function validatePasswordStrength(password: string): {
     score -= 2;
     feedback.push('Avoid using the same character repeatedly');
   }
-
-  const isValid = score >= 4 && feedback.length === 0;
 
   return {
     isValid,

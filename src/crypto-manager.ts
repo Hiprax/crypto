@@ -2150,18 +2150,29 @@ export class CryptoManager {
         // Trailing auth tag.
         await writeChunk(cipher.getAuthTag());
       } finally {
-        // Always close the write stream so the OS can release the file
-        // handle before we attempt to rename or unlink it.
-        await new Promise<void>((resolve, reject) => {
-          outputStream.end((err?: Error | null) => {
-            if (err) reject(err);
-            else resolve();
+        // Close without rejecting — a close/flush error is captured by
+        // onStreamError and re-thrown below. Rejecting here would mask an
+        // in-flight error (a throw in `finally` replaces the current
+        // exception). Skip end() on an already-destroyed stream to avoid
+        // ERR_STREAM_DESTROYED; with the persistent 'error' listener
+        // attached, end(cb) still fires its callback on a failed-open
+        // stream, so this path neither hangs nor crashes the process.
+        if (!outputStream.destroyed) {
+          await new Promise<void>((resolve) => {
+            outputStream.end(() => resolve());
           });
-        });
+        }
         // Remove the persistent error listener now that the stream is
         // closed — prevents a dangling reference on the (now-closed)
         // stream object.
         outputStream.removeListener('error', onStreamError);
+      }
+
+      // Surface any stream error captured by onStreamError that was not
+      // already thrown by writeChunk or pipeline (belt-and-suspenders;
+      // on the success path streamError is null — no-op).
+      if (streamError !== null) {
+        throw streamError;
       }
 
       // Atomically promote the temp file to the final output path.
@@ -2466,6 +2477,22 @@ export class CryptoManager {
       // fed back into update(). For empty bodies (bodyLen === 0) we skip
       // the read stream and just call decipher.final() to authenticate.
       const outputStream = createWriteStream(tempPath, { flags: 'w' });
+
+      // Persistent stream-error guard for the output stream's lifetime.
+      // Without this, an 'error' event on outputStream with no listener
+      // (e.g. a failed file-open when tempPath's parent is actually a
+      // regular file → ENOTDIR) causes Node to raise ERR_UNHANDLED_ERROR
+      // and crash the host process. With the listener, the error is
+      // captured in streamError and re-thrown explicitly after the finally
+      // so the outer catch can clean up the temp file and wrap it as
+      // FILE_DECRYPTION_FAILED. This mirrors the onStreamError guard that
+      // encryptFile has had since v1.4.0 (Phase 2 of the v1.4.0 plan).
+      let streamError: Error | null = null;
+      const onStreamError = (err: Error): void => {
+        if (streamError === null) streamError = err;
+      };
+      outputStream.on('error', onStreamError);
+
       try {
         if (bodyLen > 0) {
           const inputStream = createReadStream(inputPath, {
@@ -2526,12 +2553,27 @@ export class CryptoManager {
           }
         }
       } finally {
-        await new Promise<void>((resolve, reject) => {
-          outputStream.end((err?: Error | null) => {
-            if (err) reject(err);
-            else resolve();
+        // Close without rejecting — a close/flush error is captured by
+        // onStreamError and re-thrown below. Rejecting here would mask an
+        // in-flight error (a throw in `finally` replaces the current
+        // exception). Skip end() on an already-destroyed stream to avoid
+        // ERR_STREAM_DESTROYED; with the persistent 'error' listener
+        // attached, end(cb) still fires its callback on a failed-open
+        // stream, so this path neither hangs nor crashes the process.
+        if (!outputStream.destroyed) {
+          await new Promise<void>((resolve) => {
+            outputStream.end(() => resolve());
           });
-        });
+        }
+        outputStream.removeListener('error', onStreamError);
+      }
+
+      // Surface a stream error captured by onStreamError that was not
+      // already thrown by the body pipeline (e.g. a failed temp-file open
+      // on the empty-body path where pipeline() is never called).
+      // On the success path streamError is null — this is a no-op.
+      if (streamError !== null) {
+        throw streamError;
       }
 
       // Atomic rename and scrub key material.

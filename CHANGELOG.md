@@ -33,6 +33,7 @@
 - `CLAUDE.md` — updated Constructor Options table to document the upper bounds; updated design decision §9 and `encryptFileSync` method bullet to reflect chunked streaming.
 - `src/__tests__/crypto-manager.test.ts` — strengthened wrong-password/tamper decryption tests with `.code` and `.type` assertions (10 tests in 4 describe blocks); no production code changed.
 - `src/__tests__/property.test.ts` — added `writeFileSync`/`readFileSync`/`unlinkSync` to imports; added sync-file round-trip property in `round-trip invariants`.
+- **Documentation accuracy pass** (`CLAUDE.md`, `README.md`): corrected `CLAUDE.md` to add `src/format.ts` to the Architecture source tree; updated Entry Point section to include named exports `SECURITY_THRESHOLDS` and `isValidPassword` and wildcard re-export from `./format.js`; corrected optional-dependency claim to name both `argon2` and `hash-wasm`; expanded Argon2 lazy-load section to document the native→hash-wasm fallback chain and unified `Argon2Hasher` interface; added `SECURITY.md` and `CHANGELOG.md` to the "What Gets Published" list; fixed tsconfig Outputs claim (only `.js` and `.d.ts` — no source maps; `sourceMap: false`/`declarationMap: false`); fixed PBKDF2 default in Key Design Decision #1 from "100k" to "600,000"; corrected `test`/`test:coverage`/`test:watch` script commands to include `cross-env NODE_OPTIONS=--experimental-vm-modules`; updated overview version to v1.4.0; updated Key Design Decision #7 to name both optional runtime dependencies. Updated TypeScript badge in `README.md` from `5.8.3` to `6.0.3`.
 
 ---
 

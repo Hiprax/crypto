@@ -1355,3 +1355,257 @@ describe('Phase 1 — async 0-byte file end-to-end round-trip (Task 1.3)', () =>
     60_000 // Argon2 key derivation runs twice (once for encrypt, once for decrypt)
   );
 });
+
+// ---------------------------------------------------------------------------
+// 10. Phase 3 — Task 3.1: encryptFileSync scrubs the plaintext chunk buffer
+//     on error paths
+// ---------------------------------------------------------------------------
+//
+// Before the fix, `chunk` was declared `const` inside the `try` block — the
+// `catch` block could not reference it and only scrubbed `key`.  If anything
+// after `readSync` threw (ENOSPC mid-stream, cipher failure, etc.), up to
+// 64 KiB of user plaintext was left un-zeroed in heap until GC.
+//
+// After the fix, `chunk` is hoisted to `let chunk: Buffer | null = null`
+// before the `try` block, assigned where it used to be declared, and
+// `if (chunk !== null) { this.secureClear(chunk); }` runs at the top of the
+// `catch` block (alongside the existing `secureClear(key)` call).
+//
+// Note: this scope covers only `encryptFileSync`'s plaintext chunk.
+// `decryptFileSync`'s chunk holds ciphertext, not plaintext, and is
+// deliberately left unmodified.
+
+describe('Phase 3 — encryptFileSync plaintext-chunk scrub on error path (Task 3.1)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.resetModules();
+  });
+
+  it(
+    'mid-body writeFileSync failure triggers secureClear on the 64 KiB plaintext chunk',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Count calls to writeFileSync inside encryptFileSync's success path:
+      //   call #1 → prefix [header + salt + iv]  (must succeed)
+      //   call #2 → first ciphertext body chunk   (injected failure)
+      // Requiring a non-empty input guarantees the loop executes at least once
+      // and readSync populates the plaintext chunk before the write fails.
+      let writeFileSyncCalls = 0;
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        writeFileSync: jest.fn((...args: unknown[]) => {
+          writeFileSyncCalls += 1;
+          if (writeFileSyncCalls === 2) {
+            throw new Error('EIO: injected body write failure');
+          }
+          return (
+            realFs.writeFileSync as unknown as (...a: unknown[]) => void
+          )(...args);
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+      // Spy on this specific instance to observe every secureClear call.
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+
+      const inputPath = path.join(TEST_DIR, 'ph3-chunk-scrub-input.txt');
+      const outputPath = path.join(
+        TEST_DIR,
+        'ph3-chunk-scrub-output.bin'
+      );
+      writeFileSync(
+        inputPath,
+        'non-empty plaintext — must populate chunk before write fails'
+      );
+
+      try {
+        expect(() =>
+          cm.encryptFileSync(inputPath, outputPath, TEST_PASSWORD)
+        ).toThrow();
+
+        // secureClear must have been called with the 64 KiB plaintext chunk.
+        // Without the fix, chunk was out of scope in the catch and was never
+        // passed to secureClear on error paths.
+        const chunkCall = clearSpy.mock.calls.find(
+          ([buf]) => buf instanceof Buffer && buf.length === 64 * 1024
+        );
+        expect(chunkCall).toBeDefined();
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 11. Phase 3 — Task 3.2: benign inputFd closeSync failure does not discard
+//     completed work in encryptFileSync / decryptFileSync
+// ---------------------------------------------------------------------------
+//
+// Before the fix, the success path did `closeSync(inputFd)` bare in the `try`
+// block.  If it threw (rare EBADF/EIO on the read-only input fd, AFTER all
+// crypto and output-writing had succeeded and outputFd was already closed), the
+// exception landed in the `catch`, which called `safeUnlinkSync(tempPath)` and
+// discarded the complete, valid temp file — turning a benign close into total
+// data loss.
+//
+// After the fix, both methods wrap `closeSync(inputFd)` in a best-effort
+// try/catch that swallows the error and nulls `inputFd` unconditionally.  Only
+// an `outputFd` close failure (which CAN signal unflushed output) can now abort
+// before the rename.
+//
+// Mock strategy: intercept `closeSync` via `jest.unstable_mockModule('node:fs')`
+// and count calls globally across both operations.  For the encryptFileSync
+// test, call #2 (inputFd close) throws; for the decryptFileSync test, call #4
+// (inputFd close during decrypt, after calls 1-3 from encrypt+decrypt outputFd
+// closes succeed) throws.
+
+describe('Phase 3 — benign inputFd closeSync failure does not discard completed work (Task 3.2)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'encryptFileSync: closeSync(inputFd) failure after full crypto+output success still completes',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // encryptFileSync success path closeSync order:
+      //   call #1 → closeSync(outputFd)   must succeed (output data integrity)
+      //   call #2 → closeSync(inputFd)    simulated benign failure
+      let closeSyncCalls = 0;
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        closeSync: jest.fn((...args: unknown[]) => {
+          closeSyncCalls += 1;
+          if (closeSyncCalls === 2) {
+            throw new Error('EIO: injected inputFd close failure');
+          }
+          return (
+            realFs.closeSync as unknown as (...a: unknown[]) => void
+          )(...args);
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+      const inputPath = path.join(TEST_DIR, 'ph3-enc-ci-plain.txt');
+      const outputPath = path.join(TEST_DIR, 'ph3-enc-ci-out.bin');
+      const decPath = path.join(TEST_DIR, 'ph3-enc-ci-dec.txt');
+      const plaintext = 'encrypt-closeSync-benign-failure test';
+      writeFileSync(inputPath, plaintext);
+
+      try {
+        // Must NOT throw despite call #2 (inputFd close) failing.
+        expect(() =>
+          cm.encryptFileSync(inputPath, outputPath, TEST_PASSWORD)
+        ).not.toThrow();
+
+        expect(existsSync(outputPath)).toBe(true);
+
+        // Round-trip decrypt to confirm data integrity.  The decrypt uses
+        // closeSync calls #3 (outputFd) and #4 (inputFd) — neither triggers
+        // the mock throw (only call #2 throws).
+        cm.decryptFileSync(outputPath, decPath, TEST_PASSWORD);
+        expect(readFileSync(decPath, 'utf8')).toBe(plaintext);
+      } finally {
+        for (const p of [inputPath, outputPath, decPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    }
+  );
+
+  it(
+    'decryptFileSync: closeSync(inputFd) failure after full crypto+auth success still completes',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Call layout across both operations:
+      //   call #1 → encryptFileSync closeSync(outputFd)  → succeeds
+      //   call #2 → encryptFileSync closeSync(inputFd)   → succeeds
+      //   call #3 → decryptFileSync closeSync(outputFd)  → succeeds
+      //   call #4 → decryptFileSync closeSync(inputFd)   → injected failure
+      // Call #4 tests that the validated plaintext temp file is NOT discarded.
+      let closeSyncCalls = 0;
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        closeSync: jest.fn((...args: unknown[]) => {
+          closeSyncCalls += 1;
+          if (closeSyncCalls === 4) {
+            throw new Error(
+              'EIO: injected inputFd close failure during decryptFileSync'
+            );
+          }
+          return (
+            realFs.closeSync as unknown as (...a: unknown[]) => void
+          )(...args);
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+      const inputPath = path.join(TEST_DIR, 'ph3-dec-ci-plain.txt');
+      const encPath = path.join(TEST_DIR, 'ph3-dec-ci-enc.bin');
+      const decPath = path.join(TEST_DIR, 'ph3-dec-ci-dec.txt');
+      const plaintext = 'decrypt-closeSync-benign-failure test';
+      writeFileSync(inputPath, plaintext);
+
+      try {
+        // Encrypt — uses closeSync calls #1 (outputFd) and #2 (inputFd),
+        // both succeed.
+        cm.encryptFileSync(inputPath, encPath, TEST_PASSWORD);
+        expect(existsSync(encPath)).toBe(true);
+
+        // Decrypt — uses closeSync calls #3 (outputFd, succeeds) and #4
+        // (inputFd, throws but is swallowed by the best-effort try/catch).
+        // Must NOT throw and must leave the decrypted plaintext intact.
+        expect(() =>
+          cm.decryptFileSync(encPath, decPath, TEST_PASSWORD)
+        ).not.toThrow();
+
+        expect(existsSync(decPath)).toBe(true);
+        expect(readFileSync(decPath, 'utf8')).toBe(plaintext);
+      } finally {
+        for (const p of [inputPath, encPath, decPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    }
+  );
+});

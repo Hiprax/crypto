@@ -2691,6 +2691,10 @@ export class CryptoManager {
     let inputFd: number | null = null;
     let outputFd: number | null = null;
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub up to 64 KiB of plaintext if the
+    // operation fails after the chunk buffer has been allocated. May be null
+    // if the failure occurs before the allocation (early validation throws).
+    let chunk: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2757,7 +2761,7 @@ export class CryptoManager {
 
       // Stream the plaintext in fixed-size chunks. The reuse buffer keeps
       // peak memory proportional to the chunk size regardless of input size.
-      const chunk = Buffer.alloc(this.SYNC_ENCRYPT_CHUNK_SIZE);
+      chunk = Buffer.alloc(this.SYNC_ENCRYPT_CHUNK_SIZE);
       let inputOffset = 0;
 
       while (inputOffset < totalBytes) {
@@ -2810,8 +2814,16 @@ export class CryptoManager {
       outputFd = null;
 
       // Close the input fd (holding it open through the rename is
-      // unnecessary).
-      closeSync(inputFd);
+      // unnecessary). A failure here is benign — the input is read-only
+      // and all crypto + output writing has already succeeded; only an
+      // outputFd close failure (above) can indicate unflushed or corrupt
+      // output. Wrap best-effort so a rare EIO/EBADF cannot discard the
+      // completed temp file.
+      try {
+        closeSync(inputFd);
+      } catch {
+        // ignore — benign close failure on read-only input fd
+      }
       inputFd = null;
 
       // Atomic rename — final outputPath now reflects the full ciphertext.
@@ -2825,6 +2837,11 @@ export class CryptoManager {
       this.secureClear(chunk);
       this.secureClear(key);
     } catch (error) {
+      // Scrub the plaintext reuse buffer if it was allocated before the
+      // failure — it may hold up to 64 KiB of user plaintext in heap.
+      if (chunk !== null) {
+        this.secureClear(chunk);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -3167,9 +3184,17 @@ export class CryptoManager {
       closeSync(outputFd);
       outputFd = null;
 
-      // Close input handle (keeping it open through the rename below is
-      // unnecessary).
-      closeSync(inputFd);
+      // Close the input handle (keeping it open through the rename below
+      // is unnecessary). A failure here is benign — the input is
+      // read-only and authentication + output writing have already
+      // succeeded; only an outputFd close failure (above) can indicate
+      // data loss. Wrap best-effort so a rare EIO/EBADF cannot discard
+      // the validated plaintext temp file.
+      try {
+        closeSync(inputFd);
+      } catch {
+        // ignore — benign close failure on read-only input fd
+      }
       inputFd = null;
 
       // Atomic rename — promotes the validated plaintext to the canonical

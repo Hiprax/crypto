@@ -566,13 +566,33 @@ describe('CryptoManager', () => {
       expect(result).not.toBe(testText);
     });
 
-    it('should throw error for invalid text', async () => {
-      await expect(crypto.encryptText('', testPassword)).rejects.toThrow(
-        CryptoError
-      );
-      await expect(
-        crypto.encryptText(null as unknown as string, testPassword)
-      ).rejects.toThrow(CryptoError);
+    it('should throw INVALID_TEXT for null/undefined text', async () => {
+      let caught: CryptoError | undefined;
+      try {
+        await crypto.encryptText(null as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_TEXT');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      caught = undefined;
+      try {
+        await crypto.encryptText(undefined as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_TEXT');
+    });
+
+    it('should encrypt and round-trip the empty string', async () => {
+      const enc = await crypto.encryptText('', testPassword);
+      expect(typeof enc).toBe('string');
+      expect(enc.length).toBeGreaterThan(0);
+      const dec = await crypto.decryptText(enc, testPassword);
+      expect(dec).toBe('');
     });
 
     it('should throw error for invalid password', async () => {
@@ -1141,13 +1161,33 @@ describe('CryptoManager', () => {
       expect(result).not.toBe(testText);
     });
 
-    it('should throw error for invalid text', () => {
-      expect(() => crypto.encryptTextSync('', testPassword)).toThrow(
-        CryptoError
-      );
-      expect(() =>
-        crypto.encryptTextSync(null as unknown as string, testPassword)
-      ).toThrow(CryptoError);
+    it('should throw INVALID_TEXT for null/undefined text', () => {
+      let caught: CryptoError | undefined;
+      try {
+        crypto.encryptTextSync(null as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_TEXT');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      caught = undefined;
+      try {
+        crypto.encryptTextSync(undefined as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_TEXT');
+    });
+
+    it('should encrypt and round-trip the empty string (sync)', () => {
+      const enc = crypto.encryptTextSync('', testPassword);
+      expect(typeof enc).toBe('string');
+      expect(enc.length).toBeGreaterThan(0);
+      const dec = crypto.decryptTextSync(enc, testPassword);
+      expect(dec).toBe('');
     });
 
     it('should throw error for invalid password', () => {

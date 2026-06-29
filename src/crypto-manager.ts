@@ -1486,15 +1486,17 @@ export class CryptoManager {
 
   /**
    * Encrypt text with password
-   * @param text - Text to encrypt
+   * @param text - Text to encrypt (the empty string `''` is accepted and
+   *   produces a valid authenticated ciphertext; only `null` and `undefined`
+   *   are rejected)
    * @param password - Encryption password (optional if default passphrase is set)
    * @returns Base64url encoded encrypted data (v1 format)
    * @throws CryptoError if encryption fails
    */
   public async encryptText(text: string, password?: string): Promise<string> {
-    if (!text || typeof text !== 'string') {
+    if (text === undefined || text === null || typeof text !== 'string') {
       throw new CryptoError(
-        'Text must be a non-empty string',
+        'Text must be a string',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_TEXT'
       );
@@ -1704,15 +1706,17 @@ export class CryptoManager {
 
   /**
    * Encrypt text with password (synchronous version)
-   * @param text - Text to encrypt
+   * @param text - Text to encrypt (the empty string `''` is accepted and
+   *   produces a valid authenticated ciphertext; only `null` and `undefined`
+   *   are rejected)
    * @param password - Encryption password (optional if default passphrase is set)
    * @returns Base64url encoded encrypted data (v1 format)
    * @throws CryptoError if encryption fails
    */
   public encryptTextSync(text: string, password?: string): string {
-    if (!text || typeof text !== 'string') {
+    if (text === undefined || text === null || typeof text !== 'string') {
       throw new CryptoError(
-        'Text must be a non-empty string',
+        'Text must be a string',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_TEXT'
       );

@@ -624,6 +624,28 @@ describe('CryptoManager', () => {
       ).rejects.toThrow(CryptoError);
     });
 
+    it('should throw CryptoError for non-string path arguments', async () => {
+      let caught: CryptoError | undefined;
+      try {
+        await crypto.encryptFile(5 as unknown as string, encryptedFilePath, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      caught = undefined;
+      try {
+        await crypto.encryptFile(testFilePath, {} as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
     it('should throw error for weak password', async () => {
       await expect(
         crypto.encryptFile(testFilePath, encryptedFilePath, 'weak')
@@ -717,6 +739,28 @@ describe('CryptoManager', () => {
       await expect(
         crypto.decryptFile(encryptedFilePath, '', testPassword)
       ).rejects.toThrow(CryptoError);
+    });
+
+    it('should throw CryptoError for non-string path arguments', async () => {
+      let caught: CryptoError | undefined;
+      try {
+        await crypto.decryptFile(5 as unknown as string, decryptedFilePath, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      caught = undefined;
+      try {
+        await crypto.decryptFile(encryptedFilePath, {} as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
     });
 
     it('should throw error for non-existent input file', async () => {
@@ -1151,6 +1195,28 @@ describe('CryptoManager', () => {
       ).toThrow(CryptoError);
     });
 
+    it('should throw CryptoError for non-string path arguments', () => {
+      let caught: CryptoError | undefined;
+      try {
+        crypto.encryptFileSync(5 as unknown as string, encryptedFilePath, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      caught = undefined;
+      try {
+        crypto.encryptFileSync(testFilePath, {} as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
     it('should throw error for weak password', () => {
       expect(() =>
         crypto.encryptFileSync(testFilePath, encryptedFilePath, 'weak')
@@ -1248,6 +1314,28 @@ describe('CryptoManager', () => {
       expect(() =>
         crypto.decryptFileSync(encryptedFilePath, '', testPassword)
       ).toThrow(CryptoError);
+    });
+
+    it('should throw CryptoError for non-string path arguments', () => {
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptFileSync(5 as unknown as string, decryptedFilePath, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      caught = undefined;
+      try {
+        crypto.decryptFileSync(encryptedFilePath, {} as unknown as string, testPassword);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MISSING_REQUIRED_PARAMS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
     });
 
     it('should throw error for non-existent input file', () => {

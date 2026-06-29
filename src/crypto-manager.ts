@@ -1911,7 +1911,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2254,7 +2254,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2332,7 +2332,19 @@ export class CryptoManager {
         const frontReadLen = Math.min(maxFrontLen, totalSize);
         const front = Buffer.alloc(frontReadLen);
         if (frontReadLen > 0) {
-          await fileHandle.read(front, 0, frontReadLen, 0);
+          const { bytesRead: frontBytesRead } = await fileHandle.read(
+            front,
+            0,
+            frontReadLen,
+            0
+          );
+          if (frontBytesRead !== frontReadLen) {
+            throw new CryptoError(
+              'Failed to read full file header region',
+              CryptoErrorType.INVALID_INPUT,
+              'INVALID_ENCRYPTED_FILE_SIZE'
+            );
+          }
         }
 
         if (hasMagic(front)) {
@@ -2603,7 +2615,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2809,7 +2821,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,

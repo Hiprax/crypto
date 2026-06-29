@@ -971,3 +971,85 @@ describe('outputStream write error injection (Phase 2 / Task 2.2)', () => {
     10_000
   );
 });
+
+// ---------------------------------------------------------------------------
+// 6. decryptFile short front-matter read (Phase 5, Task 5.1)
+// ---------------------------------------------------------------------------
+//
+// Verifies that the async decryptFile path throws INVALID_ENCRYPTED_FILE_SIZE
+// when fileHandle.read() returns fewer bytes than requested for the front-
+// matter region (header + salt + iv). This mirrors the check already present
+// in the sync path (decryptFileSync). The scenario is triggered via a mock
+// that reports a large file via stat() but returns bytesRead: 0 on read().
+
+describe('decryptFile short front-matter read (Phase 5)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'async: short front-matter read → INVALID_ENCRYPTED_FILE_SIZE with INVALID_INPUT type',
+    async () => {
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Mock open() to return a synthetic FileHandle where stat() claims a
+      // large file but read() always returns bytesRead: 0, simulating a
+      // short read from a truncated or remote-backed file.
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+        open: jest.fn(async () => ({
+          stat: jest.fn(async () => ({ size: 1000 })),
+          read: jest.fn(async () => ({ bytesRead: 0 })),
+          close: jest.fn(async () => {}),
+        })),
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(TEST_DIR, 'short-read-input.bin');
+      const outputPath = path.join(TEST_DIR, 'short-read-output.txt');
+      // Create a real file so existsSync(inputPath) passes before open() is called.
+      writeFileSync(inputPath, Buffer.alloc(100));
+
+      try {
+        let caught: unknown;
+        try {
+          await cm.decryptFile(inputPath, outputPath, TEST_PASSWORD);
+        } catch (e) {
+          caught = e;
+        }
+
+        expect(caught).toBeInstanceOf(CryptoError);
+        expect((caught as InstanceType<typeof CryptoError>).code).toBe(
+          'INVALID_ENCRYPTED_FILE_SIZE'
+        );
+        expect((caught as InstanceType<typeof CryptoError>).type).toBe(
+          CryptoErrorType.INVALID_INPUT
+        );
+
+        // No orphan temp files should remain after an early-exit error.
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) =>
+            e.startsWith('short-read-output.txt.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+      } finally {
+        if (existsSync(inputPath)) unlinkSync(inputPath);
+        if (existsSync(outputPath)) unlinkSync(outputPath);
+      }
+    },
+    10_000
+  );
+});

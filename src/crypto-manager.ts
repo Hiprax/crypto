@@ -1627,20 +1627,51 @@ export class CryptoManager {
       let headerForAad: Buffer | null = null;
 
       if (hasMagic(combined)) {
-        const parsed = parseHeader(combined);
-        this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
-        if (parsed.params.kind === 'argon2id') {
-          argonOverrides = {
-            memoryCost: parsed.params.memoryCost,
-            timeCost: parsed.params.timeCost,
-            parallelism: parsed.params.parallelism,
-          };
+        // Attempt to parse as v1. parseHeader + assertKdfMatches are wrapped
+        // so that a rare magic-collision on a v0 random salt (~2^-32 per
+        // ciphertext) triggers the auto-mode recovery path rather than
+        // becoming a permanent data-loss. A genuine v1 ciphertext always has
+        // a valid parseable header, so this catch is unreachable for
+        // well-formed v1 data — only colliding v0 blobs land here. We never
+        // catch decipher.final() / GCM tag failures (those happen later and
+        // indicate wrong password or tampering, not misclassification).
+        try {
+          const parsed = parseHeader(combined);
+          this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
+          if (parsed.params.kind === 'argon2id') {
+            argonOverrides = {
+              memoryCost: parsed.params.memoryCost,
+              timeCost: parsed.params.timeCost,
+              parallelism: parsed.params.parallelism,
+            };
+          }
+          bodyOffset = parsed.headerLen;
+          // Slice on-disk header bytes (subarray shares memory with `combined`,
+          // so it is automatically scrubbed when we call `secureClear(combined)`
+          // at the end of the success path).
+          headerForAad = combined.subarray(0, parsed.headerLen);
+        } catch (headerParseErr) {
+          // Header parse failed. In non-auto modes, re-throw so that
+          // UNSUPPORTED_VERSION / UNSUPPORTED_KDF / KDF_MISMATCH remain
+          // observable to callers and future-versioned ciphertexts are not
+          // mis-reported as legacy. In auto mode we fall back to v0, with
+          // one exception: KDF_PARAMS_OUT_OF_BOUNDS is always re-thrown so
+          // that DoS-prevention (fast rejection before any KDF work) is
+          // preserved regardless of magic-collision possibility.
+          if (this.legacyMode !== 'auto') {
+            throw headerParseErr;
+          }
+          if (
+            headerParseErr instanceof CryptoError &&
+            (headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS' ||
+              headerParseErr.code === 'INVALID_HEADER_PARAM')
+          ) {
+            throw headerParseErr;
+          }
+          // auto: treat the full buffer as v0 [salt][iv][tag][body].
+          // headerForAad stays null; argonOverrides stays undefined.
+          bodyOffset = 0;
         }
-        bodyOffset = parsed.headerLen;
-        // Slice on-disk header bytes (subarray shares memory with `combined`,
-        // so it is automatically scrubbed when we call `secureClear(combined)`
-        // at the end of the success path).
-        headerForAad = combined.subarray(0, parsed.headerLen);
       } else {
         this.enforceLegacyMode();
         bodyOffset = 0;
@@ -1836,13 +1867,33 @@ export class CryptoManager {
       let headerForAad: Buffer | null = null;
 
       if (hasMagic(combined)) {
-        const parsed = parseHeader(combined);
-        this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
-        if (parsed.params.kind === 'pbkdf2-sha256') {
-          pbkdf2Iterations = parsed.params.iterations;
+        // See decryptText for the full magic-collision recovery rationale.
+        // For the sync path, pbkdf2Iterations is already initialised to
+        // this.legacyPbkdf2Iterations (the v0 default), so no reset is
+        // needed in the catch block.
+        try {
+          const parsed = parseHeader(combined);
+          this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
+          if (parsed.params.kind === 'pbkdf2-sha256') {
+            pbkdf2Iterations = parsed.params.iterations;
+          }
+          bodyOffset = parsed.headerLen;
+          headerForAad = combined.subarray(0, parsed.headerLen);
+        } catch (headerParseErr) {
+          if (this.legacyMode !== 'auto') {
+            throw headerParseErr;
+          }
+          if (
+            headerParseErr instanceof CryptoError &&
+            (headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS' ||
+              headerParseErr.code === 'INVALID_HEADER_PARAM')
+          ) {
+            throw headerParseErr;
+          }
+          // auto: v0 fallback — headerForAad stays null;
+          // pbkdf2Iterations stays at this.legacyPbkdf2Iterations.
+          bodyOffset = 0;
         }
-        bodyOffset = parsed.headerLen;
-        headerForAad = combined.subarray(0, parsed.headerLen);
       } else {
         this.enforceLegacyMode();
         bodyOffset = 0;
@@ -2396,27 +2447,43 @@ export class CryptoManager {
         }
 
         if (hasMagic(front)) {
-          if (front.length < HEADER_LENGTH) {
-            throw new CryptoError(
-              'File is too small to contain a valid v1 header',
-              CryptoErrorType.INVALID_INPUT,
-              'INVALID_ENCRYPTED_FILE_SIZE'
-            );
+          // See decryptText for the full magic-collision recovery rationale.
+          try {
+            if (front.length < HEADER_LENGTH) {
+              throw new CryptoError(
+                'File is too small to contain a valid v1 header',
+                CryptoErrorType.INVALID_INPUT,
+                'INVALID_ENCRYPTED_FILE_SIZE'
+              );
+            }
+            const parsed = parseHeader(front);
+            this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
+            if (parsed.params.kind === 'argon2id') {
+              argonOverrides = {
+                memoryCost: parsed.params.memoryCost,
+                timeCost: parsed.params.timeCost,
+                parallelism: parsed.params.parallelism,
+              };
+            }
+            formatHeaderLen = parsed.headerLen;
+            // Copy the on-disk header bytes into a fresh Buffer (rather than
+            // a subarray) so the AAD reference outlives any later
+            // mutation/scrub of `front`.
+            headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
+          } catch (headerParseErr) {
+            if (this.legacyMode !== 'auto') {
+              throw headerParseErr;
+            }
+            if (
+              headerParseErr instanceof CryptoError &&
+              headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+            ) {
+              throw headerParseErr;
+            }
+            // auto: v0 fallback — headerForAad stays null;
+            // argonOverrides stays undefined.
+            formatHeaderLen = 0;
           }
-          const parsed = parseHeader(front);
-          this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
-          if (parsed.params.kind === 'argon2id') {
-            argonOverrides = {
-              memoryCost: parsed.params.memoryCost,
-              timeCost: parsed.params.timeCost,
-              parallelism: parsed.params.parallelism,
-            };
-          }
-          formatHeaderLen = parsed.headerLen;
-          // Copy the on-disk header bytes into a fresh Buffer (rather than
-          // a subarray) so the AAD reference outlives any later
-          // mutation/scrub of `front`.
-          headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
         } else {
           this.enforceLegacyMode();
           formatHeaderLen = 0;
@@ -3068,20 +3135,37 @@ export class CryptoManager {
       let headerForAad: Buffer | null = null;
 
       if (hasMagic(front)) {
-        if (front.length < HEADER_LENGTH) {
-          throw new CryptoError(
-            'File is too small to contain a valid v1 header',
-            CryptoErrorType.INVALID_INPUT,
-            'INVALID_ENCRYPTED_FILE_SIZE'
-          );
+        // See decryptText for the full magic-collision recovery rationale.
+        try {
+          if (front.length < HEADER_LENGTH) {
+            throw new CryptoError(
+              'File is too small to contain a valid v1 header',
+              CryptoErrorType.INVALID_INPUT,
+              'INVALID_ENCRYPTED_FILE_SIZE'
+            );
+          }
+          const parsed = parseHeader(front);
+          this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
+          if (parsed.params.kind === 'pbkdf2-sha256') {
+            pbkdf2Iterations = parsed.params.iterations;
+          }
+          formatHeaderLen = parsed.headerLen;
+          headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
+        } catch (headerParseErr) {
+          if (this.legacyMode !== 'auto') {
+            throw headerParseErr;
+          }
+          if (
+            headerParseErr instanceof CryptoError &&
+            (headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS' ||
+              headerParseErr.code === 'INVALID_HEADER_PARAM')
+          ) {
+            throw headerParseErr;
+          }
+          // auto: v0 fallback — headerForAad stays null;
+          // pbkdf2Iterations stays at this.legacyPbkdf2Iterations.
+          formatHeaderLen = 0;
         }
-        const parsed = parseHeader(front);
-        this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
-        if (parsed.params.kind === 'pbkdf2-sha256') {
-          pbkdf2Iterations = parsed.params.iterations;
-        }
-        formatHeaderLen = parsed.headerLen;
-        headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
       } else {
         this.enforceLegacyMode();
         formatHeaderLen = 0;

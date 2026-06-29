@@ -3997,6 +3997,209 @@ describe('CryptoManager', () => {
         expect(decrypted).toBe(testText);
       });
     });
+
+    describe('magic-collision recovery (v0 salt begins with "HPCR")', () => {
+      /**
+       * Build a colliding v0 async text ciphertext: standard v0 layout
+       * [salt][iv][tag][ciphertext], but the first 4 bytes of the salt are
+       * forced to "HPCR". Before the fix, hasMagic() returned true on such a
+       * blob and parseHeader threw on the random salt bytes, making it
+       * permanently undecryptable.
+       */
+      async function buildCollidingV0Text(
+        cm: CryptoManager,
+        text: string,
+        password: string
+      ): Promise<string> {
+        const salt = cm.generateSecureRandom(32);
+        Buffer.from('HPCR', 'ascii').copy(salt, 0);
+        const iv = cm.generateSecureRandom(12);
+        const key = await cm.deriveKey(password, salt);
+        const { encrypted, tag } = cm.encryptData(
+          Buffer.from(text, 'utf8'),
+          key,
+          iv
+        );
+        return Buffer.concat([salt, iv, tag, encrypted]).toString('base64url');
+      }
+
+      /** Sync variant (PBKDF2, 100k iterations — the historical v0 count). */
+      function buildCollidingV0TextSync(
+        cm: CryptoManager,
+        text: string,
+        password: string
+      ): string {
+        const salt = cm.generateSecureRandom(32);
+        Buffer.from('HPCR', 'ascii').copy(salt, 0);
+        const iv = cm.generateSecureRandom(12);
+        const key = cm.deriveKeySync(password, salt, 100000);
+        const { encrypted, tag } = cm.encryptData(
+          Buffer.from(text, 'utf8'),
+          key,
+          iv
+        );
+        return Buffer.concat([salt, iv, tag, encrypted]).toString('base64url');
+      }
+
+      /**
+       * Build a colliding v0 async file ciphertext: [salt][iv][ciphertext][tag].
+       */
+      async function buildCollidingV0File(
+        cm: CryptoManager,
+        content: Buffer,
+        password: string,
+        outputPath: string
+      ): Promise<void> {
+        const salt = cm.generateSecureRandom(32);
+        Buffer.from('HPCR', 'ascii').copy(salt, 0);
+        const iv = cm.generateSecureRandom(12);
+        const key = await cm.deriveKey(password, salt);
+        const { encrypted, tag } = cm.encryptData(content, key, iv);
+        await writeFile(outputPath, Buffer.concat([salt, iv, encrypted, tag]));
+      }
+
+      /** Sync file variant (PBKDF2, 100k iterations). */
+      function buildCollidingV0FileSync(
+        cm: CryptoManager,
+        content: Buffer,
+        password: string,
+        outputPath: string
+      ): void {
+        const salt = cm.generateSecureRandom(32);
+        Buffer.from('HPCR', 'ascii').copy(salt, 0);
+        const iv = cm.generateSecureRandom(12);
+        const key = cm.deriveKeySync(password, salt, 100000);
+        const { encrypted, tag } = cm.encryptData(content, key, iv);
+        writeFileSync(outputPath, Buffer.concat([salt, iv, encrypted, tag]));
+      }
+
+      it('round-trips a colliding v0 async text in auto mode', async () => {
+        const v0 = await buildCollidingV0Text(crypto, testText, testPassword);
+        // Guard: hasMagic must be true so we are testing the collision path.
+        expect(hasMagic(Buffer.from(v0, 'base64url'))).toBe(true);
+        const result = await crypto.decryptText(v0, testPassword);
+        expect(result).toBe(testText);
+      });
+
+      it('round-trips a colliding v0 sync text in auto mode', () => {
+        const v0 = buildCollidingV0TextSync(crypto, testText, testPassword);
+        expect(hasMagic(Buffer.from(v0, 'base64url'))).toBe(true);
+        const result = crypto.decryptTextSync(v0, testPassword);
+        expect(result).toBe(testText);
+      });
+
+      it('round-trips a colliding v0 async file in auto mode', async () => {
+        const filePath = path.join(tempDir, 'v0-collision-async.bin');
+        const outPath = path.join(tempDir, 'v0-collision-async-out.txt');
+        try {
+          await buildCollidingV0File(
+            crypto,
+            Buffer.from(testText, 'utf8'),
+            testPassword,
+            filePath
+          );
+          expect(hasMagic(readFileSync(filePath))).toBe(true);
+          await crypto.decryptFile(filePath, outPath, testPassword);
+          expect(await readFile(outPath, 'utf8')).toBe(testText);
+        } finally {
+          for (const f of [filePath, outPath]) {
+            if (existsSync(f)) await unlink(f);
+          }
+        }
+      });
+
+      it('round-trips a colliding v0 sync file in auto mode', () => {
+        const filePath = path.join(tempDir, 'v0-collision-sync.bin');
+        const outPath = path.join(tempDir, 'v0-collision-sync-out.txt');
+        try {
+          buildCollidingV0FileSync(
+            crypto,
+            Buffer.from(testText, 'utf8'),
+            testPassword,
+            filePath
+          );
+          expect(hasMagic(readFileSync(filePath))).toBe(true);
+          crypto.decryptFileSync(filePath, outPath, testPassword);
+          expect(readFileSync(outPath, 'utf8')).toBe(testText);
+        } finally {
+          for (const f of [filePath, outPath]) {
+            if (existsSync(f)) unlinkSync(f);
+          }
+        }
+      });
+
+      it('rejects a colliding v0 async text in strict mode (original parse error preserved)', async () => {
+        const v0 = await buildCollidingV0Text(crypto, testText, testPassword);
+        const strict = new CryptoManager({ legacyMode: 'strict' });
+        await expect(
+          strict.decryptText(v0, testPassword)
+        ).rejects.toBeInstanceOf(CryptoError);
+      });
+
+      it('rejects a colliding v0 sync text in reject mode (original parse error preserved)', () => {
+        const v0 = buildCollidingV0TextSync(crypto, testText, testPassword);
+        const rejected = new CryptoManager({ legacyMode: 'reject' });
+        expect(() => rejected.decryptTextSync(v0, testPassword)).toThrow(
+          CryptoError
+        );
+      });
+
+      it('rejects a colliding v0 async file in strict mode (original parse error preserved)', async () => {
+        const filePath = path.join(tempDir, 'v0-collision-strict-async.bin');
+        const outPath = path.join(tempDir, 'v0-collision-strict-async-out.txt');
+        try {
+          await buildCollidingV0File(
+            crypto,
+            Buffer.from(testText, 'utf8'),
+            testPassword,
+            filePath
+          );
+          const strict = new CryptoManager({ legacyMode: 'strict' });
+          await expect(
+            strict.decryptFile(filePath, outPath, testPassword)
+          ).rejects.toBeInstanceOf(CryptoError);
+          expect(existsSync(outPath)).toBe(false);
+        } finally {
+          for (const f of [filePath, outPath]) {
+            if (existsSync(f)) await unlink(f);
+          }
+        }
+      });
+
+      it('rejects a colliding v0 sync file in reject mode (original parse error preserved)', () => {
+        const filePath = path.join(tempDir, 'v0-collision-reject-sync.bin');
+        const outPath = path.join(tempDir, 'v0-collision-reject-sync-out.txt');
+        try {
+          buildCollidingV0FileSync(
+            crypto,
+            Buffer.from(testText, 'utf8'),
+            testPassword,
+            filePath
+          );
+          const rejected = new CryptoManager({ legacyMode: 'reject' });
+          expect(() =>
+            rejected.decryptFileSync(filePath, outPath, testPassword)
+          ).toThrow(CryptoError);
+          expect(existsSync(outPath)).toBe(false);
+        } finally {
+          for (const f of [filePath, outPath]) {
+            if (existsSync(f)) unlinkSync(f);
+          }
+        }
+      });
+
+      it('still throws on a v1 ciphertext with corrupted version byte (fallback to v0 → GCM auth fails)', async () => {
+        // Valid magic + bad version → parseHeader throws UNSUPPORTED_VERSION
+        // → auto fallback → wrong salt/key → decipher.final() tag mismatch
+        const encrypted = await crypto.encryptText(testText, testPassword);
+        const buf = Buffer.from(encrypted, 'base64url');
+        buf[4] = 0x99; // byte 4 is the version byte (after 4-byte magic)
+        const corrupt = buf.toString('base64url');
+        await expect(
+          crypto.decryptText(corrupt, testPassword)
+        ).rejects.toBeInstanceOf(CryptoError);
+      });
+    });
   });
 
   describe('versioned format - tampering & malformed input', () => {
@@ -4018,13 +4221,19 @@ describe('CryptoManager', () => {
       }
     });
 
-    it('should reject tampered version byte with UNSUPPORTED_VERSION', async () => {
+    it('should reject tampered version byte (auto mode: v0 fallback → GCM auth failure)', async () => {
+      // In auto mode, a bad version byte triggers the magic-collision recovery
+      // path (parseHeader throws → v0 fallback → wrong key → DECRYPTION_FAILED).
+      // In strict mode, the original UNSUPPORTED_VERSION error is preserved.
       const encrypted = await crypto.encryptText(testText, testPassword);
       const buf = Buffer.from(encrypted, 'base64url');
       buf[4] = 0x99; // corrupt version (still after intact magic)
       const tampered = buf.toString('base64url');
+      await expect(crypto.decryptText(tampered, testPassword)).rejects.toBeInstanceOf(CryptoError);
+      // strict mode preserves the original parse error code
+      const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
-        await crypto.decryptText(tampered, testPassword);
+        await strict.decryptText(tampered, testPassword);
         throw new Error('Expected throw');
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
@@ -4032,13 +4241,17 @@ describe('CryptoManager', () => {
       }
     });
 
-    it('should reject tampered KDF id with UNSUPPORTED_KDF', async () => {
+    it('should reject tampered KDF id (auto mode: v0 fallback → GCM auth failure)', async () => {
+      // Same rationale as the version-byte test above.
       const encrypted = await crypto.encryptText(testText, testPassword);
       const buf = Buffer.from(encrypted, 'base64url');
       buf[5] = 0x77; // corrupt kdfId
       const tampered = buf.toString('base64url');
+      await expect(crypto.decryptText(tampered, testPassword)).rejects.toBeInstanceOf(CryptoError);
+      // strict mode preserves the original parse error code
+      const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
-        await crypto.decryptText(tampered, testPassword);
+        await strict.decryptText(tampered, testPassword);
         throw new Error('Expected throw');
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
@@ -4046,37 +4259,33 @@ describe('CryptoManager', () => {
       }
     });
 
-    it('should reject KDF mismatch (sync ciphertext given to async decrypt)', () => {
-      // We can verify by manually crafting a Argon2id-tagged blob and feeding
-      // it to decryptTextSync (which expects PBKDF2). Use the encryptText
-      // (async) result as the source.
-      // Use deterministic test path: encrypt sync (PBKDF2) and try to decrypt
-      // via async path - that should yield KDF_MISMATCH.
+    it('should reject KDF mismatch (sync ciphertext given to async decrypt)', async () => {
+      // In auto mode, KDF_MISMATCH is caught → v0 fallback → wrong key → DECRYPTION_FAILED.
+      // Strict mode re-throws the original KDF_MISMATCH.
       const cm = new CryptoManager();
       const encrypted = cm.encryptTextSync(testText, testPassword);
+      // auto mode
+      await expect(cm.decryptText(encrypted, testPassword)).rejects.toBeInstanceOf(CryptoError);
+      // strict mode preserves KDF_MISMATCH
+      const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
-        // decryptText expects KDF_ID_ARGON2ID; this blob carries PBKDF2.
-        // We need an async expectation here:
-        return cm
-          .decryptText(encrypted, testPassword)
-          .then(() => {
-            throw new Error('Expected throw');
-          })
-          .catch((error: unknown) => {
-            expect(error).toBeInstanceOf(CryptoError);
-            expect((error as CryptoError).code).toBe('KDF_MISMATCH');
-          });
+        await strict.decryptText(encrypted, testPassword);
+        throw new Error('Expected throw');
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
         expect((error as CryptoError).code).toBe('KDF_MISMATCH');
       }
     });
 
-    it('should reject async ciphertext given to sync decrypt with KDF_MISMATCH', async () => {
+    it('should reject async ciphertext given to sync decrypt (auto mode: v0 fallback → GCM auth failure)', async () => {
+      // In auto mode, KDF_MISMATCH → v0 fallback → DECRYPTION_FAILED.
       const cm = new CryptoManager();
       const encrypted = await cm.encryptText(testText, testPassword);
+      expect(() => cm.decryptTextSync(encrypted, testPassword)).toThrow(CryptoError);
+      // strict mode preserves KDF_MISMATCH
+      const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
-        cm.decryptTextSync(encrypted, testPassword);
+        strict.decryptTextSync(encrypted, testPassword);
         throw new Error('Expected throw');
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);

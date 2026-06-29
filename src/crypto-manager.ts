@@ -1989,20 +1989,85 @@ export class CryptoManager {
       // Open the temp output file once and stream everything through it.
       const outputStream = createWriteStream(tempPath, { flags: 'w' });
 
+      // Persistent stream-error guard for the lifetime of this operation.
+      // Records the first stream 'error' event so subsequent writeChunk
+      // calls fail fast, and rejects any writeChunk that is currently
+      // waiting for 'drain' (so the promise never hangs). Multiple 'error'
+      // listeners on a stream are fine — pipeline() attaches its own and
+      // they coexist independently.
+      let streamError: Error | null = null;
+      let pendingChunkReject: ((err: Error) => void) | null = null;
+      const onStreamError = (err: Error): void => {
+        streamError = err;
+        if (pendingChunkReject !== null) {
+          const rej = pendingChunkReject;
+          pendingChunkReject = null;
+          rej(err);
+        }
+      };
+      outputStream.on('error', onStreamError);
+
       // Helper to await a single write that may apply backpressure. We need
       // this for the upfront [v1 header][salt][iv] prefix and for the
       // trailing auth tag — pipeline() handles the body for us but it
       // doesn't know about these out-of-band writes.
+      //
+      // Guarantees: the promise settles exactly once (idempotent
+      // settleOnce guard); all transient 'drain' listeners are removed on
+      // settle; a stream 'error' always rejects rather than crashing the
+      // process (unhandled-error) or hanging (drain never fires after an
+      // error). The ok===true path no longer resolves synchronously before
+      // the write callback — that was the root cause of the silent-drop bug.
       const writeChunk = (chunk: Buffer): Promise<void> =>
         new Promise<void>((resolve, reject) => {
-          const ok = outputStream.write(chunk, (err) => {
-            if (err) reject(err);
-          });
-          if (ok) {
-            resolve();
-          } else {
-            outputStream.once('drain', resolve);
+          // Fail fast if the stream already errored before this call.
+          if (streamError !== null) {
+            reject(streamError);
+            return;
           }
+
+          let settled = false;
+          let drainListener: (() => void) | null = null;
+
+          const settleOnce = (err?: Error | null): void => {
+            if (settled) return;
+            settled = true;
+            // Deregister from the stream-level error handler.
+            pendingChunkReject = null;
+            // Remove any 'drain' listener (safe no-op if already fired
+            // or never registered).
+            if (drainListener !== null) {
+              outputStream.removeListener('drain', drainListener);
+              drainListener = null;
+            }
+            if (err) reject(err);
+            else resolve();
+          };
+
+          // Register so onStreamError can settle us if the stream errors
+          // while we are waiting for the write callback or for 'drain'.
+          pendingChunkReject = (err): void => settleOnce(err);
+
+          const ok = outputStream.write(chunk, (err) => {
+            // Write callback fires when this chunk's data has been
+            // processed. For ok===true: sole settlement path. For
+            // ok===false: drain may have already settled us (idempotent).
+            settleOnce(err ?? null);
+          });
+
+          if (!ok) {
+            // Backpressured: resolve as soon as the buffer drains so the
+            // producer can resume without waiting for the write callback
+            // (which arrives after drain). The write callback's
+            // settleOnce call is then a no-op.
+            drainListener = (): void => settleOnce(null);
+            outputStream.once('drain', drainListener);
+          }
+          // ok===true: the write callback (above) handles settlement.
+          // We deliberately do NOT call resolve() here synchronously —
+          // that was the bug: resolving before the callback meant a
+          // subsequent write-callback error was silently dropped, and
+          // the stream 'error' event went unhandled (process crash).
         });
 
       try {
@@ -2077,6 +2142,10 @@ export class CryptoManager {
             else resolve();
           });
         });
+        // Remove the persistent error listener now that the stream is
+        // closed — prevents a dangling reference on the (now-closed)
+        // stream object.
+        outputStream.removeListener('error', onStreamError);
       }
 
       // Atomically promote the temp file to the final output path.

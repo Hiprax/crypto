@@ -19,6 +19,10 @@ import {
   parseHeader,
   hasMagic,
   FORMAT_VERSION,
+  MAX_ARGON2_MEMORY_COST,
+  MAX_ARGON2_TIME_COST,
+  MAX_ARGON2_PARALLELISM,
+  MAX_PBKDF2_ITERATIONS,
 } from '../format';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
 import {
@@ -137,6 +141,127 @@ describe('CryptoManager', () => {
         CryptoError
       );
     });
+
+    it('should throw MEMORY_COST_TOO_LARGE when memoryCost exceeds wire-format cap', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({ memoryCost: MAX_ARGON2_MEMORY_COST + 1 });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MEMORY_COST_TOO_LARGE');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should throw TIME_COST_TOO_LARGE when timeCost exceeds wire-format cap', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({ timeCost: MAX_ARGON2_TIME_COST + 1 });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('TIME_COST_TOO_LARGE');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should throw PARALLELISM_TOO_LARGE when parallelism exceeds wire-format cap', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({ parallelism: MAX_ARGON2_PARALLELISM + 1 });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('PARALLELISM_TOO_LARGE');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should throw PBKDF2_ITERATIONS_TOO_LARGE when pbkdf2Iterations exceeds wire-format cap', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({ pbkdf2Iterations: MAX_PBKDF2_ITERATIONS + 1 });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('PBKDF2_ITERATIONS_TOO_LARGE');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should throw LEGACY_PBKDF2_ITERATIONS_TOO_LARGE when legacyPbkdf2Iterations exceeds cap', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          legacyPbkdf2Iterations: MAX_PBKDF2_ITERATIONS + 1,
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('LEGACY_PBKDF2_ITERATIONS_TOO_LARGE');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should accept KDF params at exactly the wire-format cap (boundary construction)', () => {
+      // At exactly the cap, construction must succeed — the cap is inclusive.
+      expect(() =>
+        new CryptoManager({
+          memoryCost: MAX_ARGON2_MEMORY_COST,
+          timeCost: MAX_ARGON2_TIME_COST,
+          parallelism: MAX_ARGON2_PARALLELISM,
+        })
+      ).not.toThrow();
+      expect(() =>
+        new CryptoManager({ pbkdf2Iterations: MAX_PBKDF2_ITERATIONS })
+      ).not.toThrow();
+      expect(() =>
+        new CryptoManager({ legacyPbkdf2Iterations: MAX_PBKDF2_ITERATIONS })
+      ).not.toThrow();
+    });
+
+    it('should accept below-cap KDF params (sanity check)', () => {
+      expect(() =>
+        new CryptoManager({
+          memoryCost: 2 ** 12,
+          timeCost: 1,
+          parallelism: 1,
+          pbkdf2Iterations: 1000,
+          legacyPbkdf2Iterations: 1000,
+        })
+      ).not.toThrow();
+    });
+
+    it('should round-trip encryptTextSync/decryptTextSync at boundary PBKDF2 params (regression: nothing constructable is undecryptable)', () => {
+      // Verifies that a constructable config actually produces decryptable
+      // ciphertext — catches any future regression where cap enforcement
+      // diverges from what parseHeader accepts.
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 }); // small for speed
+      const password = 'TestPassphrase20chars!';
+      const plaintext = 'sync boundary round-trip';
+
+      const encrypted = cm.encryptTextSync(plaintext, password);
+      const decrypted = cm.decryptTextSync(encrypted, password);
+      expect(decrypted).toBe(plaintext);
+    });
+
+    it('should round-trip encryptText/decryptText with Argon2 timeCost at cap and tiny memoryCost', async () => {
+      // timeCost:100 at memoryCost:2^12 (4 MiB) is comparable in total
+      // memory work to the default (128 MiB × 3), so this should complete
+      // in well under a second on any reasonable hardware.
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12, // 4 MiB — tiny but valid
+        timeCost: MAX_ARGON2_TIME_COST, // 100 — exactly at cap
+        parallelism: 1,
+      });
+      const password = 'TestPassphrase20chars!';
+      const plaintext = 'argon2 cap boundary round-trip';
+
+      const encrypted = await cm.encryptText(plaintext, password);
+      const decrypted = await cm.decryptText(encrypted, password);
+      expect(decrypted).toBe(plaintext);
+    }, 30_000);
   });
 
   describe('generateSecureRandom', () => {

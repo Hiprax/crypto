@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Constructor now rejects KDF parameters above the wire-format DoS caps** (`src/crypto-manager.ts`). Previously, a `CryptoManager` constructed with `memoryCost > 2^22`, `timeCost > 100`, `parallelism > 64`, `pbkdf2Iterations > 10,000,000`, or `legacyPbkdf2Iterations > 10,000,000` would encrypt successfully but produce ciphertext that could never be decrypted (`KDF_PARAMS_OUT_OF_BOUNDS` at parse time). The fix imports the exact cap constants from `src/format.ts` (single source of truth) and throws `CryptoError(INVALID_INPUT)` with an actionable message immediately at construction, converting silent data loss into a fail-fast error. The caps are generous: the library's default (`HIGH` tier, `memoryCost = 2^17`, `timeCost = 3`) and the documented `ULTRA` tier (`memoryCost = 2^19`, `timeCost = 4`) both clear the bounds by a large margin. All previously-working configurations are unaffected. New error codes: `MEMORY_COST_TOO_LARGE`, `TIME_COST_TOO_LARGE`, `PARALLELISM_TOO_LARGE`, `PBKDF2_ITERATIONS_TOO_LARGE`, `LEGACY_PBKDF2_ITERATIONS_TOO_LARGE`.
+- New tests covering over-cap construction (all five parameters), at-cap boundary construction (must not throw), and sync/async round-trips confirming that every constructable configuration produces decryptable ciphertext (`src/__tests__/crypto-manager.test.ts`).
+
+### Files changed
+
+- `src/crypto-manager.ts` — import `MAX_ARGON2_MEMORY_COST`, `MAX_ARGON2_TIME_COST`, `MAX_ARGON2_PARALLELISM`, `MAX_PBKDF2_ITERATIONS` from `./format.js`; add upper-bound checks in constructor.
+- `src/__tests__/crypto-manager.test.ts` — 8 new tests in the `Constructor` describe block.
+- `CLAUDE.md` — updated Constructor Options table to document the upper bounds.
+
+---
+
 ## 2026-05-12 (v1.3.5 — CodeQL alert triage, drop Dependencies badge)
 
 Hygiene-only patch release. No source changes, no public API changes, no wire-format changes, no devDependency changes. The published tarball is bit-identical to v1.3.4 (the changes are README + GitHub-side alert state only).

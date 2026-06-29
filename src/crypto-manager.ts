@@ -49,6 +49,10 @@ import {
   hasMagic,
   packHeader,
   parseHeader,
+  MAX_ARGON2_MEMORY_COST,
+  MAX_ARGON2_TIME_COST,
+  MAX_ARGON2_PARALLELISM,
+  MAX_PBKDF2_ITERATIONS,
 } from './format.js';
 import { isValidBase64Url } from './utils.js';
 
@@ -656,6 +660,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.memoryCost !== undefined &&
+      options.memoryCost > MAX_ARGON2_MEMORY_COST
+    ) {
+      throw new CryptoError(
+        `memoryCost (${options.memoryCost}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_MEMORY_COST} (2^22 KiB = 4 GiB). Values above this cap ` +
+          `produce ciphertext that cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_MEMORY_COST}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'MEMORY_COST_TOO_LARGE'
+      );
+    }
+    if (
       options.timeCost !== undefined &&
       (!Number.isInteger(options.timeCost) || options.timeCost <= 0)
     ) {
@@ -666,6 +683,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.timeCost !== undefined &&
+      options.timeCost > MAX_ARGON2_TIME_COST
+    ) {
+      throw new CryptoError(
+        `timeCost (${options.timeCost}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_TIME_COST}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_TIME_COST}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'TIME_COST_TOO_LARGE'
+      );
+    }
+    if (
       options.parallelism !== undefined &&
       (!Number.isInteger(options.parallelism) || options.parallelism <= 0)
     ) {
@@ -673,6 +703,19 @@ export class CryptoManager {
         'parallelism must be a positive integer',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_PARALLELISM'
+      );
+    }
+    if (
+      options.parallelism !== undefined &&
+      options.parallelism > MAX_ARGON2_PARALLELISM
+    ) {
+      throw new CryptoError(
+        `parallelism (${options.parallelism}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_PARALLELISM}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_PARALLELISM}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'PARALLELISM_TOO_LARGE'
       );
     }
     if (
@@ -687,6 +730,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.pbkdf2Iterations !== undefined &&
+      options.pbkdf2Iterations > MAX_PBKDF2_ITERATIONS
+    ) {
+      throw new CryptoError(
+        `pbkdf2Iterations (${options.pbkdf2Iterations}) exceeds the wire-format cap of ` +
+          `${MAX_PBKDF2_ITERATIONS}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'PBKDF2_ITERATIONS_TOO_LARGE'
+      );
+    }
+    if (
       options.legacyPbkdf2Iterations !== undefined &&
       (!Number.isInteger(options.legacyPbkdf2Iterations) ||
         options.legacyPbkdf2Iterations <= 0)
@@ -695,6 +751,19 @@ export class CryptoManager {
         'legacyPbkdf2Iterations must be a positive integer',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_LEGACY_PBKDF2_ITERATIONS'
+      );
+    }
+    if (
+      options.legacyPbkdf2Iterations !== undefined &&
+      options.legacyPbkdf2Iterations > MAX_PBKDF2_ITERATIONS
+    ) {
+      throw new CryptoError(
+        `legacyPbkdf2Iterations (${options.legacyPbkdf2Iterations}) exceeds the cap of ` +
+          `${MAX_PBKDF2_ITERATIONS}. This value is fed directly to pbkdf2Sync; ` +
+          `values above this cap risk blocking the event loop indefinitely. ` +
+          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'LEGACY_PBKDF2_ITERATIONS_TOO_LARGE'
       );
     }
 

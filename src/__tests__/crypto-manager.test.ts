@@ -6011,4 +6011,195 @@ describe('CryptoManager', () => {
       });
     });
   });
+
+  // ── Phase 3: key scrub on error paths ─────────────────────────────────────
+  // Verifies that secureClear is called on the 32-byte derived key even when
+  // an error is thrown AFTER key derivation but BEFORE the success-path scrub.
+  // For each of the 8 high-level methods: encryptText, decryptText,
+  // encryptTextSync, decryptTextSync, encryptFile, decryptFile,
+  // encryptFileSync, decryptFileSync.
+  describe('key scrub on error paths (Phase 3 — Tasks 3.1/3.2)', () => {
+    // Fast KDF params so tests run quickly.
+    const validPwd = testPassword;
+    const wrongPwd = 'WrongP@ssw0rd123!';
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    // Assert secureClear was called with a 32-byte Buffer (the AES-256 key).
+    function assertKeyScrubbed(spy: ReturnType<typeof jest.spyOn>): void {
+      const keyCallFound = spy.mock.calls.some(
+        ([buf]) => Buffer.isBuffer(buf) && buf.length === 32
+      );
+      expect(keyCallFound).toBe(true);
+    }
+
+    it('encryptText: scrubs key when encryptData throws post-derivation', async () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+      jest.spyOn(cm, 'encryptData').mockImplementationOnce(() => {
+        throw new Error('forced post-derivation failure');
+      });
+      await expect(cm.encryptText(testText, validPwd)).rejects.toThrow();
+      assertKeyScrubbed(clearSpy);
+    });
+
+    it('decryptText: scrubs key on wrong-password failure (GCM tag mismatch)', async () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const ciphertext = await cm.encryptText(testText, validPwd);
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+      await expect(cm.decryptText(ciphertext, wrongPwd)).rejects.toThrow(
+        CryptoError
+      );
+      assertKeyScrubbed(clearSpy);
+    });
+
+    it('encryptTextSync: scrubs key when encryptData throws post-derivation', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        pbkdf2Iterations: 1000,
+        parallelism: 1,
+      });
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+      jest.spyOn(cm, 'encryptData').mockImplementationOnce(() => {
+        throw new Error('forced post-derivation failure');
+      });
+      expect(() => cm.encryptTextSync(testText, validPwd)).toThrow();
+      assertKeyScrubbed(clearSpy);
+    });
+
+    it('decryptTextSync: scrubs key on wrong-password failure (GCM tag mismatch)', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        pbkdf2Iterations: 1000,
+        parallelism: 1,
+      });
+      const ciphertext = cm.encryptTextSync(testText, validPwd);
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+      expect(() => cm.decryptTextSync(ciphertext, wrongPwd)).toThrow(
+        CryptoError
+      );
+      assertKeyScrubbed(clearSpy);
+    });
+
+    it('encryptFile: scrubs key when progress callback throws post-derivation', async () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const inPath = path.join(tempDir, 'ks-ef-in.txt');
+      const outPath = path.join(tempDir, 'ks-ef-out.enc');
+      try {
+        writeFileSync(inPath, testText);
+        const clearSpy = jest.spyOn(cm, 'secureClear');
+        // In encryptFile the first progress call (0, totalBytes) fires AFTER
+        // key derivation. Throwing on any invocation therefore tests the
+        // catch-path key scrub.
+        await expect(
+          cm.encryptFile(inPath, outPath, validPwd, () => {
+            throw new Error('progress abort');
+          })
+        ).rejects.toThrow();
+        assertKeyScrubbed(clearSpy);
+      } finally {
+        for (const f of [inPath, outPath]) {
+          if (existsSync(f)) unlinkSync(f);
+        }
+      }
+    });
+
+    it('decryptFile: scrubs key on wrong-password failure (GCM tag mismatch)', async () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const inPath = path.join(tempDir, 'ks-df-in.txt');
+      const encPath = path.join(tempDir, 'ks-df-enc.bin');
+      const outPath = path.join(tempDir, 'ks-df-out.txt');
+      try {
+        writeFileSync(inPath, testText);
+        await cm.encryptFile(inPath, encPath, validPwd);
+        const clearSpy = jest.spyOn(cm, 'secureClear');
+        await expect(
+          cm.decryptFile(encPath, outPath, wrongPwd)
+        ).rejects.toThrow(CryptoError);
+        assertKeyScrubbed(clearSpy);
+      } finally {
+        for (const f of [inPath, encPath, outPath]) {
+          if (existsSync(f)) unlinkSync(f);
+        }
+      }
+    });
+
+    it('encryptFileSync: scrubs key when progress callback throws after key derivation', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        pbkdf2Iterations: 1000,
+        parallelism: 1,
+      });
+      const inPath = path.join(tempDir, 'ks-efs-in.txt');
+      const outPath = path.join(tempDir, 'ks-efs-out.enc');
+      try {
+        writeFileSync(inPath, testText);
+        const clearSpy = jest.spyOn(cm, 'secureClear');
+        // In encryptFileSync the first progress call (0, totalBytes) fires
+        // BEFORE key derivation; the second (totalBytes, totalBytes) fires
+        // AFTER encryption and rename. Throw on the 2nd call to exercise
+        // the catch-path key scrub.
+        let callCount = 0;
+        expect(() =>
+          cm.encryptFileSync(inPath, outPath, validPwd, () => {
+            callCount++;
+            if (callCount >= 2) {
+              throw new Error('progress abort on final event');
+            }
+          })
+        ).toThrow();
+        assertKeyScrubbed(clearSpy);
+      } finally {
+        for (const f of [inPath, outPath]) {
+          if (existsSync(f)) unlinkSync(f);
+        }
+      }
+    });
+
+    it('decryptFileSync: scrubs key on wrong-password failure (GCM tag mismatch)', () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        pbkdf2Iterations: 1000,
+        parallelism: 1,
+      });
+      const inPath = path.join(tempDir, 'ks-dfs-in.txt');
+      const encPath = path.join(tempDir, 'ks-dfs-enc.bin');
+      const outPath = path.join(tempDir, 'ks-dfs-out.txt');
+      try {
+        writeFileSync(inPath, testText);
+        cm.encryptFileSync(inPath, encPath, validPwd);
+        const clearSpy = jest.spyOn(cm, 'secureClear');
+        expect(() =>
+          cm.decryptFileSync(encPath, outPath, wrongPwd)
+        ).toThrow(CryptoError);
+        assertKeyScrubbed(clearSpy);
+      } finally {
+        for (const f of [inPath, encPath, outPath]) {
+          if (existsSync(f)) unlinkSync(f);
+        }
+      }
+    });
+  });
 });

@@ -1486,13 +1486,14 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(finalPassword, salt);
+      key = await this.deriveKey(finalPassword, salt);
 
       // Build v1 header (Argon2id parameters that were used). We build it
       // BEFORE encrypting so we can include the on-disk header bytes in
@@ -1529,6 +1530,9 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1569,6 +1573,7 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1631,7 +1636,7 @@ export class CryptoManager {
 
       // Derive key from password (use embedded params if present so we can
       // decrypt ciphertext produced by an instance with different defaults)
-      const key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      key = await this.deriveKey(finalPassword, salt, argonOverrides);
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
@@ -1650,6 +1655,9 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1696,13 +1704,14 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt);
+      key = this.deriveKeySync(finalPassword, salt);
 
       // Build v1 header for sync (PBKDF2 KDF identifier). Built BEFORE
       // encryption so we can include its on-disk bytes in the AAD — see
@@ -1733,6 +1742,9 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1770,6 +1782,7 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1822,7 +1835,7 @@ export class CryptoManager {
       const encrypted = combined.subarray(dataStart);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
@@ -1841,6 +1854,9 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1923,6 +1939,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -1962,7 +1979,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(finalPassword, salt);
+      key = await this.deriveKey(finalPassword, salt);
 
       // Build v1 header for the Argon2id KDF used by async file encryption.
       const versionHeader = this.buildHeader(KDF_ID_ARGON2ID);
@@ -2161,6 +2178,9 @@ export class CryptoManager {
       // Clear sensitive data
       this.secureClear(key);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file if we created one. Never touch the final
       // outputPath: it either already existed before this call (and is
       // therefore the caller's pre-existing data, which we must not delete)
@@ -2253,6 +2273,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2395,7 +2416,7 @@ export class CryptoManager {
       const bodyLen = bodyEnd - bodyStart;
 
       // Derive key from password (use embedded params if v1).
-      const key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      key = await this.deriveKey(finalPassword, salt, argonOverrides);
 
       // Allocate a sibling temp path; only rename on success.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -2515,6 +2536,9 @@ export class CryptoManager {
       this.secureClear(iv);
       this.secureClear(tag);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file if any partial output exists. We never
       // touch outputPath itself: if rename succeeded, outputPath is the
       // valid plaintext; if rename failed, outputPath is whatever the
@@ -2607,6 +2631,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2647,7 +2672,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt);
+      key = this.deriveKeySync(finalPassword, salt);
 
       // Read input file
       const inputData = readFileSync(inputPath);
@@ -2703,6 +2728,9 @@ export class CryptoManager {
       this.secureClear(tag);
       this.secureClear(fullPayload);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file. Never touch outputPath: it either was the
       // caller's pre-existing data (which we must not delete) or it never
       // got created.
@@ -2802,6 +2830,7 @@ export class CryptoManager {
     let tempPath: string | null = null;
     let inputFd: number | null = null;
     let outputFd: number | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2926,7 +2955,7 @@ export class CryptoManager {
       }
 
       // Derive key (synchronous, PBKDF2).
-      const key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
 
       // Allocate temp path and open it for writing.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -3043,6 +3072,9 @@ export class CryptoManager {
       this.secureClear(iv);
       this.secureClear(tag);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Make sure we drop any open file descriptors before unlinking.
       if (outputFd !== null) {
         try {

@@ -848,6 +848,40 @@ export class CryptoManager {
       saltLength: this.saltLength,
     };
 
+    // Argon2id mandates memoryCost >= 8 * parallelism. Enforcing this on the
+    // resolved (post-defaulting) values at construction time means the first
+    // async encryptText call fails fast with a clear error rather than an
+    // opaque KEY_DERIVATION_FAILED from deep inside the KDF. The library
+    // already validates defaultPassphrase at construction for the same reason
+    // (fail-fast philosophy). The defaults (memoryCost=2^17, parallelism=1)
+    // trivially pass, as do all documented opt-down profiles (2^16, 2^14,
+    // 2^12 with p=1). The sync PBKDF2 path ignores memoryCost entirely, so
+    // this check is scoped strictly to the Argon2 options that drive async paths.
+    const argon2MemFloor = 8 * this.argon2Options.parallelism;
+    if (this.argon2Options.memoryCost < argon2MemFloor) {
+      throw new CryptoError(
+        `memoryCost (${this.argon2Options.memoryCost}) must be at least ` +
+          `8 * parallelism (${argon2MemFloor} = 8 × ${this.argon2Options.parallelism}) ` +
+          `for Argon2id. Use a memoryCost of at least ${argon2MemFloor} or reduce parallelism.`,
+        CryptoErrorType.INVALID_INPUT,
+        'MEMORY_COST_TOO_SMALL'
+      );
+    }
+
+    // Validate aad type before coercing it to a Buffer. Buffer.from coerces
+    // arrays silently (e.g. [72, 73] → the two bytes "HI") and throws a raw
+    // Node TypeError for numbers and plain objects — neither result is a
+    // CryptoError, violating the library's uniform "all errors are CryptoError"
+    // contract. Catching both cases here gives callers the same typed
+    // CryptoError shape as every other constructor option.
+    if (options.aad !== undefined && typeof options.aad !== 'string') {
+      throw new CryptoError(
+        'aad must be a string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_AAD'
+      );
+    }
+
     // Use custom AAD or default
     const aadString = options.aad ?? 'secure-crypto-tool-v2';
     this.aad = Buffer.from(aadString, 'utf8');

@@ -262,6 +262,89 @@ describe('CryptoManager', () => {
       const decrypted = await cm.decryptText(encrypted, password);
       expect(decrypted).toBe(plaintext);
     }, 30_000);
+
+    it('should throw MEMORY_COST_TOO_SMALL when memoryCost < 8 * parallelism (under-boundary)', () => {
+      // p=1: Argon2id floor is 8*1=8; mc=7 is one below
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({ memoryCost: 7, parallelism: 1 });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MEMORY_COST_TOO_SMALL');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+      expect(caught?.message).toContain('8 × 1');
+
+      // p=2: floor is 8*2=16; mc=15 is one below
+      caught = undefined;
+      try {
+        new CryptoManager({ memoryCost: 15, parallelism: 2 });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('MEMORY_COST_TOO_SMALL');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+      expect(caught?.message).toContain('8 × 2');
+    });
+
+    it('should accept memoryCost >= 8 * parallelism (at boundary and defaults)', () => {
+      // Exactly at the floor — must NOT throw
+      expect(() =>
+        new CryptoManager({ memoryCost: 8, parallelism: 1 })
+      ).not.toThrow();
+      expect(() =>
+        new CryptoManager({ memoryCost: 16, parallelism: 2 })
+      ).not.toThrow();
+      // Default constructor (mc=2^17, p=1) trivially satisfies the floor
+      expect(() => new CryptoManager()).not.toThrow();
+    });
+
+    it('should throw INVALID_AAD when aad is a number or plain object', () => {
+      let caught: CryptoError | undefined;
+
+      // number — Buffer.from(123) throws a raw Node TypeError without the fix
+      try {
+        new CryptoManager({ aad: 123 as unknown as string });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_AAD');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+
+      // plain object
+      caught = undefined;
+      try {
+        new CryptoManager({ aad: {} as unknown as string });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_AAD');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should throw INVALID_AAD when aad is an array (silent-coercion regression)', () => {
+      // Before this fix, Buffer.from([72, 73], 'utf8') silently produced the
+      // two-byte AAD "HI" instead of rejecting the misconfiguration.
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({ aad: [72, 73] as unknown as string });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_AAD');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should accept a valid string aad without throwing', () => {
+      expect(() =>
+        new CryptoManager({ aad: 'my-app-context-v1' })
+      ).not.toThrow();
+    });
   });
 
   describe('generateSecureRandom', () => {

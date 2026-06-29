@@ -46,6 +46,7 @@ import { jest } from '@jest/globals';
 import path from 'node:path';
 import os from 'node:os';
 import nodeCrypto from 'node:crypto';
+import { Writable } from 'node:stream';
 import {
   existsSync,
   mkdirSync,
@@ -657,4 +658,398 @@ describe('decryptFile zero-body path (Task 18)', () => {
     // Cleanup contract: no orphan output file.
     expect(existsSync(decryptedPath)).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 5. outputStream 'error' during prefix and tag writes (Phase 2 / Task 2.2)
+// ---------------------------------------------------------------------------
+//
+// These tests exercise the hardened writeChunk / onStreamError guard added
+// in Phase 2. Four failure scenarios are covered:
+//   A. Prefix write, immediate  (ok=true, large highWaterMark)
+//   B. Prefix write, backpressured (ok=false, highWaterMark=1)
+//   C. Tag write, immediate     (ok=true, 0-byte input so write #2 = tag)
+//   D. Tag write, backpressured (ok=false, highWaterMark=1, 0-byte input)
+//
+// Each asserts: the call rejects with a CryptoError, the operation does not
+// hang (10 s backstop), no orphan .tmp file is left behind, and any
+// pre-existing file at outputPath is not modified.
+//
+// Mock strategy: intercept createWriteStream via jest.unstable_mockModule
+// and return a Writable subclass that injects an ENOSPC error on the
+// Nth write() call. 0-byte input guarantees exactly 2 write() calls to
+// outputStream (write #1 = prefix [header+salt+iv], write #2 = trailing
+// auth tag) because the cipher produces no body output for empty plaintext.
+
+describe('outputStream write error injection (Phase 2 / Task 2.2)', () => {
+  /**
+   * Returns a Writable that calls its internal _write callback with an
+   * ENOSPC error on the Nth write call and succeeds on all others.
+   *
+   * @param failOnWrite - 1-based index of the write that should fail.
+   * @param hwm - highWaterMark. Pass 1 to force write() to always return
+   *              false (backpressured / ok=false path).
+   */
+  function makeErrorStream(failOnWrite: number, hwm = 65536): Writable {
+    return new (class extends Writable {
+      private _n = 0;
+      constructor() {
+        super({ highWaterMark: hwm });
+      }
+      override _write(
+        _chunk: unknown,
+        _encoding: string,
+        callback: (error?: Error | null) => void
+      ): void {
+        this._n++;
+        if (this._n === failOnWrite) {
+          callback(
+            new Error(
+              `ENOSPC: injected write error on call #${failOnWrite}`
+            )
+          );
+        } else {
+          callback();
+        }
+      }
+    })();
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  // ── A. Prefix write, immediate (ok=true) ────────────────────────────────
+
+  it(
+    'prefix-immediate: stream error on write #1 → CryptoError, no orphan .tmp, output untouched',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        createWriteStream: jest.fn(() => makeErrorStream(1)),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(
+        TEST_DIR,
+        'werr-pfx-imm-in.txt'
+      );
+      const outputPath = path.join(
+        TEST_DIR,
+        'werr-pfx-imm-out.bin'
+      );
+      const sentinel = 'pre-existing output — must survive prefix-imm error';
+      writeFileSync(outputPath, sentinel);
+      writeFileSync(inputPath, 'prefix-immediate error test payload');
+
+      try {
+        await expect(
+          cm.encryptFile(inputPath, outputPath, TEST_PASSWORD)
+        ).rejects.toThrow(CryptoError);
+
+        // No orphan temp files.
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) =>
+            e.startsWith('werr-pfx-imm-out.bin.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+
+        // Pre-existing output untouched.
+        expect(readFileSync(outputPath, 'utf8')).toBe(sentinel);
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000 // hang-detection backstop
+  );
+
+  // ── B. Prefix write, backpressured (ok=false) ───────────────────────────
+
+  it(
+    'prefix-backpressured: stream error on write #1 (ok=false) → CryptoError, no hang, no orphan .tmp',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        // highWaterMark=1 forces write() to always return false (ok=false).
+        createWriteStream: jest.fn(() => makeErrorStream(1, 1)),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(
+        TEST_DIR,
+        'werr-pfx-bp-in.txt'
+      );
+      const outputPath = path.join(
+        TEST_DIR,
+        'werr-pfx-bp-out.bin'
+      );
+      const sentinel = 'pre-existing output — must survive prefix-bp error';
+      writeFileSync(outputPath, sentinel);
+      writeFileSync(inputPath, 'prefix-backpressured error test payload');
+
+      try {
+        await expect(
+          cm.encryptFile(inputPath, outputPath, TEST_PASSWORD)
+        ).rejects.toThrow(CryptoError);
+
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) =>
+            e.startsWith('werr-pfx-bp-out.bin.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+
+        expect(readFileSync(outputPath, 'utf8')).toBe(sentinel);
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+
+  // ── C. Tag write, immediate (ok=true, 0-byte input) ─────────────────────
+
+  it(
+    'tag-immediate: stream error on write #2 (ok=true, empty input) → CryptoError, no orphan .tmp, output untouched',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        // Fail on write #2. With 0-byte input the only two write() calls
+        // are: [1] prefix (header+salt+iv), [2] trailing GCM auth tag.
+        createWriteStream: jest.fn(() => makeErrorStream(2)),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(
+        TEST_DIR,
+        'werr-tag-imm-in.bin'
+      );
+      const outputPath = path.join(
+        TEST_DIR,
+        'werr-tag-imm-out.bin'
+      );
+      const sentinel = 'pre-existing output — must survive tag-imm error';
+      writeFileSync(outputPath, sentinel);
+      writeFileSync(inputPath, ''); // 0-byte input
+
+      try {
+        await expect(
+          cm.encryptFile(inputPath, outputPath, TEST_PASSWORD)
+        ).rejects.toThrow(CryptoError);
+
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) =>
+            e.startsWith('werr-tag-imm-out.bin.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+
+        expect(readFileSync(outputPath, 'utf8')).toBe(sentinel);
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+
+  // ── D. Tag write, backpressured (ok=false, 0-byte input) ────────────────
+
+  it(
+    'tag-backpressured: stream error on write #2 (ok=false, empty input) → CryptoError, no hang, no orphan .tmp',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        createWriteStream: jest.fn(() => makeErrorStream(2, 1)),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(
+        TEST_DIR,
+        'werr-tag-bp-in.bin'
+      );
+      const outputPath = path.join(
+        TEST_DIR,
+        'werr-tag-bp-out.bin'
+      );
+      const sentinel = 'pre-existing output — must survive tag-bp error';
+      writeFileSync(outputPath, sentinel);
+      writeFileSync(inputPath, ''); // 0-byte input
+
+      try {
+        await expect(
+          cm.encryptFile(inputPath, outputPath, TEST_PASSWORD)
+        ).rejects.toThrow(CryptoError);
+
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) =>
+            e.startsWith('werr-tag-bp-out.bin.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+
+        expect(readFileSync(outputPath, 'utf8')).toBe(sentinel);
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 6. decryptFile short front-matter read (Phase 5, Task 5.1)
+// ---------------------------------------------------------------------------
+//
+// Verifies that the async decryptFile path throws INVALID_ENCRYPTED_FILE_SIZE
+// when fileHandle.read() returns fewer bytes than requested for the front-
+// matter region (header + salt + iv). This mirrors the check already present
+// in the sync path (decryptFileSync). The scenario is triggered via a mock
+// that reports a large file via stat() but returns bytesRead: 0 on read().
+
+describe('decryptFile short front-matter read (Phase 5)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'async: short front-matter read → INVALID_ENCRYPTED_FILE_SIZE with INVALID_INPUT type',
+    async () => {
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Mock open() to return a synthetic FileHandle where stat() claims a
+      // large file but read() always returns bytesRead: 0, simulating a
+      // short read from a truncated or remote-backed file.
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+        open: jest.fn(async () => ({
+          stat: jest.fn(async () => ({ size: 1000 })),
+          read: jest.fn(async () => ({ bytesRead: 0 })),
+          close: jest.fn(async () => {}),
+        })),
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(TEST_DIR, 'short-read-input.bin');
+      const outputPath = path.join(TEST_DIR, 'short-read-output.txt');
+      // Create a real file so existsSync(inputPath) passes before open() is called.
+      writeFileSync(inputPath, Buffer.alloc(100));
+
+      try {
+        let caught: unknown;
+        try {
+          await cm.decryptFile(inputPath, outputPath, TEST_PASSWORD);
+        } catch (e) {
+          caught = e;
+        }
+
+        expect(caught).toBeInstanceOf(CryptoError);
+        expect((caught as InstanceType<typeof CryptoError>).code).toBe(
+          'INVALID_ENCRYPTED_FILE_SIZE'
+        );
+        expect((caught as InstanceType<typeof CryptoError>).type).toBe(
+          CryptoErrorType.INVALID_INPUT
+        );
+
+        // No orphan temp files should remain after an early-exit error.
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) =>
+            e.startsWith('short-read-output.txt.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+      } finally {
+        if (existsSync(inputPath)) unlinkSync(inputPath);
+        if (existsSync(outputPath)) unlinkSync(outputPath);
+      }
+    },
+    10_000
+  );
 });

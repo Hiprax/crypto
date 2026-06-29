@@ -8,7 +8,6 @@ import {
 } from 'node:fs/promises';
 import {
   existsSync,
-  readFileSync,
   writeFileSync,
   mkdirSync,
   unlinkSync,
@@ -49,6 +48,10 @@ import {
   hasMagic,
   packHeader,
   parseHeader,
+  MAX_ARGON2_MEMORY_COST,
+  MAX_ARGON2_TIME_COST,
+  MAX_ARGON2_PARALLELISM,
+  MAX_PBKDF2_ITERATIONS,
 } from './format.js';
 import { isValidBase64Url } from './utils.js';
 
@@ -656,6 +659,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.memoryCost !== undefined &&
+      options.memoryCost > MAX_ARGON2_MEMORY_COST
+    ) {
+      throw new CryptoError(
+        `memoryCost (${options.memoryCost}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_MEMORY_COST} (2^22 KiB = 4 GiB). Values above this cap ` +
+          `produce ciphertext that cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_MEMORY_COST}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'MEMORY_COST_TOO_LARGE'
+      );
+    }
+    if (
       options.timeCost !== undefined &&
       (!Number.isInteger(options.timeCost) || options.timeCost <= 0)
     ) {
@@ -666,6 +682,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.timeCost !== undefined &&
+      options.timeCost > MAX_ARGON2_TIME_COST
+    ) {
+      throw new CryptoError(
+        `timeCost (${options.timeCost}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_TIME_COST}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_TIME_COST}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'TIME_COST_TOO_LARGE'
+      );
+    }
+    if (
       options.parallelism !== undefined &&
       (!Number.isInteger(options.parallelism) || options.parallelism <= 0)
     ) {
@@ -673,6 +702,19 @@ export class CryptoManager {
         'parallelism must be a positive integer',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_PARALLELISM'
+      );
+    }
+    if (
+      options.parallelism !== undefined &&
+      options.parallelism > MAX_ARGON2_PARALLELISM
+    ) {
+      throw new CryptoError(
+        `parallelism (${options.parallelism}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_PARALLELISM}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_PARALLELISM}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'PARALLELISM_TOO_LARGE'
       );
     }
     if (
@@ -687,6 +729,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.pbkdf2Iterations !== undefined &&
+      options.pbkdf2Iterations > MAX_PBKDF2_ITERATIONS
+    ) {
+      throw new CryptoError(
+        `pbkdf2Iterations (${options.pbkdf2Iterations}) exceeds the wire-format cap of ` +
+          `${MAX_PBKDF2_ITERATIONS}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'PBKDF2_ITERATIONS_TOO_LARGE'
+      );
+    }
+    if (
       options.legacyPbkdf2Iterations !== undefined &&
       (!Number.isInteger(options.legacyPbkdf2Iterations) ||
         options.legacyPbkdf2Iterations <= 0)
@@ -695,6 +750,19 @@ export class CryptoManager {
         'legacyPbkdf2Iterations must be a positive integer',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_LEGACY_PBKDF2_ITERATIONS'
+      );
+    }
+    if (
+      options.legacyPbkdf2Iterations !== undefined &&
+      options.legacyPbkdf2Iterations > MAX_PBKDF2_ITERATIONS
+    ) {
+      throw new CryptoError(
+        `legacyPbkdf2Iterations (${options.legacyPbkdf2Iterations}) exceeds the cap of ` +
+          `${MAX_PBKDF2_ITERATIONS}. This value is fed directly to pbkdf2Sync; ` +
+          `values above this cap risk blocking the event loop indefinitely. ` +
+          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'LEGACY_PBKDF2_ITERATIONS_TOO_LARGE'
       );
     }
 
@@ -1417,13 +1485,14 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(finalPassword, salt);
+      key = await this.deriveKey(finalPassword, salt);
 
       // Build v1 header (Argon2id parameters that were used). We build it
       // BEFORE encrypting so we can include the on-disk header bytes in
@@ -1460,6 +1529,9 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1500,6 +1572,7 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1562,7 +1635,7 @@ export class CryptoManager {
 
       // Derive key from password (use embedded params if present so we can
       // decrypt ciphertext produced by an instance with different defaults)
-      const key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      key = await this.deriveKey(finalPassword, salt, argonOverrides);
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
@@ -1581,6 +1654,9 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1627,13 +1703,14 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt);
+      key = this.deriveKeySync(finalPassword, salt);
 
       // Build v1 header for sync (PBKDF2 KDF identifier). Built BEFORE
       // encryption so we can include its on-disk bytes in the AAD — see
@@ -1664,6 +1741,9 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1701,6 +1781,7 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1753,7 +1834,7 @@ export class CryptoManager {
       const encrypted = combined.subarray(dataStart);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
@@ -1772,6 +1853,9 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1826,7 +1910,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -1854,6 +1938,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -1893,7 +1978,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(finalPassword, salt);
+      key = await this.deriveKey(finalPassword, salt);
 
       // Build v1 header for the Argon2id KDF used by async file encryption.
       const versionHeader = this.buildHeader(KDF_ID_ARGON2ID);
@@ -1920,20 +2005,85 @@ export class CryptoManager {
       // Open the temp output file once and stream everything through it.
       const outputStream = createWriteStream(tempPath, { flags: 'w' });
 
+      // Persistent stream-error guard for the lifetime of this operation.
+      // Records the first stream 'error' event so subsequent writeChunk
+      // calls fail fast, and rejects any writeChunk that is currently
+      // waiting for 'drain' (so the promise never hangs). Multiple 'error'
+      // listeners on a stream are fine — pipeline() attaches its own and
+      // they coexist independently.
+      let streamError: Error | null = null;
+      let pendingChunkReject: ((err: Error) => void) | null = null;
+      const onStreamError = (err: Error): void => {
+        streamError = err;
+        if (pendingChunkReject !== null) {
+          const rej = pendingChunkReject;
+          pendingChunkReject = null;
+          rej(err);
+        }
+      };
+      outputStream.on('error', onStreamError);
+
       // Helper to await a single write that may apply backpressure. We need
       // this for the upfront [v1 header][salt][iv] prefix and for the
       // trailing auth tag — pipeline() handles the body for us but it
       // doesn't know about these out-of-band writes.
+      //
+      // Guarantees: the promise settles exactly once (idempotent
+      // settleOnce guard); all transient 'drain' listeners are removed on
+      // settle; a stream 'error' always rejects rather than crashing the
+      // process (unhandled-error) or hanging (drain never fires after an
+      // error). The ok===true path no longer resolves synchronously before
+      // the write callback — that was the root cause of the silent-drop bug.
       const writeChunk = (chunk: Buffer): Promise<void> =>
         new Promise<void>((resolve, reject) => {
-          const ok = outputStream.write(chunk, (err) => {
-            if (err) reject(err);
-          });
-          if (ok) {
-            resolve();
-          } else {
-            outputStream.once('drain', resolve);
+          // Fail fast if the stream already errored before this call.
+          if (streamError !== null) {
+            reject(streamError);
+            return;
           }
+
+          let settled = false;
+          let drainListener: (() => void) | null = null;
+
+          const settleOnce = (err?: Error | null): void => {
+            if (settled) return;
+            settled = true;
+            // Deregister from the stream-level error handler.
+            pendingChunkReject = null;
+            // Remove any 'drain' listener (safe no-op if already fired
+            // or never registered).
+            if (drainListener !== null) {
+              outputStream.removeListener('drain', drainListener);
+              drainListener = null;
+            }
+            if (err) reject(err);
+            else resolve();
+          };
+
+          // Register so onStreamError can settle us if the stream errors
+          // while we are waiting for the write callback or for 'drain'.
+          pendingChunkReject = (err): void => settleOnce(err);
+
+          const ok = outputStream.write(chunk, (err) => {
+            // Write callback fires when this chunk's data has been
+            // processed. For ok===true: sole settlement path. For
+            // ok===false: drain may have already settled us (idempotent).
+            settleOnce(err ?? null);
+          });
+
+          if (!ok) {
+            // Backpressured: resolve as soon as the buffer drains so the
+            // producer can resume without waiting for the write callback
+            // (which arrives after drain). The write callback's
+            // settleOnce call is then a no-op.
+            drainListener = (): void => settleOnce(null);
+            outputStream.once('drain', drainListener);
+          }
+          // ok===true: the write callback (above) handles settlement.
+          // We deliberately do NOT call resolve() here synchronously —
+          // that was the bug: resolving before the callback meant a
+          // subsequent write-callback error was silently dropped, and
+          // the stream 'error' event went unhandled (process crash).
         });
 
       try {
@@ -2008,6 +2158,10 @@ export class CryptoManager {
             else resolve();
           });
         });
+        // Remove the persistent error listener now that the stream is
+        // closed — prevents a dangling reference on the (now-closed)
+        // stream object.
+        outputStream.removeListener('error', onStreamError);
       }
 
       // Atomically promote the temp file to the final output path.
@@ -2023,6 +2177,9 @@ export class CryptoManager {
       // Clear sensitive data
       this.secureClear(key);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file if we created one. Never touch the final
       // outputPath: it either already existed before this call (and is
       // therefore the caller's pre-existing data, which we must not delete)
@@ -2096,7 +2253,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2115,6 +2272,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2173,7 +2331,19 @@ export class CryptoManager {
         const frontReadLen = Math.min(maxFrontLen, totalSize);
         const front = Buffer.alloc(frontReadLen);
         if (frontReadLen > 0) {
-          await fileHandle.read(front, 0, frontReadLen, 0);
+          const { bytesRead: frontBytesRead } = await fileHandle.read(
+            front,
+            0,
+            frontReadLen,
+            0
+          );
+          if (frontBytesRead !== frontReadLen) {
+            throw new CryptoError(
+              'Failed to read full file header region',
+              CryptoErrorType.INVALID_INPUT,
+              'INVALID_ENCRYPTED_FILE_SIZE'
+            );
+          }
         }
 
         if (hasMagic(front)) {
@@ -2257,7 +2427,7 @@ export class CryptoManager {
       const bodyLen = bodyEnd - bodyStart;
 
       // Derive key from password (use embedded params if v1).
-      const key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      key = await this.deriveKey(finalPassword, salt, argonOverrides);
 
       // Allocate a sibling temp path; only rename on success.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -2377,6 +2547,9 @@ export class CryptoManager {
       this.secureClear(iv);
       this.secureClear(tag);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file if any partial output exists. We never
       // touch outputPath itself: if rename succeeded, outputPath is the
       // valid plaintext; if rename failed, outputPath is whatever the
@@ -2407,17 +2580,21 @@ export class CryptoManager {
    * Output is written to a sibling temp file (`${outputPath}.<random>.tmp`)
    * and atomically renamed to `outputPath` only on success.
    *
+   * Reads the input in fixed 64 KiB chunks via `fs.readSync`, feeds each
+   * chunk through `cipher.update()`, and writes the resulting ciphertext
+   * chunk via `fs.writeFileSync(fd, ...)`. This keeps peak memory
+   * proportional to the chunk size regardless of input file size —
+   * matching the bounded-memory model already used by `decryptFileSync`.
+   * The on-disk layout `[v1 header][salt][iv][ciphertext body][auth tag]`
+   * is byte-identical to the previous single-read implementation.
+   *
    * **Progress reporting:** if a `progress` callback is supplied, it is
    * invoked once with `(0, totalBytes)` before encryption starts and once
    * with `(totalBytes, totalBytes)` after the temp file has been atomically
-   * renamed to the canonical `outputPath`. The sync encrypt path reads the
-   * full input into memory in a single `readFileSync` call (because the
-   * sync surface needs to be predictable for callers that don't want
-   * streaming), so per-chunk progress would be misleading — the two
-   * bracketing events accurately describe the synchronous "before" and
-   * "after" boundary. `totalBytes` equals the input file size in bytes. If
-   * the callback throws, the throw aborts the operation. See
-   * {@link ProgressCallback}.
+   * renamed to the canonical `outputPath`. No per-chunk events are emitted
+   * — the two bracketing calls preserve the contract callers already depend
+   * on. `totalBytes` equals the input file size in bytes. If the callback
+   * throws, the throw aborts the operation. See {@link ProgressCallback}.
    *
    * @example
    * ```typescript
@@ -2441,7 +2618,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2469,6 +2646,9 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let inputFd: number | null = null;
+    let outputFd: number | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2509,10 +2689,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt);
-
-      // Read input file
-      const inputData = readFileSync(inputPath);
+      key = this.deriveKeySync(finalPassword, salt);
 
       // Build v1 header for sync file (PBKDF2 KDF identifier). Built
       // BEFORE the cipher so we can include its on-disk bytes in the AAD
@@ -2527,25 +2704,73 @@ export class CryptoManager {
       ) as crypto.CipherGCM;
       cipher.setAAD(this.aadForV1(versionHeader));
 
-      // Encrypt the data
-      let encrypted = cipher.update(inputData);
-      encrypted = Buffer.concat([encrypted, cipher.final()]);
+      // Open the input for reading and the temp file for writing.
+      inputFd = openSync(inputPath, 'r');
+      outputFd = openSync(tempPath, 'w');
 
-      // Get authentication tag
+      // Write the prefix: [v1 header][salt][iv]. These three fields are
+      // always written together up front; the ciphertext body follows
+      // chunk by chunk, and the auth tag is appended last.
+      writeFileSync(outputFd, Buffer.concat([versionHeader, salt, iv]));
+
+      // Stream the plaintext in fixed-size chunks. The reuse buffer keeps
+      // peak memory proportional to the chunk size regardless of input size.
+      const chunk = Buffer.alloc(this.SYNC_ENCRYPT_CHUNK_SIZE);
+      let inputOffset = 0;
+
+      while (inputOffset < totalBytes) {
+        const bytesToRead = Math.min(
+          this.SYNC_ENCRYPT_CHUNK_SIZE,
+          totalBytes - inputOffset
+        );
+        const bytesRead = readSync(
+          inputFd,
+          chunk,
+          0,
+          bytesToRead,
+          inputOffset
+        );
+        if (bytesRead <= 0) {
+          // Should never happen given the bounds checks above; treat as a
+          // concurrently truncated or corrupted input file.
+          throw new CryptoError(
+            'Unexpected EOF while reading plaintext body',
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_READ_FAILED'
+          );
+        }
+        const inSlice =
+          bytesRead === chunk.length
+            ? chunk
+            : chunk.subarray(0, bytesRead);
+        const outSlice = cipher.update(inSlice);
+        if (outSlice.length > 0) {
+          writeFileSync(outputFd, outSlice);
+        }
+        inputOffset += bytesRead;
+      }
+
+      // Finalize the cipher — for AES-GCM this returns an empty Buffer
+      // because CTR mode flushes on each update(), but we write it for
+      // completeness in case mode changes.
+      const finalBuf = cipher.final();
+      if (finalBuf.length > 0) {
+        writeFileSync(outputFd, finalBuf);
+      }
+
+      // Append the GCM auth tag. Must be called AFTER cipher.final().
       const tag = cipher.getAuthTag();
+      writeFileSync(outputFd, tag);
 
-      // Write header: [v1 header][salt][iv][encrypted][tag] in one file open
-      // to keep things atomic-ish before the rename. Three appends would
-      // multiply the chance of a partial-write window before rename, so we
-      // stage the full payload and write it once.
-      const fullPayload = Buffer.concat([
-        versionHeader,
-        salt,
-        iv,
-        encrypted,
-        tag,
-      ]);
-      writeFileSync(tempPath, fullPayload);
+      // Close the output file BEFORE the rename so Windows lets us replace
+      // the destination.
+      closeSync(outputFd);
+      outputFd = null;
+
+      // Close the input fd (holding it open through the rename is
+      // unnecessary).
+      closeSync(inputFd);
+      inputFd = null;
 
       // Atomic rename — final outputPath now reflects the full ciphertext.
       this.atomicRenameSync(tempPath, outputPath);
@@ -2554,17 +2779,28 @@ export class CryptoManager {
       // Final progress event after the rename has succeeded.
       this.invokeProgress(progress, totalBytes, totalBytes);
 
-      // Clear sensitive data. `encrypted`, `tag`, and `fullPayload` are
-      // public ciphertext components rather than secret material, but the
-      // cipher's internal state lingers in those buffers until GC and
-      // clearing them keeps the sync encrypt path symmetric with the
-      // async one. See Task 14 (FIX.md Iteration 2) for rationale.
+      // Scrub the plaintext reuse buffer and the derived key.
+      this.secureClear(chunk);
       this.secureClear(key);
-      this.secureClear(inputData);
-      this.secureClear(encrypted);
-      this.secureClear(tag);
-      this.secureClear(fullPayload);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
+      // Make sure we drop any open file descriptors before unlinking.
+      if (outputFd !== null) {
+        try {
+          closeSync(outputFd);
+        } catch {
+          // ignore
+        }
+      }
+      if (inputFd !== null) {
+        try {
+          closeSync(inputFd);
+        } catch {
+          // ignore
+        }
+      }
       // Clean up the temp file. Never touch outputPath: it either was the
       // caller's pre-existing data (which we must not delete) or it never
       // got created.
@@ -2587,6 +2823,13 @@ export class CryptoManager {
       );
     }
   }
+
+  /**
+   * Chunk size used by the synchronous streaming encryption path. Matches
+   * `SYNC_DECRYPT_CHUNK_SIZE` and `fs.createReadStream`'s default
+   * `highWaterMark` so the two sync I/O paths are symmetric.
+   */
+  private readonly SYNC_ENCRYPT_CHUNK_SIZE = 64 * 1024;
 
   /**
    * Chunk size used by the synchronous streaming decryption path. 64 KiB is
@@ -2643,7 +2886,7 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || !outputPath) {
+    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2664,6 +2907,7 @@ export class CryptoManager {
     let tempPath: string | null = null;
     let inputFd: number | null = null;
     let outputFd: number | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2788,7 +3032,7 @@ export class CryptoManager {
       }
 
       // Derive key (synchronous, PBKDF2).
-      const key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
 
       // Allocate temp path and open it for writing.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -2905,6 +3149,9 @@ export class CryptoManager {
       this.secureClear(iv);
       this.secureClear(tag);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Make sure we drop any open file descriptors before unlinking.
       if (outputFd !== null) {
         try {

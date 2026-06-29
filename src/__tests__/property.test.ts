@@ -40,7 +40,14 @@
 import { describe, it, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import fc from 'fast-check';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -305,6 +312,89 @@ describe('property-based tests (Task 19)', () => {
       } finally {
         // Best-effort cleanup of the per-test scratch dir.
         const { rm } = await import('node:fs/promises');
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('sync file path: decryptFileSync(encryptFileSync(buf, p), p) reproduces input bytes', async () => {
+      // Per-test scratch directory nested under TEST_DIR.
+      const dir = path.join(
+        TEST_DIR,
+        `sync-file-rt-${crypto.randomBytes(8).toString('hex')}`
+      );
+      const inputPath = path.join(dir, 'in.bin');
+      const encryptedPath = path.join(dir, 'enc.bin');
+      const decryptedPath = path.join(dir, 'dec.bin');
+      const { mkdir, rm } = await import('node:fs/promises');
+      await mkdir(dir, { recursive: true });
+
+      // 64 KiB matches SYNC_ENCRYPT_CHUNK_SIZE / SYNC_DECRYPT_CHUNK_SIZE.
+      // Three size classes exercise the full chunking boundary space:
+      //   - empty   (0 bytes)       — cipher produces header+salt+iv+final()+tag only
+      //   - sub-chunk (1..CHUNK-1)  — single partial chunk
+      //   - multi-chunk (CHUNK+1..2*CHUNK+1) — at least two full iterations of the loop
+      const SYNC_CHUNK = 65536;
+      const arbSyncPlaintext = fc.oneof(
+        { weight: 1, arbitrary: fc.constant(new Uint8Array(0)) },
+        {
+          weight: 3,
+          arbitrary: fc.uint8Array({ minLength: 1, maxLength: SYNC_CHUNK - 1 }),
+        },
+        {
+          weight: 1,
+          arbitrary: fc.uint8Array({
+            minLength: SYNC_CHUNK + 1,
+            maxLength: SYNC_CHUNK * 2 + 1,
+          }),
+        }
+      );
+
+      // Valid pbkdf2Iterations within bounds; kept low for suite speed.
+      const arbPbkdf2Iters = fc.integer({ min: 1_000, max: 10_000 });
+
+      try {
+        await fc.assert(
+          fc.asyncProperty(
+            arbSyncPlaintext,
+            arbStrongPassword,
+            arbPbkdf2Iters,
+            async (plaintext, pwd, pbkdf2Iterations) => {
+              // Create a fresh CryptoManager with the given pbkdf2Iterations.
+              // The iteration count is embedded in the v1 ciphertext header by
+              // encryptFileSync and read back by decryptFileSync, so the same
+              // instance correctly round-trips at any valid iteration count.
+              const cm = new CryptoManager({
+                memoryCost: 2 ** 14,
+                timeCost: 1,
+                parallelism: 1,
+                pbkdf2Iterations,
+              });
+              const inputBuf = Buffer.from(plaintext);
+              writeFileSync(inputPath, inputBuf);
+              cm.encryptFileSync(inputPath, encryptedPath, pwd);
+              cm.decryptFileSync(encryptedPath, decryptedPath, pwd);
+              const out = readFileSync(decryptedPath);
+              // Hash-compare for large multi-chunk buffers.
+              const hashIn = crypto
+                .createHash('sha256')
+                .update(inputBuf)
+                .digest('hex');
+              const hashOut = crypto
+                .createHash('sha256')
+                .update(out)
+                .digest('hex');
+              expect(hashOut).toBe(hashIn);
+              // Cleanup between runs so each iteration starts fresh.
+              for (const f of [inputPath, encryptedPath, decryptedPath]) {
+                if (existsSync(f)) unlinkSync(f);
+              }
+            }
+          ),
+          // 20 runs covers all three size classes (1:3:1 weighting gives
+          // ~4 empty + 12 sub-chunk + 4 multi-chunk per 20 cases).
+          { numRuns: 20, endOnFailure: true }
+        );
+      } finally {
         await rm(dir, { recursive: true, force: true });
       }
     });

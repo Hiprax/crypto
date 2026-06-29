@@ -451,6 +451,25 @@ describe('CryptoManager', () => {
         crypto.encryptData(data, key, null as unknown as Buffer)
       ).toThrow(CryptoError);
     });
+
+    it('should throw INVALID_AAD when aadOverride is not a Buffer (audit #11)', () => {
+      // Production guard: aadOverride !== undefined && !Buffer.isBuffer(aadOverride)
+      // throws CryptoError(INVALID_INPUT, 'INVALID_AAD'). This branch was previously
+      // untested — a non-Buffer aadOverride would have silently coerced or crashed.
+      const data = Buffer.from('test data');
+      const key = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+
+      let caught: CryptoError | undefined;
+      try {
+        crypto.encryptData(data, key, iv, 'not-a-buffer' as unknown as Buffer);
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_AAD');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
   });
 
   describe('decryptData', () => {
@@ -532,6 +551,31 @@ describe('CryptoManager', () => {
       expect(() => crypto.decryptData(invalidData, key, iv, tag)).toThrow(
         CryptoError
       );
+    });
+
+    it('should throw INVALID_AAD when aadOverride is not a Buffer (audit #11)', () => {
+      // Mirror of the encryptData INVALID_AAD test — pins the matching guard in
+      // decryptData (src/crypto-manager.ts). Previously untested.
+      const data = Buffer.from('test data');
+      const key = crypto.generateSecureRandom(32);
+      const iv = crypto.generateSecureRandom(12);
+      const { encrypted, tag } = crypto.encryptData(data, key, iv);
+
+      let caught: CryptoError | undefined;
+      try {
+        crypto.decryptData(
+          encrypted,
+          key,
+          iv,
+          tag,
+          'not-a-buffer' as unknown as Buffer
+        );
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_AAD');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
     });
   });
 
@@ -6736,9 +6780,69 @@ describe('CryptoManager', () => {
       const plaintext = Buffer.alloc(2 * CHUNK + 512, 0x7f);
       writeFileSync(inputPath, plaintext);
       fastCrypto.encryptFileSync(inputPath, encryptedPath, testPassword);
+      // auto mode: KDF_MISMATCH is caught → v0 fallback → wrong key → DECRYPTION_FAILED
       await expect(
         fastCrypto.decryptFile(encryptedPath, decryptedPath, testPassword)
-      ).rejects.toThrow(CryptoError);
+      ).rejects.toBeInstanceOf(CryptoError);
+      // strict mode: re-throws KDF_MISMATCH directly — pins the assertKdfMatches
+      // call site in decryptFile (src/crypto-manager.ts). A generic parse or size
+      // error would also satisfy rejects.toThrow(CryptoError); asserting the
+      // specific code confirms the v1 header was structurally valid and the KDF
+      // id mismatch guard fired, not an earlier sanity check (audit #10).
+      const strictCrypto = new CryptoManager({
+        memoryCost: 2 ** 14,
+        timeCost: 1,
+        parallelism: 1,
+        pbkdf2Iterations: 10_000,
+        legacyMode: 'strict',
+      });
+      let caught: CryptoError | undefined;
+      try {
+        await strictCrypto.decryptFile(
+          encryptedPath,
+          decryptedPath,
+          testPassword
+        );
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('KDF_MISMATCH');
+    });
+
+    it('cross-KDF: decryptFileSync (sync/PBKDF2) correctly rejects encryptFile (async/Argon2id) ciphertext', async () => {
+      // Mirror of the test above. encryptFile produces v1 Argon2id (KDF id 0);
+      // decryptFileSync expects v1 PBKDF2 (KDF id 1). Pins the assertKdfMatches
+      // call site in decryptFileSync (src/crypto-manager.ts) — both call sites
+      // are now independently covered (audit #10).
+      const plaintext = Buffer.alloc(CHUNK + 512, 0x3c);
+      writeFileSync(inputPath, plaintext);
+      await fastCrypto.encryptFile(inputPath, encryptedPath, testPassword);
+      // auto mode: KDF_MISMATCH is caught → v0 fallback → wrong key → DECRYPTION_FAILED
+      expect(() =>
+        fastCrypto.decryptFileSync(encryptedPath, decryptedPath, testPassword)
+      ).toThrow(CryptoError);
+      // strict mode: re-throws KDF_MISMATCH directly, pinning the assertKdfMatches
+      // call site in decryptFileSync.
+      const strictCrypto = new CryptoManager({
+        memoryCost: 2 ** 14,
+        timeCost: 1,
+        parallelism: 1,
+        pbkdf2Iterations: 10_000,
+        legacyMode: 'strict',
+      });
+      let caughtSync: CryptoError | undefined;
+      try {
+        strictCrypto.decryptFileSync(
+          encryptedPath,
+          decryptedPath,
+          testPassword
+        );
+      } catch (e) {
+        caughtSync = e as CryptoError;
+      }
+      expect(caughtSync).toBeInstanceOf(CryptoError);
+      expect(caughtSync?.code).toBe('KDF_MISMATCH');
     });
 
     it('encrypts and decrypts an empty file (zero plaintext bytes)', () => {

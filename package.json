@@ -1,6 +1,6 @@
 {
   "name": "@hiprax/crypto",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "High-security encryption/decryption library using AES-256-GCM and Argon2id",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -79,6 +79,10 @@
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "js-yaml": "^3.15.0",
+    "@babel/core": "^7.29.6"
   },
   "engines": {
     "node": ">=22.0.0",

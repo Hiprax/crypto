@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.3] - 2026-06-30
+
+### Security
+
+- **Patched three transitive dev-dependency advisories flagged by Dependabot** (`package.json`, `package-lock.json`). All three packages are **development-only** transitive dependencies of the build/test toolchain — none is a runtime dependency and none ships in the published tarball (which contains only `dist/` + `README.md` + `LICENSE` + `SECURITY.md` + `CHANGELOG.md`), so the exposure was confined to the dev/CI environment and never reached consumers of the library. The advisories:
+  - **`js-yaml` < 3.15.0 — quadratic-complexity DoS in merge-key handling via repeated aliases** (CVE-2026-53550 / GHSA-h67p-54hq-rp68, moderate). Reached via `ts-jest → @jest/transform → babel-plugin-istanbul → @istanbuljs/load-nyc-config`, which parses `.nycrc` YAML and declares `js-yaml@^3.13.1`. Installed `3.14.2` → patched `3.15.0`.
+  - **`@babel/core` <= 7.29.0 — arbitrary file read via `sourceMappingURL` comment** (CVE-2026-49356 / GHSA-4x5r-pxfx-6jf8, low). Reached via `jest` and `ts-jest` (many parents, all declaring `@babel/core@^7`). Installed `7.29.0` → patched `7.29.7`.
+  - **`brace-expansion` 5.0.2–5.0.5 — large numeric range defeats the documented `max` DoS protection** (CVE-2026-45149 / GHSA-jxxr-4gwj-5jf2, moderate; already auto-dismissed by Dependabot). Installed `5.0.5` → patched `5.0.7`.
+- **Fix strategy — caret-bounded `overrides` floors for the single-major packages, lockfile-only bump for the multi-major one.** A new `overrides` block in `package.json` pins `"js-yaml": "^3.15.0"` and `"@babel/core": "^7.29.6"`. The **caret bound is load-bearing**: an unbounded `">=x"` floor was tried first and verified to let npm jump to the latest **major** — `">=3.15.0"` resolved `js-yaml` to `5.2.0` (two majors up) and `">=7.29.6"` resolved `@babel/core` to `8.0.1` — forcing semver-incompatible majors into the tree (js-yaml 4.x+ removed the `safeLoad`/`safeDump` API that `@istanbuljs/load-nyc-config` relies on; ts-jest/jest do not support Babel 8). The caret form (`^3.15.0` = `>=3.15.0 <4`, `^7.29.6` = `>=7.29.6 <8`) sets the security floor while respecting every parent's declared `^major` range. `brace-expansion` was **deliberately not** given an `overrides` entry: it resolves at three majors simultaneously (`1.1.14`, `2.1.0`, `5.0.5`) and only the `5.x` instance was vulnerable, so a blanket floor would have forced the `1.x`/`2.x` consumers across a major boundary and broken them — it was instead bumped in the lockfile via `npm audit fix`, which raised the vulnerable `5.x` instance to `5.0.7` within its parent's `^5` range and left the `1.1.14`/`2.1.0` instances untouched.
+- **Verification.** `npm audit` reports `found 0 vulnerabilities`. The full Pre-Completion Checklist passes: `npm run build`, `npm run type-check`, `npm run lint` clean, and `npm test` green at **690/690** across 8 suites and 12 snapshots — the suite directly exercises the patched `ts-jest → babel-plugin-istanbul → @istanbuljs/load-nyc-config → js-yaml` and Babel chains, confirming `js-yaml@3.15.0` and `@babel/core@7.29.7` are fully compatible with the existing toolchain.
+
+### Files changed
+
+- `package.json` — new top-level `overrides` block pinning `"js-yaml": "^3.15.0"` and `"@babel/core": "^7.29.6"` patched-version floors (caret-bounded to the existing major line); `version` bumped `1.4.2` → `1.4.3`.
+- `package-lock.json` — re-resolved: `js-yaml` `3.14.2` → `3.15.0`, `@babel/core` `7.29.0` → `7.29.7`, vulnerable `brace-expansion` `5.0.5` → `5.0.7` (the `1.1.14` and `2.1.0` instances unchanged); `version` synced to `1.4.3`.
+
+---
+
 ## [1.4.2] - 2026-06-30
 
 ### Fixed

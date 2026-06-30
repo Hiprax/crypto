@@ -6715,6 +6715,142 @@ describe('CryptoManager', () => {
         }
       });
     });
+
+    // ── Argon2id memoryCost >= 8 * parallelism floor (Phase 3) ───────────────
+    // parseHeader now rejects headers where memoryCost < 8*parallelism before
+    // returning. Without this check a crafted ciphertext reaches argon2.hash()
+    // which throws — and the deriveKey catch wraps it as ENCRYPTION_FAILED /
+    // KEY_DERIVATION_FAILED, an encryption-typed error on a decrypt operation.
+    describe('Argon2id memoryCost >= 8 * parallelism floor (Phase 3)', () => {
+      it('parseHeader rejects memoryCost < 8 * parallelism with DECRYPTION_FAILED / INVALID_HEADER_PARAM', () => {
+        // Classic sub-floor case: memoryCost=8, parallelism=64 → 8 < 8×64=512
+        const hdr = packHeader(KDF_ID_ARGON2ID, {
+          kind: 'argon2id',
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        expect(() => parseHeader(hdr)).toThrow(CryptoError);
+        try {
+          parseHeader(hdr);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(CryptoErrorType.DECRYPTION_FAILED);
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+          expect((err as CryptoError).message).toContain('memoryCost (8)');
+          expect((err as CryptoError).message).toContain('8 × 64');
+        }
+      });
+
+      it('parseHeader rejects minimum sub-floor case: memoryCost=1, parallelism=1 (1 < 8×1=8)', () => {
+        const hdr = packHeader(KDF_ID_ARGON2ID, {
+          kind: 'argon2id',
+          memoryCost: 1,
+          timeCost: 1,
+          parallelism: 1,
+        });
+        expect(() => parseHeader(hdr)).toThrow(CryptoError);
+        try {
+          parseHeader(hdr);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(CryptoErrorType.DECRYPTION_FAILED);
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+        }
+      });
+
+      it('parseHeader accepts memoryCost exactly at the floor (8 * parallelism)', () => {
+        // memoryCost = 8, parallelism = 1 → floor = 8*1 = 8 → exactly at floor
+        const hdr = packHeader(KDF_ID_ARGON2ID, {
+          kind: 'argon2id',
+          memoryCost: 8,
+          timeCost: 1,
+          parallelism: 1,
+        });
+        const parsed = parseHeader(hdr);
+        expect(parsed.params.kind).toBe('argon2id');
+        if (parsed.params.kind === 'argon2id') {
+          expect(parsed.params.memoryCost).toBe(8);
+          expect(parsed.params.parallelism).toBe(1);
+        }
+      });
+
+      it('decryptText of crafted sub-floor ciphertext throws DECRYPTION_FAILED (not ENCRYPTION_FAILED) in auto mode', async () => {
+        // Craft a v1 Argon2id ciphertext header with memoryCost=8, parallelism=64
+        // (violates floor: 8 < 512). The decrypt should reject with DECRYPTION_FAILED,
+        // NOT ENCRYPTION_FAILED / KEY_DERIVATION_FAILED.
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager(); // legacyMode: 'auto' (default)
+        await expect(cm.decryptText(subFloor, testPassword)).rejects.toMatchObject({
+          type: CryptoErrorType.DECRYPTION_FAILED,
+        });
+        // Explicitly confirm the wrong error type is gone
+        await expect(cm.decryptText(subFloor, testPassword)).rejects.not.toMatchObject({
+          type: CryptoErrorType.ENCRYPTION_FAILED,
+        });
+      });
+
+      it('decryptText of crafted sub-floor ciphertext throws DECRYPTION_FAILED in strict mode', async () => {
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager({ legacyMode: 'strict' });
+        await expect(cm.decryptText(subFloor, testPassword)).rejects.toMatchObject({
+          type: CryptoErrorType.DECRYPTION_FAILED,
+          code: 'INVALID_HEADER_PARAM',
+        });
+      });
+
+      it('decryptText of crafted sub-floor ciphertext throws DECRYPTION_FAILED in reject mode', async () => {
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager({ legacyMode: 'reject' });
+        await expect(cm.decryptText(subFloor, testPassword)).rejects.toMatchObject({
+          type: CryptoErrorType.DECRYPTION_FAILED,
+          code: 'INVALID_HEADER_PARAM',
+        });
+      });
+
+      it('decryptTextSync with strict mode: sub-floor Argon2id header throws DECRYPTION_FAILED / INVALID_HEADER_PARAM immediately', () => {
+        // In strict mode the parseHeader floor violation is re-thrown immediately
+        // (no v0 PBKDF2 fallback) — a clean, fast, explicit rejection.
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager({ legacyMode: 'strict' });
+        expect(() => cm.decryptTextSync(subFloor, testPassword)).toThrow(CryptoError);
+        try {
+          cm.decryptTextSync(subFloor, testPassword);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(CryptoErrorType.DECRYPTION_FAILED);
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+        }
+      });
+
+      it('inspectHeader on sub-floor Argon2id header throws DECRYPTION_FAILED / INVALID_HEADER_PARAM', () => {
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        expect(() => crypto.inspectHeader(subFloor)).toThrow(CryptoError);
+        try {
+          crypto.inspectHeader(subFloor);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(CryptoErrorType.DECRYPTION_FAILED);
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+        }
+      });
+    });
   });
 
   // ── Phase 3: key scrub on error paths ─────────────────────────────────────

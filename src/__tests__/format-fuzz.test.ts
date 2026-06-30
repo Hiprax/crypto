@@ -86,6 +86,11 @@ function assertWellFormedParseResult(result: ParsedHeader): void {
       expect(result.params.timeCost).toBeGreaterThan(0);
       expect(Number.isInteger(result.params.parallelism)).toBe(true);
       expect(result.params.parallelism).toBeGreaterThan(0);
+      // parseHeader now enforces the RFC 9106 §3.1 cross-field floor:
+      // any successfully-parsed Argon2id header guarantees this invariant.
+      expect(result.params.memoryCost).toBeGreaterThanOrEqual(
+        8 * result.params.parallelism
+      );
     }
   } else {
     expect(result.params.kind).toBe('pbkdf2-sha256');

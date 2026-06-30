@@ -1233,9 +1233,9 @@ describe('Phase 1 — async 0-byte file end-to-end round-trip (Task 1.3)', () =>
       await cm.decryptFile(encPath, decPath, TEST_PASSWORD);
 
       // The recovered plaintext must be exactly 0 bytes.
-      expect(existsSync(decPath)).toBe(true);
-      expect(statSync(decPath).size).toBe(0);
-      expect(readFileSync(decPath).length).toBe(0);
+      // Read directly — no existsSync pre-check (would create a TOCTOU race).
+      const decContent = readFileSync(decPath);
+      expect(decContent.length).toBe(0);
     } finally {
       for (const p of [inputPath, encPath, decPath]) {
         if (existsSync(p)) unlinkSync(p);

@@ -2839,18 +2839,24 @@ export class CryptoManager {
     let chunk: Buffer | null = null;
 
     try {
-      // Check if input file exists
-      if (!existsSync(inputPath)) {
-        throw new CryptoError(
-          `Input file does not exist: ${inputPath}`,
-          CryptoErrorType.FILE_ERROR,
-          'INPUT_FILE_NOT_FOUND'
-        );
+      // Open the input first to eliminate the TOCTOU race between an
+      // existsSync check and the later openSync call. ENOENT is re-thrown
+      // as INPUT_FILE_NOT_FOUND; other errors propagate to the outer catch.
+      try {
+        inputFd = openSync(inputPath, 'r');
+      } catch (openErr) {
+        if ((openErr as Error & { code?: string }).code === 'ENOENT') {
+          throw new CryptoError(
+            `Input file does not exist: ${inputPath}`,
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_NOT_FOUND'
+          );
+        }
+        throw openErr;
       }
 
-      // Stat the input now so the progress callback receives a stable
-      // `totalBytes` for both bracketing events.
-      const totalBytes = statSync(inputPath).size;
+      // Use the open fd for size — same inode, no intervening name lookup.
+      const totalBytes = fstatSync(inputFd as number).size;
 
       // Ensure output directory exists
       const outputDir = dirname(outputPath);
@@ -2892,8 +2898,8 @@ export class CryptoManager {
       ) as crypto.CipherGCM;
       cipher.setAAD(this.aadForV1(versionHeader));
 
-      // Open the input for reading and the temp file for writing.
-      inputFd = openSync(inputPath, 'r');
+      // Open the temp file for writing. (Input fd was opened at the top of
+      // this try block to eliminate TOCTOU — it is already assigned above.)
       outputFd = openSync(tempPath, 'w');
 
       // Write the prefix: [v1 header][salt][iv]. These three fields are
@@ -3108,13 +3114,20 @@ export class CryptoManager {
     let key: Buffer | null = null;
 
     try {
-      // Check if input file exists
-      if (!existsSync(inputPath)) {
-        throw new CryptoError(
-          `Input file does not exist: ${inputPath}`,
-          CryptoErrorType.FILE_ERROR,
-          'INPUT_FILE_NOT_FOUND'
-        );
+      // Open the input first to eliminate the TOCTOU race between an
+      // existsSync check and the later openSync call. ENOENT is re-thrown
+      // as INPUT_FILE_NOT_FOUND; other errors propagate to the outer catch.
+      try {
+        inputFd = openSync(inputPath, 'r');
+      } catch (openErr) {
+        if ((openErr as Error & { code?: string }).code === 'ENOENT') {
+          throw new CryptoError(
+            `Input file does not exist: ${inputPath}`,
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_NOT_FOUND'
+          );
+        }
+        throw openErr;
       }
 
       // Ensure output directory exists
@@ -3131,9 +3144,8 @@ export class CryptoManager {
         }
       }
 
-      // Open input read-only and stat it to get the total size.
-      inputFd = openSync(inputPath, 'r');
-      const stat = fstatSync(inputFd);
+      // Stat the already-open fd to get the total size (no second name lookup).
+      const stat = fstatSync(inputFd as number);
       const totalSize = stat.size;
 
       // Read the front of the file (up to v1 header + salt + iv) so we can

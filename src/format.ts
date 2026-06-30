@@ -274,10 +274,23 @@ export function packHeader(kdfId: KdfId, params: KdfHeaderParams): Buffer {
  * needs — and are NOT user-configurable for this reason: the goal is
  * "untrusted-input DoS protection", not "match the decrypt-time KDF cost".
  *
+ * **Argon2id cross-field floor.** For Argon2id headers, the parser also
+ * enforces RFC 9106 §3.1's mandatory `memoryCost >= 8 * parallelism` floor.
+ * The `CryptoManager` constructor enforces the same floor (code
+ * `MEMORY_COST_TOO_SMALL`), so no legitimately-produced ciphertext can
+ * carry sub-floor params. Without this check, a crafted header with e.g.
+ * `memoryCost=8, parallelism=64` would pass all per-field guards, reach
+ * `argon2.hash`, and surface as `ENCRYPTION_FAILED / KEY_DERIVATION_FAILED`
+ * — an encryption-typed error on a decryption operation. The floor uses
+ * `DECRYPTION_FAILED / INVALID_HEADER_PARAM` (same type/code as the
+ * zero/negative-param check) so `legacyMode: 'auto'` falls through to the
+ * v0 recovery path identically to other malformed-param cases.
+ *
  * @param buf - buffer that begins with the v1 header (must contain the magic)
  * @returns parsed header (version, kdfId, params, total bytes consumed)
  * @throws CryptoError on missing/short header, unknown version, unknown KDF,
- *   or KDF parameters that exceed the documented upper bounds
+ *   KDF parameters that exceed the documented upper bounds, or an Argon2id
+ *   `memoryCost`/`parallelism` pair that violates the RFC 9106 §3.1 floor
  */
 export function parseHeader(buf: Buffer): ParsedHeader {
   if (!Buffer.isBuffer(buf)) {
@@ -346,6 +359,25 @@ export function parseHeader(buf: Buffer): ParsedHeader {
           `Got memoryCost=${memoryCost}, timeCost=${timeCost}, parallelism=${parallelism}.`,
         CryptoErrorType.INVALID_INPUT,
         'KDF_PARAMS_OUT_OF_BOUNDS'
+      );
+    }
+    // Argon2id RFC 9106 §3.1 cross-field constraint: memoryCost >= 8 * parallelism.
+    // The constructor enforces the same floor (MEMORY_COST_TOO_SMALL), so no
+    // legitimately-produced ciphertext can carry sub-floor params. Without this
+    // check, a crafted header (e.g. memoryCost=8, parallelism=64) passes all
+    // per-field guards, reaches argon2.hash, and surfaces as
+    // ENCRYPTION_FAILED / KEY_DERIVATION_FAILED — an encryption-typed error
+    // on a decryption operation. Using DECRYPTION_FAILED / INVALID_HEADER_PARAM
+    // (same type/code as the zero/negative-param check above) means
+    // legacyMode 'auto' falls through to the v0 recovery path, and
+    // strict/reject modes re-throw immediately — both without ENCRYPTION_FAILED.
+    const argon2MemFloor = 8 * parallelism;
+    if (memoryCost < argon2MemFloor) {
+      throw new CryptoError(
+        `Argon2id memoryCost (${memoryCost}) must be at least 8 * parallelism ` +
+          `(${argon2MemFloor} = 8 × ${parallelism})`,
+        CryptoErrorType.DECRYPTION_FAILED,
+        'INVALID_HEADER_PARAM'
       );
     }
     params = {

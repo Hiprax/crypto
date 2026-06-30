@@ -294,9 +294,7 @@ describe('Utils', () => {
       } catch (err) {
         expect(err).toBeInstanceOf(CryptoError);
         expect((err as CryptoError).code).toBe('FILE_SIZE_TOO_LARGE');
-        expect((err as CryptoError).type).toBe(
-          CryptoErrorType.INVALID_INPUT
-        );
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
       }
     });
 
@@ -342,6 +340,23 @@ describe('Utils', () => {
       expect(getFileExtension('file.backup.txt')).toBe('.txt');
       expect(getFileExtension('file.name.with.dots.txt')).toBe('.txt');
     });
+
+    it('should throw CryptoError for non-string input (Phase 1 guard)', () => {
+      // Non-string input previously threw a raw Node TypeError; now throws
+      // a typed CryptoError consistent with the rest of the utils contract.
+      const nonStrings: unknown[] = [123, null, undefined, {}, []];
+      for (const val of nonStrings) {
+        let err: unknown;
+        try {
+          getFileExtension(val as string);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_INPUT');
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
+    });
   });
 
   describe('isTextFile', () => {
@@ -363,6 +378,21 @@ describe('Utils', () => {
       expect(isTextFile('file.TXT')).toBe(true);
       expect(isTextFile('file.MD')).toBe(true);
       expect(isTextFile('file.JSON')).toBe(true);
+    });
+
+    it('should throw CryptoError for non-string input (Phase 1 guard)', () => {
+      const nonStrings: unknown[] = [123, null, undefined, {}];
+      for (const val of nonStrings) {
+        let err: unknown;
+        try {
+          isTextFile(val as string);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_INPUT');
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
     });
   });
 
@@ -519,10 +549,7 @@ describe('Utils', () => {
     it('should validate output from CryptoManager encryptTextSync', () => {
       // The library outputs base64url, so encrypted text should be valid
       const cm = new CryptoManager();
-      const encrypted = cm.encryptTextSync(
-        'test data',
-        'MySecureP@ssw0rd123!'
-      );
+      const encrypted = cm.encryptTextSync('test data', 'MySecureP@ssw0rd123!');
       expect(isValidBase64Url(encrypted)).toBe(true);
     });
 
@@ -807,11 +834,7 @@ describe('Utils', () => {
       const fn = jest
         .fn()
         .mockRejectedValueOnce(
-          new CryptoError(
-            'Disk full',
-            CryptoErrorType.FILE_ERROR,
-            'DISK_FULL'
-          )
+          new CryptoError('Disk full', CryptoErrorType.FILE_ERROR, 'DISK_FULL')
         )
         .mockResolvedValue('recovered');
 
@@ -1178,6 +1201,62 @@ describe('Utils', () => {
     });
   });
 
+  describe('createProgressBar - robustness (Phase 1 hardening)', () => {
+    // All edge cases must return a well-formed "[...] N%" string and never throw.
+    const wellFormed = /^\[.*\] \d+%$/;
+
+    it('should clamp negative current to 0% without throwing', () => {
+      const result = createProgressBar(-5, 10);
+      expect(result).toMatch(wellFormed);
+      expect(result).toBe('[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%');
+    });
+
+    it('should fall back to default width (30) for negative width without throwing', () => {
+      // -3 is not a positive integer → width falls back to 30
+      const result = createProgressBar(5, 10, -3);
+      expect(result).toMatch(wellFormed);
+      expect(result).toMatch(/\[.{30}\] 50%/);
+    });
+
+    it('should treat NaN current as 0 progress without throwing or emitting NaN', () => {
+      const result = createProgressBar(NaN, 10);
+      expect(result).toMatch(wellFormed);
+      expect(result).not.toContain('NaN');
+      expect(result).toBe('[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%');
+    });
+
+    it('should treat Infinity current as 0 progress without throwing', () => {
+      const result = createProgressBar(Infinity, 10);
+      expect(result).toMatch(wellFormed);
+      expect(result).toBe('[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%');
+    });
+
+    it('should fall back to default width for non-integer width without throwing', () => {
+      // 15.5 is not an integer → falls back to 30
+      const result = createProgressBar(5, 10, 15.5);
+      expect(result).toMatch(wellFormed);
+      expect(result).toMatch(/\[.{30}\] 50%/);
+    });
+
+    it('should fall back to default width for zero width without throwing', () => {
+      // 0 is not positive → falls back to 30
+      const result = createProgressBar(5, 10, 0);
+      expect(result).toMatch(wellFormed);
+      expect(result).toMatch(/\[.{30}\] 50%/);
+    });
+
+    // Regression: existing happy-path behaviors must be unchanged
+    it('should preserve happy-path output exactly', () => {
+      expect(createProgressBar(50, 100)).toMatch(/\[.*\] 50%/);
+      expect(createProgressBar(0, 100)).toMatch(/\[░{30}\] 0%/);
+      expect(createProgressBar(100, 100)).toMatch(/\[█{30}\] 100%/);
+      expect(createProgressBar(150, 100)).toMatch(/\[.*\] 100%/);
+      expect(createProgressBar(10, 0)).toBe(
+        '[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%'
+      );
+    });
+  });
+
   describe('validatePasswordStrength - additional cases', () => {
     it('should give higher score for longer passwords', () => {
       // Short password (8 chars) gets score of 1 for length
@@ -1269,9 +1348,9 @@ describe('Utils', () => {
         );
       }
       // Non-string: both functions must return false
-      expect(
-        validatePasswordStrength(null as unknown as string).isValid
-      ).toBe(isValidPassword(null as unknown as string));
+      expect(validatePasswordStrength(null as unknown as string).isValid).toBe(
+        isValidPassword(null as unknown as string)
+      );
     });
 
     it('regression: Aaaa1234_ is valid under both validators', () => {
@@ -1308,6 +1387,23 @@ describe('Utils', () => {
       const hash = sha256('日本語テスト');
       expect(hash).toHaveLength(64);
       expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('should throw CryptoError for non-string input (Phase 1 guard)', () => {
+      // Previously threw a raw Node TypeError; now throws a typed CryptoError
+      // matching the library's "all errors are CryptoError" contract.
+      const nonStrings: unknown[] = [123, null, undefined, {}, []];
+      for (const val of nonStrings) {
+        let err: unknown;
+        try {
+          sha256(val as string);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_INPUT');
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
     });
   });
 
@@ -1419,9 +1515,9 @@ describe('Utils', () => {
       // overreach onto valid printable content.
       expect(validatePath('plain/path/file.txt').isValid).toBe(true);
       expect(validatePath('file with spaces.txt').isValid).toBe(true);
-      expect(validatePath('file_with_underscores-and-hyphens.txt').isValid).toBe(
-        true
-      );
+      expect(
+        validatePath('file_with_underscores-and-hyphens.txt').isValid
+      ).toBe(true);
     });
 
     it('should accept path containing high-codepoint Unicode (>= 0x80)', () => {

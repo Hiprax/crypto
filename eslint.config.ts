@@ -2,6 +2,12 @@ import js from '@eslint/js';
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsparser from '@typescript-eslint/parser';
 import security from 'eslint-plugin-security';
+// eslint-plugin-prettier/recommended pulls in eslint-config-prettier (which
+// disables all ESLint formatting rules that conflict with Prettier) AND adds
+// the `prettier/prettier` rule so formatting drift surfaces as a lint error.
+// Must come after all other rule blocks so eslint-config-prettier's overrides
+// win over any formatting-flavoured rules added earlier in the array.
+import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
 
 export default [
   js.configs.recommended,
@@ -93,5 +99,14 @@ export default [
       // strings (e.g. fuzz / property tests). Allow it.
       'security/detect-non-literal-regexp': 'off',
     },
+  },
+  // Scoped prettier block: disables ESLint formatting rules that conflict
+  // with Prettier (via the bundled eslint-config-prettier rules) and
+  // enables `prettier/prettier` as an error so `npm run lint` catches drift.
+  // Placed last so the eslint-config-prettier overrides win. After this
+  // block, run `npm run format` to auto-fix; `npm run lint` to verify.
+  {
+    ...eslintPluginPrettierRecommended,
+    files: ['src/**/*.ts'],
   },
 ];

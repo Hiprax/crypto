@@ -36,11 +36,7 @@ import {
   SecurityLevel,
   EncryptionAlgorithm,
 } from './types.js';
-import type {
-  KdfHeaderParams,
-  KdfId,
-  ParsedHeader,
-} from './format.js';
+import type { KdfHeaderParams, KdfId, ParsedHeader } from './format.js';
 import {
   HEADER_LENGTH,
   KDF_ID_ARGON2ID,
@@ -102,7 +98,7 @@ const PBKDF2_DEFAULT_ITERATIONS = 600000;
 
 /**
  * Iteration count assumed for legacy v0 sync ciphertexts (those produced by
- * versions of this library prior to 0.10.0, which used 100k iterations and
+ * versions of this library prior to 0.11.0, which used 100k iterations and
  * did not embed the iteration count in the ciphertext). v1 ciphertexts
  * carry the iteration count in their header and ignore this constant.
  */
@@ -1522,6 +1518,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the plaintext if the operation
+    // fails after the buffer is allocated (e.g. encryptData throws).
+    let textBuffer: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
@@ -1538,7 +1537,7 @@ export class CryptoManager {
       const header = this.buildHeader(KDF_ID_ARGON2ID);
 
       // Encrypt the text with header-bound AAD.
-      const textBuffer = Buffer.from(text, 'utf8');
+      textBuffer = Buffer.from(text, 'utf8');
       const { encrypted, tag } = this.encryptData(
         textBuffer,
         key,
@@ -1565,6 +1564,10 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      // Scrub the plaintext buffer if it was allocated before the failure.
+      if (textBuffer !== null) {
+        this.secureClear(textBuffer);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1609,6 +1612,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the decrypted buffer if the
+    // operation fails in the narrow window after decryptData returns.
+    let decrypted: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1705,8 +1711,9 @@ export class CryptoManager {
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
-      const aad = headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      const decrypted = this.decryptData(encrypted, key, iv, tag, aad);
+      const aad =
+        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+      decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory. `combined` is cleared *after*
@@ -1720,6 +1727,10 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      // Scrub the decrypted buffer if it was allocated before the failure.
+      if (decrypted !== null) {
+        this.secureClear(decrypted);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1772,6 +1783,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the plaintext if the operation
+    // fails after the buffer is allocated (e.g. encryptData throws).
+    let textBuffer: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
@@ -1786,7 +1800,7 @@ export class CryptoManager {
       const header = this.buildHeader(KDF_ID_PBKDF2_SHA256);
 
       // Encrypt the text with header-bound AAD.
-      const textBuffer = Buffer.from(text, 'utf8');
+      textBuffer = Buffer.from(text, 'utf8');
       const { encrypted, tag } = this.encryptData(
         textBuffer,
         key,
@@ -1809,6 +1823,10 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      // Scrub the plaintext buffer if it was allocated before the failure.
+      if (textBuffer !== null) {
+        this.secureClear(textBuffer);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1850,6 +1868,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the decrypted buffer if the
+    // operation fails in the narrow window after decryptData returns.
+    let decrypted: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1925,8 +1946,9 @@ export class CryptoManager {
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
-      const aad = headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      const decrypted = this.decryptData(encrypted, key, iv, tag, aad);
+      const aad =
+        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+      decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory. `combined` is cleared *after*
@@ -1940,6 +1962,10 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      // Scrub the decrypted buffer if it was allocated before the failure.
+      if (decrypted !== null) {
+        this.secureClear(decrypted);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1997,7 +2023,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2151,7 +2182,7 @@ export class CryptoManager {
           // while we are waiting for the write callback or for 'drain'.
           pendingChunkReject = (err): void => settleOnce(err);
 
-          const ok = outputStream.write(chunk, (err) => {
+          const ok = outputStream.write(chunk, err => {
             // Write callback fires when this chunk's data has been
             // processed. For ok===true: sole settlement path. For
             // ok===false: drain may have already settled us (idempotent).
@@ -2245,7 +2276,7 @@ export class CryptoManager {
         // attached, end(cb) still fires its callback on a failed-open
         // stream, so this path neither hangs nor crashes the process.
         if (!outputStream.destroyed) {
-          await new Promise<void>((resolve) => {
+          await new Promise<void>(resolve => {
             outputStream.end(() => resolve());
           });
         }
@@ -2351,7 +2382,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2424,8 +2460,7 @@ export class CryptoManager {
         // one shot (v1 header + salt + iv = HEADER_LENGTH + saltLength +
         // ivLength) when the file is large enough, otherwise read what's
         // available and detect short files.
-        const maxFrontLen =
-          HEADER_LENGTH + this.saltLength + this.ivLength;
+        const maxFrontLen = HEADER_LENGTH + this.saltLength + this.ivLength;
         const frontReadLen = Math.min(maxFrontLen, totalSize);
         const front = Buffer.alloc(frontReadLen);
         if (frontReadLen > 0) {
@@ -2490,10 +2525,7 @@ export class CryptoManager {
         // Validate the file is at least large enough for the salt+iv+tag
         // metadata after the (possibly absent) format header.
         const minSize =
-          formatHeaderLen +
-          this.saltLength +
-          this.ivLength +
-          this.tagLength;
+          formatHeaderLen + this.saltLength + this.ivLength + this.tagLength;
         if (totalSize < minSize) {
           throw new CryptoError(
             'File is too small to be a valid encrypted file',
@@ -2566,11 +2598,13 @@ export class CryptoManager {
       decipher.setAAD(decipherAad);
       decipher.setAuthTag(tag);
 
-      // Emit an initial progress event reflecting the bytes already read out
-      // of the file (header + salt + iv + tag). Reporting these as
-      // "processed" matches the user's mental model that progress is "how
-      // much of the input file have you consumed", not "how much body have
-      // you decrypted".
+      // Initial progress event — a literal `(0, totalSize)` start sentinel,
+      // matching the `decryptFileSync` contract. The metadata bytes
+      // (header + salt + iv + tag) have already been read off disk by this
+      // point, but we report `0` so callers can use the first event as a
+      // deterministic start marker; per-chunk events (via the `data` event
+      // on the body read stream) report `consumedFrontAndTag + bodyConsumed`
+      // bytes, and the final event reports `(totalSize, totalSize)`.
       const consumedFrontAndTag =
         bodyStart + this.tagLength; /* bytes already read from input */
       this.invokeProgress(progress, 0, totalSize);
@@ -2648,7 +2682,7 @@ export class CryptoManager {
           const finalBuf = decipher.final();
           if (finalBuf.length > 0) {
             await new Promise<void>((resolve, reject) => {
-              outputStream.write(finalBuf, (err) => {
+              outputStream.write(finalBuf, err => {
                 if (err) reject(err);
                 else resolve();
               });
@@ -2664,7 +2698,7 @@ export class CryptoManager {
         // attached, end(cb) still fires its callback on a failed-open
         // stream, so this path neither hangs nor crashes the process.
         if (!outputStream.destroyed) {
-          await new Promise<void>((resolve) => {
+          await new Promise<void>(resolve => {
             outputStream.end(() => resolve());
           });
         }
@@ -2763,7 +2797,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2872,13 +2911,7 @@ export class CryptoManager {
           this.SYNC_ENCRYPT_CHUNK_SIZE,
           totalBytes - inputOffset
         );
-        const bytesRead = readSync(
-          inputFd,
-          chunk,
-          0,
-          bytesToRead,
-          inputOffset
-        );
+        const bytesRead = readSync(inputFd, chunk, 0, bytesToRead, inputOffset);
         if (bytesRead <= 0) {
           // Should never happen given the bounds checks above; treat as a
           // concurrently truncated or corrupted input file.
@@ -2889,9 +2922,7 @@ export class CryptoManager {
           );
         }
         const inSlice =
-          bytesRead === chunk.length
-            ? chunk
-            : chunk.subarray(0, bytesRead);
+          bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead);
         const outSlice = cipher.update(inSlice);
         if (outSlice.length > 0) {
           writeFileSync(outputFd, outSlice);
@@ -3048,7 +3079,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || typeof inputPath !== 'string' || !outputPath || typeof outputPath !== 'string') {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -3108,13 +3144,7 @@ export class CryptoManager {
       const frontReadLen = Math.min(maxFrontLen, totalSize);
       const front = Buffer.alloc(frontReadLen);
       if (frontReadLen > 0) {
-        const bytesReadFront = readSync(
-          inputFd,
-          front,
-          0,
-          frontReadLen,
-          0
-        );
+        const bytesReadFront = readSync(inputFd, front, 0, frontReadLen, 0);
         if (bytesReadFront !== frontReadLen) {
           throw new CryptoError(
             'Failed to read full file header region',
@@ -3194,13 +3224,7 @@ export class CryptoManager {
       // Read the trailing auth tag from the end of the file.
       const tag = Buffer.alloc(this.tagLength);
       const tagOffset = totalSize - this.tagLength;
-      const tagBytesRead = readSync(
-        inputFd,
-        tag,
-        0,
-        this.tagLength,
-        tagOffset
-      );
+      const tagBytesRead = readSync(inputFd, tag, 0, this.tagLength, tagOffset);
       if (tagBytesRead !== this.tagLength) {
         throw new CryptoError(
           'Failed to read full auth tag from file',

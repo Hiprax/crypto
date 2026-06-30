@@ -76,9 +76,7 @@ const TEST_DIR = path.join(
 // embedded in the v1 ciphertext header, so subsequent decryption with the
 // same instance works correctly). 10 000 iterations is well below
 // production guidance but keeps the property suite responsive.
-function makeFastCrypto(opts?: {
-  defaultPassphrase?: string;
-}): CryptoManager {
+function makeFastCrypto(opts?: { defaultPassphrase?: string }): CryptoManager {
   return new CryptoManager({
     memoryCost: 2 ** 14, // 16 MiB
     timeCost: 1,
@@ -167,11 +165,7 @@ const arbText = fc
   // text` is the canonical "round-trips through UTF-8" check — unpaired
   // surrogates fail this and would spuriously fail the round-trip
   // property even if encryption is correct.
-  .filter(
-    s =>
-      s.length > 0 &&
-      Buffer.from(s, 'utf8').toString('utf8') === s
-  );
+  .filter(s => s.length > 0 && Buffer.from(s, 'utf8').toString('utf8') === s);
 
 /**
  * Hand-curated strong-password arbitrary.
@@ -734,9 +728,11 @@ describe('property-based tests (Task 19)', () => {
       const inputPath = path.join(dir, 'in.bin');
       const encryptedPath = path.join(dir, 'enc.bin');
       const decryptedPath = path.join(dir, 'dec.bin');
-      const { mkdir, writeFile: writeFileAsync, rm } = await import(
-        'node:fs/promises'
-      );
+      const {
+        mkdir,
+        writeFile: writeFileAsync,
+        rm,
+      } = await import('node:fs/promises');
       await mkdir(dir, { recursive: true });
 
       try {

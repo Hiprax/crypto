@@ -121,9 +121,7 @@ describe('CryptoManager', () => {
     it('should throw error for invalid memoryCost', () => {
       expect(() => new CryptoManager({ memoryCost: -1 })).toThrow(CryptoError);
       expect(() => new CryptoManager({ memoryCost: 0 })).toThrow(CryptoError);
-      expect(() => new CryptoManager({ memoryCost: 1.5 })).toThrow(
-        CryptoError
-      );
+      expect(() => new CryptoManager({ memoryCost: 1.5 })).toThrow(CryptoError);
     });
 
     it('should throw error for invalid timeCost', () => {
@@ -133,9 +131,7 @@ describe('CryptoManager', () => {
     });
 
     it('should throw error for invalid parallelism', () => {
-      expect(() => new CryptoManager({ parallelism: -1 })).toThrow(
-        CryptoError
-      );
+      expect(() => new CryptoManager({ parallelism: -1 })).toThrow(CryptoError);
       expect(() => new CryptoManager({ parallelism: 0 })).toThrow(CryptoError);
       expect(() => new CryptoManager({ parallelism: 1.5 })).toThrow(
         CryptoError
@@ -206,30 +202,33 @@ describe('CryptoManager', () => {
 
     it('should accept KDF params at exactly the wire-format cap (boundary construction)', () => {
       // At exactly the cap, construction must succeed — the cap is inclusive.
-      expect(() =>
-        new CryptoManager({
-          memoryCost: MAX_ARGON2_MEMORY_COST,
-          timeCost: MAX_ARGON2_TIME_COST,
-          parallelism: MAX_ARGON2_PARALLELISM,
-        })
+      expect(
+        () =>
+          new CryptoManager({
+            memoryCost: MAX_ARGON2_MEMORY_COST,
+            timeCost: MAX_ARGON2_TIME_COST,
+            parallelism: MAX_ARGON2_PARALLELISM,
+          })
       ).not.toThrow();
-      expect(() =>
-        new CryptoManager({ pbkdf2Iterations: MAX_PBKDF2_ITERATIONS })
+      expect(
+        () => new CryptoManager({ pbkdf2Iterations: MAX_PBKDF2_ITERATIONS })
       ).not.toThrow();
-      expect(() =>
-        new CryptoManager({ legacyPbkdf2Iterations: MAX_PBKDF2_ITERATIONS })
+      expect(
+        () =>
+          new CryptoManager({ legacyPbkdf2Iterations: MAX_PBKDF2_ITERATIONS })
       ).not.toThrow();
     });
 
     it('should accept below-cap KDF params (sanity check)', () => {
-      expect(() =>
-        new CryptoManager({
-          memoryCost: 2 ** 12,
-          timeCost: 1,
-          parallelism: 1,
-          pbkdf2Iterations: 1000,
-          legacyPbkdf2Iterations: 1000,
-        })
+      expect(
+        () =>
+          new CryptoManager({
+            memoryCost: 2 ** 12,
+            timeCost: 1,
+            parallelism: 1,
+            pbkdf2Iterations: 1000,
+            legacyPbkdf2Iterations: 1000,
+          })
       ).not.toThrow();
     });
 
@@ -291,11 +290,11 @@ describe('CryptoManager', () => {
 
     it('should accept memoryCost >= 8 * parallelism (at boundary and defaults)', () => {
       // Exactly at the floor — must NOT throw
-      expect(() =>
-        new CryptoManager({ memoryCost: 8, parallelism: 1 })
+      expect(
+        () => new CryptoManager({ memoryCost: 8, parallelism: 1 })
       ).not.toThrow();
-      expect(() =>
-        new CryptoManager({ memoryCost: 16, parallelism: 2 })
+      expect(
+        () => new CryptoManager({ memoryCost: 16, parallelism: 2 })
       ).not.toThrow();
       // Default constructor (mc=2^17, p=1) trivially satisfies the floor
       expect(() => new CryptoManager()).not.toThrow();
@@ -341,8 +340,8 @@ describe('CryptoManager', () => {
     });
 
     it('should accept a valid string aad without throwing', () => {
-      expect(() =>
-        new CryptoManager({ aad: 'my-app-context-v1' })
+      expect(
+        () => new CryptoManager({ aad: 'my-app-context-v1' })
       ).not.toThrow();
     });
   });
@@ -774,7 +773,11 @@ describe('CryptoManager', () => {
     it('should throw CryptoError for non-string path arguments', async () => {
       let caught: CryptoError | undefined;
       try {
-        await crypto.encryptFile(5 as unknown as string, encryptedFilePath, testPassword);
+        await crypto.encryptFile(
+          5 as unknown as string,
+          encryptedFilePath,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -784,7 +787,11 @@ describe('CryptoManager', () => {
 
       caught = undefined;
       try {
-        await crypto.encryptFile(testFilePath, {} as unknown as string, testPassword);
+        await crypto.encryptFile(
+          testFilePath,
+          {} as unknown as string,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -891,7 +898,11 @@ describe('CryptoManager', () => {
     it('should throw CryptoError for non-string path arguments', async () => {
       let caught: CryptoError | undefined;
       try {
-        await crypto.decryptFile(5 as unknown as string, decryptedFilePath, testPassword);
+        await crypto.decryptFile(
+          5 as unknown as string,
+          decryptedFilePath,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -901,7 +912,11 @@ describe('CryptoManager', () => {
 
       caught = undefined;
       try {
-        await crypto.decryptFile(encryptedFilePath, {} as unknown as string, testPassword);
+        await crypto.decryptFile(
+          encryptedFilePath,
+          {} as unknown as string,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -1365,7 +1380,11 @@ describe('CryptoManager', () => {
     it('should throw CryptoError for non-string path arguments', () => {
       let caught: CryptoError | undefined;
       try {
-        crypto.encryptFileSync(5 as unknown as string, encryptedFilePath, testPassword);
+        crypto.encryptFileSync(
+          5 as unknown as string,
+          encryptedFilePath,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -1375,7 +1394,11 @@ describe('CryptoManager', () => {
 
       caught = undefined;
       try {
-        crypto.encryptFileSync(testFilePath, {} as unknown as string, testPassword);
+        crypto.encryptFileSync(
+          testFilePath,
+          {} as unknown as string,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -1486,7 +1509,11 @@ describe('CryptoManager', () => {
     it('should throw CryptoError for non-string path arguments', () => {
       let caught: CryptoError | undefined;
       try {
-        crypto.decryptFileSync(5 as unknown as string, decryptedFilePath, testPassword);
+        crypto.decryptFileSync(
+          5 as unknown as string,
+          decryptedFilePath,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -1496,7 +1523,11 @@ describe('CryptoManager', () => {
 
       caught = undefined;
       try {
-        crypto.decryptFileSync(encryptedFilePath, {} as unknown as string, testPassword);
+        crypto.decryptFileSync(
+          encryptedFilePath,
+          {} as unknown as string,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -1633,9 +1664,9 @@ describe('CryptoManager', () => {
     });
 
     it('should throw WEAK_PASSWORD for password without uppercase', () => {
-      expect(() =>
-        crypto.encryptTextSync(testText, 'weakpassword1!')
-      ).toThrow(CryptoError);
+      expect(() => crypto.encryptTextSync(testText, 'weakpassword1!')).toThrow(
+        CryptoError
+      );
     });
   });
 
@@ -1759,7 +1790,11 @@ describe('CryptoManager', () => {
 
       let caught: CryptoError | undefined;
       try {
-        await crypto.decryptFile(encryptedFilePath, decryptedFilePath, testPassword);
+        await crypto.decryptFile(
+          encryptedFilePath,
+          decryptedFilePath,
+          testPassword
+        );
       } catch (e) {
         caught = e as CryptoError;
       }
@@ -1845,13 +1880,15 @@ describe('CryptoManager', () => {
 
     it('should re-throw CryptoError from inside try block', async () => {
       const mockCrypto = new CryptoManager();
-      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
-        new CryptoError(
-          'Mock key derivation failure',
-          CryptoErrorType.ENCRYPTION_FAILED,
-          'MOCK_KEY_ERROR'
-        )
-      );
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(
+          new CryptoError(
+            'Mock key derivation failure',
+            CryptoErrorType.ENCRYPTION_FAILED,
+            'MOCK_KEY_ERROR'
+          )
+        );
 
       try {
         await mockCrypto.encryptText(testText, testPassword);
@@ -1875,9 +1912,7 @@ describe('CryptoManager', () => {
         mockCrypto.encryptTextSync(testText, testPassword);
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'SYNC_TEXT_ENCRYPTION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('SYNC_TEXT_ENCRYPTION_FAILED');
       }
 
       jest.restoreAllMocks();
@@ -1911,9 +1946,9 @@ describe('CryptoManager', () => {
       const encrypted = await mockCrypto.encryptText(testText, testPassword);
 
       // Now mock deriveKey to throw generic error
-      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
-        new Error('Key derivation hardware failure')
-      );
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(new Error('Key derivation hardware failure'));
 
       try {
         await mockCrypto.decryptText(encrypted, testPassword);
@@ -1939,9 +1974,7 @@ describe('CryptoManager', () => {
         mockCrypto.decryptTextSync(encrypted, testPassword);
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'SYNC_TEXT_DECRYPTION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('SYNC_TEXT_DECRYPTION_FAILED');
       }
 
       jest.restoreAllMocks();
@@ -1967,9 +2000,9 @@ describe('CryptoManager', () => {
     it('should wrap non-CryptoError exceptions and clean up output', async () => {
       const mockCrypto = new CryptoManager();
       // Mock deriveKey to throw a generic Error
-      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
-        new Error('Key derivation hardware failure')
-      );
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(new Error('Key derivation hardware failure'));
 
       try {
         await mockCrypto.encryptFile(
@@ -2008,9 +2041,9 @@ describe('CryptoManager', () => {
 
     it('should wrap non-CryptoError exceptions', async () => {
       const mockCrypto = new CryptoManager();
-      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
-        new Error('Key derivation hardware failure')
-      );
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(new Error('Key derivation hardware failure'));
 
       try {
         await mockCrypto.decryptFile(
@@ -2057,9 +2090,7 @@ describe('CryptoManager', () => {
         );
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'SYNC_FILE_ENCRYPTION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('SYNC_FILE_ENCRYPTION_FAILED');
       }
       // Output file should be cleaned up
       expect(existsSync(encryptedFilePath)).toBe(false);
@@ -2100,9 +2131,7 @@ describe('CryptoManager', () => {
         );
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'SYNC_FILE_DECRYPTION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('SYNC_FILE_DECRYPTION_FAILED');
       }
 
       jest.restoreAllMocks();
@@ -2158,9 +2187,7 @@ describe('CryptoManager', () => {
     });
 
     it('should handle binary file content', async () => {
-      const binaryData = Buffer.from(
-        Array.from({ length: 256 }, (_, i) => i)
-      );
+      const binaryData = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
       await writeFile(testFilePath, binaryData);
 
       await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
@@ -2175,9 +2202,7 @@ describe('CryptoManager', () => {
     });
 
     it('should handle binary file content sync', async () => {
-      const binaryData = Buffer.from(
-        Array.from({ length: 256 }, (_, i) => i)
-      );
+      const binaryData = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
       await writeFile(testFilePath, binaryData);
 
       crypto.encryptFileSync(testFilePath, encryptedFilePath, testPassword);
@@ -2238,9 +2263,9 @@ describe('CryptoManager', () => {
       const crypto2 = new CryptoManager({ aad: 'app-v2' });
 
       const encrypted = crypto1.encryptTextSync(testText, testPassword);
-      expect(() =>
-        crypto2.decryptTextSync(encrypted, testPassword)
-      ).toThrow(CryptoError);
+      expect(() => crypto2.decryptTextSync(encrypted, testPassword)).toThrow(
+        CryptoError
+      );
     });
   });
 
@@ -2264,9 +2289,7 @@ describe('CryptoManager', () => {
     });
 
     it('should reject NaN memoryCost', () => {
-      expect(() => new CryptoManager({ memoryCost: NaN })).toThrow(
-        CryptoError
-      );
+      expect(() => new CryptoManager({ memoryCost: NaN })).toThrow(CryptoError);
     });
 
     it('should reject NaN timeCost', () => {
@@ -2691,8 +2714,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-enc.bin.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-enc.bin.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
       jest.restoreAllMocks();
@@ -2703,13 +2725,15 @@ describe('CryptoManager', () => {
       await writeFile(encryptedFilePath, original);
 
       const mockCrypto = new CryptoManager();
-      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
-        new CryptoError(
-          'Mock failure',
-          CryptoErrorType.ENCRYPTION_FAILED,
-          'MOCK_ERROR'
-        )
-      );
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(
+          new CryptoError(
+            'Mock failure',
+            CryptoErrorType.ENCRYPTION_FAILED,
+            'MOCK_ERROR'
+          )
+        );
 
       try {
         await mockCrypto.encryptFile(
@@ -2747,25 +2771,19 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-enc.bin.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-enc.bin.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
       jest.restoreAllMocks();
     });
 
     it('should leave no temp file behind on a successful encryption', async () => {
-      await crypto.encryptFile(
-        testFilePath,
-        encryptedFilePath,
-        testPassword
-      );
+      await crypto.encryptFile(testFilePath, encryptedFilePath, testPassword);
       expect(existsSync(encryptedFilePath)).toBe(true);
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-enc.bin.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-enc.bin.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
     });
@@ -2820,8 +2838,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-dec-out.txt.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-dec-out.txt.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
       jest.restoreAllMocks();
@@ -2832,13 +2849,15 @@ describe('CryptoManager', () => {
       await writeFile(decryptedFilePath, original);
 
       const mockCrypto = new CryptoManager();
-      jest.spyOn(mockCrypto, 'deriveKey').mockRejectedValue(
-        new CryptoError(
-          'Mock failure',
-          CryptoErrorType.DECRYPTION_FAILED,
-          'MOCK_ERROR'
-        )
-      );
+      jest
+        .spyOn(mockCrypto, 'deriveKey')
+        .mockRejectedValue(
+          new CryptoError(
+            'Mock failure',
+            CryptoErrorType.DECRYPTION_FAILED,
+            'MOCK_ERROR'
+          )
+        );
 
       try {
         await mockCrypto.decryptFile(
@@ -2870,8 +2889,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-dec-out.txt.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-dec-out.txt.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
     });
@@ -2886,8 +2904,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-dec-out.txt.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-dec-out.txt.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
     });
@@ -2895,10 +2912,7 @@ describe('CryptoManager', () => {
 
   describe('encryptFileSync - atomic output (pre-existing target)', () => {
     const testFilePath = path.join(tempDir, 'test-cleanup-enc-sync.txt');
-    const encryptedFilePath = path.join(
-      tempDir,
-      'test-cleanup-enc-sync.bin'
-    );
+    const encryptedFilePath = path.join(tempDir, 'test-cleanup-enc-sync.bin');
 
     beforeEach(async () => {
       await writeFile(testFilePath, testText);
@@ -2943,8 +2957,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-enc-sync.bin.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-enc-sync.bin.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
       jest.restoreAllMocks();
@@ -2997,8 +3010,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-enc-sync.bin.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-enc-sync.bin.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
       jest.restoreAllMocks();
@@ -3010,8 +3022,7 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-enc-sync.bin.') && e.endsWith('.tmp')
+        e => e.startsWith('test-cleanup-enc-sync.bin.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
     });
@@ -3019,10 +3030,7 @@ describe('CryptoManager', () => {
 
   describe('decryptFileSync - atomic output (pre-existing target)', () => {
     const testFilePath = path.join(tempDir, 'test-cleanup-dec-sync.txt');
-    const encryptedFilePath = path.join(
-      tempDir,
-      'test-cleanup-dec-sync.bin'
-    );
+    const encryptedFilePath = path.join(tempDir, 'test-cleanup-dec-sync.bin');
     const decryptedFilePath = path.join(
       tempDir,
       'test-cleanup-dec-sync-out.txt'
@@ -3072,9 +3080,8 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-dec-sync-out.txt.') &&
-          e.endsWith('.tmp')
+        e =>
+          e.startsWith('test-cleanup-dec-sync-out.txt.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
       jest.restoreAllMocks();
@@ -3123,9 +3130,8 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-dec-sync-out.txt.') &&
-          e.endsWith('.tmp')
+        e =>
+          e.startsWith('test-cleanup-dec-sync-out.txt.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
     });
@@ -3140,9 +3146,8 @@ describe('CryptoManager', () => {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(tempDir);
       const stray = entries.filter(
-        (e) =>
-          e.startsWith('test-cleanup-dec-sync-out.txt.') &&
-          e.endsWith('.tmp')
+        e =>
+          e.startsWith('test-cleanup-dec-sync-out.txt.') && e.endsWith('.tmp')
       );
       expect(stray).toEqual([]);
     });
@@ -3168,23 +3173,13 @@ describe('CryptoManager', () => {
 
     it('should throw when output directory cannot be created', async () => {
       // Try to write output inside a regular file (not a directory)
-      const invalidOutputPath = path.join(
-        blockingFile,
-        'subdir',
-        'output.bin'
-      );
+      const invalidOutputPath = path.join(blockingFile, 'subdir', 'output.bin');
 
       try {
-        await crypto.encryptFile(
-          testFilePath,
-          invalidOutputPath,
-          testPassword
-        );
+        await crypto.encryptFile(testFilePath, invalidOutputPath, testPassword);
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'OUTPUT_DIR_CREATION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('OUTPUT_DIR_CREATION_FAILED');
       }
     });
   });
@@ -3209,11 +3204,7 @@ describe('CryptoManager', () => {
     });
 
     it('should throw when output directory cannot be created', async () => {
-      const invalidOutputPath = path.join(
-        blockingFile,
-        'subdir',
-        'output.txt'
-      );
+      const invalidOutputPath = path.join(blockingFile, 'subdir', 'output.txt');
 
       try {
         await crypto.decryptFile(
@@ -3223,9 +3214,7 @@ describe('CryptoManager', () => {
         );
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'OUTPUT_DIR_CREATION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('OUTPUT_DIR_CREATION_FAILED');
       }
     });
   });
@@ -3248,19 +3237,13 @@ describe('CryptoManager', () => {
     });
 
     it('should throw when output directory cannot be created', () => {
-      const invalidOutputPath = path.join(
-        blockingFile,
-        'subdir',
-        'output.bin'
-      );
+      const invalidOutputPath = path.join(blockingFile, 'subdir', 'output.bin');
 
       try {
         crypto.encryptFileSync(testFilePath, invalidOutputPath, testPassword);
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'OUTPUT_DIR_CREATION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('OUTPUT_DIR_CREATION_FAILED');
       }
     });
   });
@@ -3285,11 +3268,7 @@ describe('CryptoManager', () => {
     });
 
     it('should throw when output directory cannot be created', () => {
-      const invalidOutputPath = path.join(
-        blockingFile,
-        'subdir',
-        'output.txt'
-      );
+      const invalidOutputPath = path.join(blockingFile, 'subdir', 'output.txt');
 
       try {
         crypto.decryptFileSync(
@@ -3299,9 +3278,7 @@ describe('CryptoManager', () => {
         );
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'OUTPUT_DIR_CREATION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('OUTPUT_DIR_CREATION_FAILED');
       }
     });
   });
@@ -3344,9 +3321,7 @@ describe('CryptoManager', () => {
         crypto.deriveKeySync(testPassword, salt);
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'SYNC_KEY_DERIVATION_FAILED'
-        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
       }
     });
   });
@@ -3618,9 +3593,9 @@ describe('CryptoManager', () => {
     });
 
     it('should reject non-Buffer non-string input', () => {
-      expect(() =>
-        crypto.inspectHeader(123 as unknown as string)
-      ).toThrow(CryptoError);
+      expect(() => crypto.inspectHeader(123 as unknown as string)).toThrow(
+        CryptoError
+      );
     });
 
     // Task 8 — base64url validation. Without the precondition,
@@ -3638,9 +3613,7 @@ describe('CryptoManager', () => {
         } catch (err) {
           expect(err).toBeInstanceOf(CryptoError);
           expect((err as CryptoError).code).toBe('INVALID_BASE64URL');
-          expect((err as CryptoError).type).toBe(
-            CryptoErrorType.INVALID_INPUT
-          );
+          expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
         }
       });
 
@@ -3678,9 +3651,7 @@ describe('CryptoManager', () => {
         // '+' and '/' are valid base64 but NOT base64url (which uses
         // '-' and '_' instead).
         const standardBase64 = 'AAAA+AAA/AAA';
-        expect(() => crypto.inspectHeader(standardBase64)).toThrow(
-          CryptoError
-        );
+        expect(() => crypto.inspectHeader(standardBase64)).toThrow(CryptoError);
         try {
           crypto.inspectHeader(standardBase64);
         } catch (err) {
@@ -3688,13 +3659,11 @@ describe('CryptoManager', () => {
         }
       });
 
-      it('should accept valid base64url input that doesn\'t carry v1 magic (returns null)', () => {
+      it("should accept valid base64url input that doesn't carry v1 magic (returns null)", () => {
         // A well-formed base64url string that decodes to a buffer
         // without the HPCR magic still returns `null` (legacy v0
         // contract). Only malformed encoding throws.
-        const validNoMagic = Buffer.from('NOTM', 'ascii').toString(
-          'base64url'
-        );
+        const validNoMagic = Buffer.from('NOTM', 'ascii').toString('base64url');
         expect(crypto.inspectHeader(validNoMagic)).toBeNull();
       });
 
@@ -3753,11 +3722,7 @@ describe('CryptoManager', () => {
     });
 
     afterEach(async () => {
-      for (const file of [
-        testFilePath,
-        encryptedFilePath,
-        decryptedFilePath,
-      ]) {
+      for (const file of [testFilePath, encryptedFilePath, decryptedFilePath]) {
         if (existsSync(file)) {
           await unlink(file);
         }
@@ -4454,7 +4419,9 @@ describe('CryptoManager', () => {
       const buf = Buffer.from(encrypted, 'base64url');
       buf[4] = 0x99; // corrupt version (still after intact magic)
       const tampered = buf.toString('base64url');
-      await expect(crypto.decryptText(tampered, testPassword)).rejects.toBeInstanceOf(CryptoError);
+      await expect(
+        crypto.decryptText(tampered, testPassword)
+      ).rejects.toBeInstanceOf(CryptoError);
       // strict mode preserves the original parse error code
       const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
@@ -4472,7 +4439,9 @@ describe('CryptoManager', () => {
       const buf = Buffer.from(encrypted, 'base64url');
       buf[5] = 0x77; // corrupt kdfId
       const tampered = buf.toString('base64url');
-      await expect(crypto.decryptText(tampered, testPassword)).rejects.toBeInstanceOf(CryptoError);
+      await expect(
+        crypto.decryptText(tampered, testPassword)
+      ).rejects.toBeInstanceOf(CryptoError);
       // strict mode preserves the original parse error code
       const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
@@ -4490,7 +4459,9 @@ describe('CryptoManager', () => {
       const cm = new CryptoManager();
       const encrypted = cm.encryptTextSync(testText, testPassword);
       // auto mode
-      await expect(cm.decryptText(encrypted, testPassword)).rejects.toBeInstanceOf(CryptoError);
+      await expect(
+        cm.decryptText(encrypted, testPassword)
+      ).rejects.toBeInstanceOf(CryptoError);
       // strict mode preserves KDF_MISMATCH
       const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
@@ -4506,7 +4477,9 @@ describe('CryptoManager', () => {
       // In auto mode, KDF_MISMATCH → v0 fallback → DECRYPTION_FAILED.
       const cm = new CryptoManager();
       const encrypted = await cm.encryptText(testText, testPassword);
-      expect(() => cm.decryptTextSync(encrypted, testPassword)).toThrow(CryptoError);
+      expect(() => cm.decryptTextSync(encrypted, testPassword)).toThrow(
+        CryptoError
+      );
       // strict mode preserves KDF_MISMATCH
       const strict = new CryptoManager({ legacyMode: 'strict' });
       try {
@@ -4522,13 +4495,15 @@ describe('CryptoManager', () => {
       const filePath = path.join(tempDir, 'v1-truncated.bin');
       const outPath = path.join(tempDir, 'v1-truncated-out.txt');
       try {
-        await crypto.encryptFile(
-          path.join(tempDir, '__non_existent_input_should_not_be_read.txt'),
-          filePath,
-          testPassword
-        ).catch(() => {
-          /* expected to fail; we will manufacture the file ourselves */
-        });
+        await crypto
+          .encryptFile(
+            path.join(tempDir, '__non_existent_input_should_not_be_read.txt'),
+            filePath,
+            testPassword
+          )
+          .catch(() => {
+            /* expected to fail; we will manufacture the file ourselves */
+          });
         // Manufacture a file with valid v1 header but only a few extra bytes.
         const header = packHeader(KDF_ID_ARGON2ID, {
           kind: 'argon2id',
@@ -4569,9 +4544,7 @@ describe('CryptoManager', () => {
         throw new Error('Expected throw');
       } catch (error) {
         expect(error).toBeInstanceOf(CryptoError);
-        expect((error as CryptoError).code).toBe(
-          'INVALID_ENCRYPTED_DATA_SIZE'
-        );
+        expect((error as CryptoError).code).toBe('INVALID_ENCRYPTED_DATA_SIZE');
       }
     });
   });
@@ -4731,9 +4704,7 @@ describe('CryptoManager', () => {
         try {
           new CryptoManager({ pbkdf2Iterations: -1 });
         } catch (error) {
-          expect((error as CryptoError).code).toBe(
-            'INVALID_PBKDF2_ITERATIONS'
-          );
+          expect((error as CryptoError).code).toBe('INVALID_PBKDF2_ITERATIONS');
         }
       });
 
@@ -4753,9 +4724,9 @@ describe('CryptoManager', () => {
       });
 
       it('should reject negative legacyPbkdf2Iterations', () => {
-        expect(
-          () => new CryptoManager({ legacyPbkdf2Iterations: -1 })
-        ).toThrow(CryptoError);
+        expect(() => new CryptoManager({ legacyPbkdf2Iterations: -1 })).toThrow(
+          CryptoError
+        );
         try {
           new CryptoManager({ legacyPbkdf2Iterations: -1 });
         } catch (error) {
@@ -4766,9 +4737,9 @@ describe('CryptoManager', () => {
       });
 
       it('should reject zero legacyPbkdf2Iterations', () => {
-        expect(
-          () => new CryptoManager({ legacyPbkdf2Iterations: 0 })
-        ).toThrow(CryptoError);
+        expect(() => new CryptoManager({ legacyPbkdf2Iterations: 0 })).toThrow(
+          CryptoError
+        );
       });
 
       it('should reject non-integer legacyPbkdf2Iterations', () => {
@@ -4793,10 +4764,7 @@ describe('CryptoManager', () => {
       it('should embed 600000 in v1 sync file header by default', () => {
         const cm = new CryptoManager();
         const inputPath = path.join(tempDir, 'pbkdf2-iter-input.txt');
-        const encryptedPath = path.join(
-          tempDir,
-          'pbkdf2-iter-encrypted.bin'
-        );
+        const encryptedPath = path.join(tempDir, 'pbkdf2-iter-encrypted.bin');
         try {
           writeFileSync(inputPath, testText);
           cm.encryptFileSync(inputPath, encryptedPath, testPassword);
@@ -4861,10 +4829,7 @@ describe('CryptoManager', () => {
         const dec = new CryptoManager({ pbkdf2Iterations: 1000000 });
         const inputPath = path.join(tempDir, 'pbkdf2-cross-input.txt');
         const encryptedPath = path.join(tempDir, 'pbkdf2-cross-encrypted.bin');
-        const decryptedPath = path.join(
-          tempDir,
-          'pbkdf2-cross-decrypted.txt'
-        );
+        const decryptedPath = path.join(tempDir, 'pbkdf2-cross-decrypted.txt');
         try {
           writeFileSync(inputPath, testText);
           enc.encryptFileSync(inputPath, encryptedPath, testPassword);
@@ -4896,9 +4861,7 @@ describe('CryptoManager', () => {
           key,
           iv
         );
-        return Buffer.concat([salt, iv, tag, encrypted]).toString(
-          'base64url'
-        );
+        return Buffer.concat([salt, iv, tag, encrypted]).toString('base64url');
       }
 
       function buildV0SyncFile(
@@ -5088,7 +5051,7 @@ describe('CryptoManager', () => {
         // Inspect call lengths (only Buffer args are interesting).
         const lens = spy.mock.calls
           .map(([buf]) => (Buffer.isBuffer(buf) ? buf.length : -1))
-          .filter((l) => l >= 0);
+          .filter(l => l >= 0);
         // We expect at minimum: key (32), salt (32), iv (12), tag (16).
         // The salt and key are both 32 bytes; require at least one of each
         // length to appear among the cleared buffers.
@@ -5118,7 +5081,7 @@ describe('CryptoManager', () => {
         await cm.decryptFile(encryptedPath, decryptedPath, testPassword);
         const lens = spy.mock.calls
           .map(([buf]) => (Buffer.isBuffer(buf) ? buf.length : -1))
-          .filter((l) => l >= 0);
+          .filter(l => l >= 0);
         const has = (n: number): boolean => lens.includes(n);
         expect(has(32)).toBe(true); // key or salt
         expect(has(12)).toBe(true); // iv
@@ -5210,9 +5173,7 @@ describe('CryptoManager', () => {
           const readA = readSync(fdA, bufA, 0, wantBytes, offset);
           const readB = readSync(fdB, bufB, 0, wantBytes, offset);
           if (readA !== readB) return false;
-          if (
-            !bufA.subarray(0, readA).equals(bufB.subarray(0, readB))
-          ) {
+          if (!bufA.subarray(0, readA).equals(bufB.subarray(0, readB))) {
             return false;
           }
           offset += readA;
@@ -5256,10 +5217,7 @@ describe('CryptoManager', () => {
       const key = cm.deriveKeySync(password, salt, 100000);
       const data = readFileSync(sourcePath);
       const { encrypted, tag } = cm.encryptData(data, key, iv);
-      writeFileSync(
-        outputPath,
-        Buffer.concat([salt, iv, encrypted, tag])
-      );
+      writeFileSync(outputPath, Buffer.concat([salt, iv, encrypted, tag]));
     }
 
     describeOrSkip(`${sizeMb} MiB`, () => {
@@ -5296,82 +5254,58 @@ describe('CryptoManager', () => {
         }
       });
 
-      it(
-        'should round-trip v1 async (encryptFile + streaming decryptFile)',
-        async () => {
-          await crypto.encryptFile(inputPath, encryptedPath, testPassword);
-          // Sanity: encrypted file should have the v1 header magic.
-          const buf = readFileSync(encryptedPath, { flag: 'r' }).subarray(
-            0,
-            HEADER_LENGTH
-          );
-          expect(hasMagic(buf)).toBe(true);
+      it('should round-trip v1 async (encryptFile + streaming decryptFile)', async () => {
+        await crypto.encryptFile(inputPath, encryptedPath, testPassword);
+        // Sanity: encrypted file should have the v1 header magic.
+        const buf = readFileSync(encryptedPath, { flag: 'r' }).subarray(
+          0,
+          HEADER_LENGTH
+        );
+        expect(hasMagic(buf)).toBe(true);
 
-          await crypto.decryptFile(
-            encryptedPath,
-            decryptedPath,
-            testPassword
-          );
-          expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
-        },
-        120000
-      );
+        await crypto.decryptFile(encryptedPath, decryptedPath, testPassword);
+        expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
+      }, 120000);
 
-      it(
-        'should round-trip v1 sync (encryptFileSync + streaming decryptFileSync)',
-        () => {
-          crypto.encryptFileSync(inputPath, encryptedPath, testPassword);
-          const buf = readFileSync(encryptedPath, { flag: 'r' }).subarray(
-            0,
-            HEADER_LENGTH
-          );
-          expect(hasMagic(buf)).toBe(true);
+      it('should round-trip v1 sync (encryptFileSync + streaming decryptFileSync)', () => {
+        crypto.encryptFileSync(inputPath, encryptedPath, testPassword);
+        const buf = readFileSync(encryptedPath, { flag: 'r' }).subarray(
+          0,
+          HEADER_LENGTH
+        );
+        expect(hasMagic(buf)).toBe(true);
 
-          crypto.decryptFileSync(encryptedPath, decryptedPath, testPassword);
-          expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
-        },
-        120000
-      );
+        crypto.decryptFileSync(encryptedPath, decryptedPath, testPassword);
+        expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
+      }, 120000);
 
-      it(
-        'should round-trip v0 async (legacy file + streaming decryptFile)',
-        async () => {
-          await buildLegacyV0FileLarge(
-            crypto,
-            inputPath,
-            encryptedPath,
-            testPassword
-          );
-          const front = readFileSync(encryptedPath).subarray(0, 4);
-          expect(hasMagic(front)).toBe(false);
+      it('should round-trip v0 async (legacy file + streaming decryptFile)', async () => {
+        await buildLegacyV0FileLarge(
+          crypto,
+          inputPath,
+          encryptedPath,
+          testPassword
+        );
+        const front = readFileSync(encryptedPath).subarray(0, 4);
+        expect(hasMagic(front)).toBe(false);
 
-          await crypto.decryptFile(
-            encryptedPath,
-            decryptedPath,
-            testPassword
-          );
-          expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
-        },
-        120000
-      );
+        await crypto.decryptFile(encryptedPath, decryptedPath, testPassword);
+        expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
+      }, 120000);
 
-      it(
-        'should round-trip v0 sync (legacy file + streaming decryptFileSync)',
-        () => {
-          buildLegacyV0FileSyncLarge(
-            crypto,
-            inputPath,
-            encryptedPath,
-            testPassword
-          );
-          const front = readFileSync(encryptedPath).subarray(0, 4);
-          expect(hasMagic(front)).toBe(false);
+      it('should round-trip v0 sync (legacy file + streaming decryptFileSync)', () => {
+        buildLegacyV0FileSyncLarge(
+          crypto,
+          inputPath,
+          encryptedPath,
+          testPassword
+        );
+        const front = readFileSync(encryptedPath).subarray(0, 4);
+        expect(hasMagic(front)).toBe(false);
 
-          crypto.decryptFileSync(encryptedPath, decryptedPath, testPassword);
-          expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
-        },
-        120000
-      );
+        crypto.decryptFileSync(encryptedPath, decryptedPath, testPassword);
+        expect(filesEqualSync(inputPath, decryptedPath)).toBe(true);
+      }, 120000);
     });
   });
 
@@ -5526,11 +5460,7 @@ describe('CryptoManager', () => {
         // as big as the input + header constants".
         expect(statSync(encryptedPath).size).toBeGreaterThan(sizeBytes);
 
-        await crypto.decryptFile(
-          encryptedPath,
-          decryptedPath,
-          testPassword
-        );
+        await crypto.decryptFile(encryptedPath, decryptedPath, testPassword);
         expect(statSync(decryptedPath).size).toBe(sizeBytes);
 
         const decryptedHash = await hashFileStream(decryptedPath);
@@ -5620,10 +5550,7 @@ describe('CryptoManager', () => {
       await crypto.encryptFile(inputPath, encryptedPath, testPassword);
       // Truncate the file by 1 byte (corrupting auth tag bookkeeping).
       const buf = readFileSync(encryptedPath);
-      writeFileSync(
-        encryptedPath,
-        buf.subarray(0, buf.length - 1)
-      );
+      writeFileSync(encryptedPath, buf.subarray(0, buf.length - 1));
       await expect(
         crypto.decryptFile(encryptedPath, decryptedPath, testPassword)
       ).rejects.toThrow(CryptoError);
@@ -5636,10 +5563,7 @@ describe('CryptoManager', () => {
       writeFileSync(inputPath, data);
       crypto.encryptFileSync(inputPath, encryptedPath, testPassword);
       const buf = readFileSync(encryptedPath);
-      writeFileSync(
-        encryptedPath,
-        buf.subarray(0, buf.length - 1)
-      );
+      writeFileSync(encryptedPath, buf.subarray(0, buf.length - 1));
       expect(() =>
         crypto.decryptFileSync(encryptedPath, decryptedPath, testPassword)
       ).toThrow(CryptoError);
@@ -5694,10 +5618,7 @@ describe('CryptoManager', () => {
     it('should round-trip async text encrypted with NFC and decrypted with NFD', async () => {
       // Use a strong NFC password so encryption-side validation passes.
       const strongNFC = 'StrongP@ss1éaaaaa';
-      const strongNFD = 'StrongP@ss1caféaaaaa'.replace(
-        'café',
-        'éaaaaa'
-      );
+      const strongNFD = 'StrongP@ss1caféaaaaa'.replace('café', 'éaaaaa');
       // Construct strongNFD as the NFD equivalent of strongNFC by re-using
       // the canonical decomposition rather than hand-rolling.
       const decomposed = strongNFC.normalize('NFD');
@@ -5996,7 +5917,7 @@ describe('CryptoManager', () => {
         const outputDir = path.dirname(encryptedPath);
         const baseName = path.basename(encryptedPath);
         const lingerers = readdirSync(outputDir).filter(
-          (entry) => entry.startsWith(`${baseName}.`) && entry.endsWith('.tmp')
+          entry => entry.startsWith(`${baseName}.`) && entry.endsWith('.tmp')
         );
         expect(lingerers).toEqual([]);
       });
@@ -6302,19 +6223,15 @@ describe('CryptoManager', () => {
     }
 
     describe('async (Argon2id) path', () => {
-      it(
-        'rejects tampering with reserved bytes 16..21 (the previously-mutable region)',
-        async () => {
-          // Argon2id reserved bytes live at offsets 16-21 inside the 22-byte
-          // header. Pre-fix this region was silently mutable. Post-fix any
-          // bit-flip here flips the GCM tag because the on-disk header
-          // bytes are bound into AAD verbatim.
-          for (let offset = 16; offset <= 21; offset++) {
-            await expectAsyncTamperFails(fastCrypto, offset, 0xff);
-          }
-        },
-        60_000
-      );
+      it('rejects tampering with reserved bytes 16..21 (the previously-mutable region)', async () => {
+        // Argon2id reserved bytes live at offsets 16-21 inside the 22-byte
+        // header. Pre-fix this region was silently mutable. Post-fix any
+        // bit-flip here flips the GCM tag because the on-disk header
+        // bytes are bound into AAD verbatim.
+        for (let offset = 16; offset <= 21; offset++) {
+          await expectAsyncTamperFails(fastCrypto, offset, 0xff);
+        }
+      }, 60_000);
 
       it('rejects tampering with magic / version / kdfId bytes', async () => {
         // These were already detected pre-fix (the parser bounds-checks
@@ -6325,17 +6242,13 @@ describe('CryptoManager', () => {
         await expectAsyncTamperFails(fastCrypto, 5, 0x42); // kdfId
       }, 30_000);
 
-      it(
-        'rejects tampering with KDF param bytes 6..15',
-        async () => {
-          // These were already detected via "wrong key derived" pre-fix.
-          // Verify they STILL fail post-fix.
-          for (let offset = 6; offset <= 15; offset++) {
-            await expectAsyncTamperFails(fastCrypto, offset, 0xff);
-          }
-        },
-        90_000
-      );
+      it('rejects tampering with KDF param bytes 6..15', async () => {
+        // These were already detected via "wrong key derived" pre-fix.
+        // Verify they STILL fail post-fix.
+        for (let offset = 6; offset <= 15; offset++) {
+          await expectAsyncTamperFails(fastCrypto, offset, 0xff);
+        }
+      }, 90_000);
 
       it('still round-trips a clean ciphertext (no tampering)', async () => {
         const enc = await fastCrypto.encryptText(testText, testPassword);
@@ -6532,9 +6445,7 @@ describe('CryptoManager', () => {
       const iv = nodeCrypto.randomBytes(12);
       const tag = nodeCrypto.randomBytes(16);
       const body = nodeCrypto.randomBytes(1);
-      return Buffer.concat([header, salt, iv, tag, body]).toString(
-        'base64url'
-      );
+      return Buffer.concat([header, salt, iv, tag, body]).toString('base64url');
     }
 
     function craftMaliciousPbkdf2Text(iterations: number): string {
@@ -6546,9 +6457,7 @@ describe('CryptoManager', () => {
       const iv = nodeCrypto.randomBytes(12);
       const tag = nodeCrypto.randomBytes(16);
       const body = nodeCrypto.randomBytes(1);
-      return Buffer.concat([header, salt, iv, tag, body]).toString(
-        'base64url'
-      );
+      return Buffer.concat([header, salt, iv, tag, body]).toString('base64url');
     }
 
     describe('Argon2id', () => {
@@ -6653,9 +6562,9 @@ describe('CryptoManager', () => {
       it('rejects the full validator-reproducer (iterations=100M) fast (pre-fix this blocked indefinitely)', () => {
         const malicious = craftMaliciousPbkdf2Text(100_000_000);
         const start = Date.now();
-        expect(() =>
-          crypto.decryptTextSync(malicious, testPassword)
-        ).toThrow(CryptoError);
+        expect(() => crypto.decryptTextSync(malicious, testPassword)).toThrow(
+          CryptoError
+        );
         // Pre-fix this blocked for >12 seconds in the validator's repro;
         // post-fix it fires in <1s.
         expect(Date.now() - start).toBeLessThan(1000);
@@ -6712,6 +6621,160 @@ describe('CryptoManager', () => {
           expect(inspected.params.memoryCost).toBeLessThanOrEqual(2 ** 22);
           expect(inspected.params.timeCost).toBeLessThanOrEqual(100);
           expect(inspected.params.parallelism).toBeLessThanOrEqual(64);
+        }
+      });
+    });
+
+    // ── Argon2id memoryCost >= 8 * parallelism floor (Phase 3) ───────────────
+    // parseHeader now rejects headers where memoryCost < 8*parallelism before
+    // returning. Without this check a crafted ciphertext reaches argon2.hash()
+    // which throws — and the deriveKey catch wraps it as ENCRYPTION_FAILED /
+    // KEY_DERIVATION_FAILED, an encryption-typed error on a decrypt operation.
+    describe('Argon2id memoryCost >= 8 * parallelism floor (Phase 3)', () => {
+      it('parseHeader rejects memoryCost < 8 * parallelism with DECRYPTION_FAILED / INVALID_HEADER_PARAM', () => {
+        // Classic sub-floor case: memoryCost=8, parallelism=64 → 8 < 8×64=512
+        const hdr = packHeader(KDF_ID_ARGON2ID, {
+          kind: 'argon2id',
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        expect(() => parseHeader(hdr)).toThrow(CryptoError);
+        try {
+          parseHeader(hdr);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(
+            CryptoErrorType.DECRYPTION_FAILED
+          );
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+          expect((err as CryptoError).message).toContain('memoryCost (8)');
+          expect((err as CryptoError).message).toContain('8 × 64');
+        }
+      });
+
+      it('parseHeader rejects minimum sub-floor case: memoryCost=1, parallelism=1 (1 < 8×1=8)', () => {
+        const hdr = packHeader(KDF_ID_ARGON2ID, {
+          kind: 'argon2id',
+          memoryCost: 1,
+          timeCost: 1,
+          parallelism: 1,
+        });
+        expect(() => parseHeader(hdr)).toThrow(CryptoError);
+        try {
+          parseHeader(hdr);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(
+            CryptoErrorType.DECRYPTION_FAILED
+          );
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+        }
+      });
+
+      it('parseHeader accepts memoryCost exactly at the floor (8 * parallelism)', () => {
+        // memoryCost = 8, parallelism = 1 → floor = 8*1 = 8 → exactly at floor
+        const hdr = packHeader(KDF_ID_ARGON2ID, {
+          kind: 'argon2id',
+          memoryCost: 8,
+          timeCost: 1,
+          parallelism: 1,
+        });
+        const parsed = parseHeader(hdr);
+        expect(parsed.params.kind).toBe('argon2id');
+        if (parsed.params.kind === 'argon2id') {
+          expect(parsed.params.memoryCost).toBe(8);
+          expect(parsed.params.parallelism).toBe(1);
+        }
+      });
+
+      it('decryptText of crafted sub-floor ciphertext throws DECRYPTION_FAILED (not ENCRYPTION_FAILED) in auto mode', async () => {
+        // Craft a v1 Argon2id ciphertext header with memoryCost=8, parallelism=64
+        // (violates floor: 8 < 512). The decrypt should reject with DECRYPTION_FAILED,
+        // NOT ENCRYPTION_FAILED / KEY_DERIVATION_FAILED.
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager(); // legacyMode: 'auto' (default)
+        await expect(
+          cm.decryptText(subFloor, testPassword)
+        ).rejects.toMatchObject({
+          type: CryptoErrorType.DECRYPTION_FAILED,
+        });
+        // Explicitly confirm the wrong error type is gone
+        await expect(
+          cm.decryptText(subFloor, testPassword)
+        ).rejects.not.toMatchObject({
+          type: CryptoErrorType.ENCRYPTION_FAILED,
+        });
+      });
+
+      it('decryptText of crafted sub-floor ciphertext throws DECRYPTION_FAILED in strict mode', async () => {
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager({ legacyMode: 'strict' });
+        await expect(
+          cm.decryptText(subFloor, testPassword)
+        ).rejects.toMatchObject({
+          type: CryptoErrorType.DECRYPTION_FAILED,
+          code: 'INVALID_HEADER_PARAM',
+        });
+      });
+
+      it('decryptText of crafted sub-floor ciphertext throws DECRYPTION_FAILED in reject mode', async () => {
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager({ legacyMode: 'reject' });
+        await expect(
+          cm.decryptText(subFloor, testPassword)
+        ).rejects.toMatchObject({
+          type: CryptoErrorType.DECRYPTION_FAILED,
+          code: 'INVALID_HEADER_PARAM',
+        });
+      });
+
+      it('decryptTextSync with strict mode: sub-floor Argon2id header throws DECRYPTION_FAILED / INVALID_HEADER_PARAM immediately', () => {
+        // In strict mode the parseHeader floor violation is re-thrown immediately
+        // (no v0 PBKDF2 fallback) — a clean, fast, explicit rejection.
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        const cm = new CryptoManager({ legacyMode: 'strict' });
+        expect(() => cm.decryptTextSync(subFloor, testPassword)).toThrow(
+          CryptoError
+        );
+        try {
+          cm.decryptTextSync(subFloor, testPassword);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(
+            CryptoErrorType.DECRYPTION_FAILED
+          );
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
+        }
+      });
+
+      it('inspectHeader on sub-floor Argon2id header throws DECRYPTION_FAILED / INVALID_HEADER_PARAM', () => {
+        const subFloor = craftMaliciousArgon2idText({
+          memoryCost: 8,
+          timeCost: 3,
+          parallelism: 64,
+        });
+        expect(() => crypto.inspectHeader(subFloor)).toThrow(CryptoError);
+        try {
+          crypto.inspectHeader(subFloor);
+        } catch (err) {
+          expect((err as CryptoError).type).toBe(
+            CryptoErrorType.DECRYPTION_FAILED
+          );
+          expect((err as CryptoError).code).toBe('INVALID_HEADER_PARAM');
         }
       });
     });
@@ -6896,9 +6959,9 @@ describe('CryptoManager', () => {
         writeFileSync(inPath, testText);
         cm.encryptFileSync(inPath, encPath, validPwd);
         const clearSpy = jest.spyOn(cm, 'secureClear');
-        expect(() =>
-          cm.decryptFileSync(encPath, outPath, wrongPwd)
-        ).toThrow(CryptoError);
+        expect(() => cm.decryptFileSync(encPath, outPath, wrongPwd)).toThrow(
+          CryptoError
+        );
         assertKeyScrubbed(clearSpy);
       } finally {
         for (const f of [inPath, encPath, outPath]) {
@@ -7057,7 +7120,117 @@ describe('CryptoManager', () => {
       expect(ciphertext.readUInt8(5)).toBe(KDF_ID_PBKDF2_SHA256); // 0x01
 
       // Total size: header(22) + salt(32) + iv(12) + ciphertext(100) + tag(16) = 182
-      expect(ciphertext.length).toBe(HEADER_LENGTH + 32 + 12 + plaintext.length + 16);
+      expect(ciphertext.length).toBe(
+        HEADER_LENGTH + 32 + 12 + plaintext.length + 16
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 — memory-hygiene: text-method plaintext/decrypted buffer scrub
+  // ---------------------------------------------------------------------------
+  //
+  // The four text methods hoist their plaintext/decrypted buffer to the
+  // method's outer scope (`let ... = null`) so the catch block can zero-fill
+  // it if a failure occurs after allocation. This mirrors the fix already in
+  // place for encryptFileSync's plaintext chunk (v1.4.1).
+  //
+  // For the encrypt paths: a failure inside `encryptData` is the realistic
+  // scenario — the plaintext buffer is fully allocated before the call. We
+  // spy on `encryptData` to inject that failure and verify `secureClear` was
+  // invoked with the plaintext buffer in the catch.
+  //
+  // For the decrypt paths: the post-`decryptData` throw window is narrow
+  // (Buffer.toString cannot throw for a valid Buffer), so we cover symmetry
+  // only — asserting the round-trip and wrong-password paths are unaffected
+  // by the hoist.
+
+  describe('Phase 2 — text-method plaintext-buffer scrub on error path', () => {
+    // Use a text whose UTF-8 byte length (17) is distinct from the fixed
+    // crypto field sizes (key=32, salt=32, iv=12, tag=16) so we can
+    // unambiguously locate it in the secureClear call list.
+    const SCRUB_TEXT = 'phase2-scrub-test';
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('encryptText: secureClear is called with the plaintext textBuffer when encryptData throws', async () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+
+      // Inject a failure AFTER textBuffer is allocated but inside encryptData.
+      jest.spyOn(cm, 'encryptData').mockImplementation(() => {
+        throw new Error(
+          'injected encryptData failure after textBuffer allocation'
+        );
+      });
+
+      await expect(cm.encryptText(SCRUB_TEXT, testPassword)).rejects.toThrow();
+
+      // Without the fix, textBuffer was const inside the try and invisible
+      // to the catch — secureClear was never called with it on error.
+      // With the fix, the catch block calls secureClear(textBuffer).
+      const expectedLen = Buffer.from(SCRUB_TEXT, 'utf8').length;
+      const scrubCall = clearSpy.mock.calls.find(
+        ([buf]) => buf instanceof Buffer && buf.length === expectedLen
+      );
+      expect(scrubCall).toBeDefined();
+    });
+
+    it('encryptTextSync: secureClear is called with the plaintext textBuffer when encryptData throws', () => {
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+
+      jest.spyOn(cm, 'encryptData').mockImplementation(() => {
+        throw new Error(
+          'injected encryptData failure after textBuffer allocation'
+        );
+      });
+
+      expect(() => cm.encryptTextSync(SCRUB_TEXT, testPassword)).toThrow();
+
+      const expectedLen = Buffer.from(SCRUB_TEXT, 'utf8').length;
+      const scrubCall = clearSpy.mock.calls.find(
+        ([buf]) => buf instanceof Buffer && buf.length === expectedLen
+      );
+      expect(scrubCall).toBeDefined();
+    });
+
+    it('decryptText: hoist does not regress round-trip or wrong-password behavior', async () => {
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const enc = await cm.encryptText(SCRUB_TEXT, testPassword);
+
+      // Normal round-trip must still work.
+      await expect(cm.decryptText(enc, testPassword)).resolves.toBe(SCRUB_TEXT);
+
+      // Wrong password re-throws decryptData's CryptoError as-is (code: DECRYPTION_FAILED),
+      // not the method-level wrapper — only truly unexpected non-CryptoErrors become
+      // TEXT_DECRYPTION_FAILED.
+      await expect(
+        cm.decryptText(enc, 'WrongPass!1234567890Abc')
+      ).rejects.toMatchObject({ code: 'DECRYPTION_FAILED' });
+    });
+
+    it('decryptTextSync: hoist does not regress round-trip or wrong-password behavior', () => {
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const enc = cm.encryptTextSync(SCRUB_TEXT, testPassword);
+
+      // Normal round-trip must still work.
+      expect(cm.decryptTextSync(enc, testPassword)).toBe(SCRUB_TEXT);
+
+      // Wrong password re-throws decryptData's CryptoError as-is (code: DECRYPTION_FAILED).
+      expect(() => cm.decryptTextSync(enc, 'WrongPass!1234567890Abc')).toThrow(
+        expect.objectContaining({ code: 'DECRYPTION_FAILED' })
+      );
     });
   });
 });

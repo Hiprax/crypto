@@ -1,0 +1,14 @@
+# Enforce LF line endings in the repository for all text files.
+# This locks in the policy set by .prettierrc ("endOfLine": "lf") and
+# .editorconfig (end_of_line = lf) at the git layer so the normalisation
+# happens regardless of each contributor's local core.autocrlf setting.
+#
+# text=auto lets Git auto-detect binary files (no normalisation applied to
+# them). eol=lf writes LF into the working tree on every platform.
+#
+# One-time setup (run once after this file is committed and checked out):
+#   git add --renormalize .
+# This re-stages every tracked file with the new attributes so any CRLF
+# currently in the index is normalised before the next push.
+
+* text=auto eol=lf

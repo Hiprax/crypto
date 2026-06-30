@@ -102,7 +102,7 @@ const PBKDF2_DEFAULT_ITERATIONS = 600000;
 
 /**
  * Iteration count assumed for legacy v0 sync ciphertexts (those produced by
- * versions of this library prior to 0.10.0, which used 100k iterations and
+ * versions of this library prior to 0.11.0, which used 100k iterations and
  * did not embed the iteration count in the ciphertext). v1 ciphertexts
  * carry the iteration count in their header and ignore this constant.
  */
@@ -2594,11 +2594,13 @@ export class CryptoManager {
       decipher.setAAD(decipherAad);
       decipher.setAuthTag(tag);
 
-      // Emit an initial progress event reflecting the bytes already read out
-      // of the file (header + salt + iv + tag). Reporting these as
-      // "processed" matches the user's mental model that progress is "how
-      // much of the input file have you consumed", not "how much body have
-      // you decrypted".
+      // Initial progress event — a literal `(0, totalSize)` start sentinel,
+      // matching the `decryptFileSync` contract. The metadata bytes
+      // (header + salt + iv + tag) have already been read off disk by this
+      // point, but we report `0` so callers can use the first event as a
+      // deterministic start marker; per-chunk events (via the `data` event
+      // on the body read stream) report `consumedFrontAndTag + bodyConsumed`
+      // bytes, and the final event reports `(totalSize, totalSize)`.
       const consumedFrontAndTag =
         bodyStart + this.tagLength; /* bytes already read from input */
       this.invokeProgress(progress, 0, totalSize);

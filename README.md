@@ -56,7 +56,7 @@ Note: a successful first load is cached for the lifetime of the process (subsequ
 
 ### CommonJS interop
 
-`@hiprax/crypto` is ESM-only. The `package.json` `exports` map intentionally has no `require` entry so that CommonJS consumers receive a clear `ERR_REQUIRE_ESM` from Node rather than a confusing partial namespace. To use the library from a CommonJS file, use a dynamic `import()`:
+`@hiprax/crypto` is ESM-only. The `package.json` `exports` map has no `require` entry. The supported and portable interop for CommonJS callers is a dynamic `import()` from an `async` function — it is the only pattern the test suite verifies:
 
 ```js
 // my-cjs-file.cjs
@@ -68,6 +68,8 @@ async function main() {
 }
 main();
 ```
+
+On Node 22+ (the package minimum) a plain `require('@hiprax/crypto')` call may actually **succeed** via Node's built-in `require(esm)` path (enabled by default for ESM files with no top-level `await`). Do not rely on this: the behavior is undocumented as a stable API, the `require` path is untested by this library, and earlier minor releases of Node 22 may differ. `await import()` is the supported path.
 
 If you need pure-CJS interop, the recommended path is to migrate the calling module to ESM (`"type": "module"` or `.mjs`).
 
@@ -605,7 +607,7 @@ const isText = isTextFile('document.txt');
 const safeName = sanitizeFilename('file<name>.txt'); // "file_name_.txt"
 
 // Create backup path
-const backupPath = createBackupPath('file.txt'); // "file_2024-01-01T12-00-00.backup.txt"
+const backupPath = createBackupPath('file.txt'); // "file_2026-06-30T12-00-00_a1b2c3.backup.txt"
 
 // Validate base64
 const isValid = isValidBase64('SGVsbG8gV29ybGQ=');

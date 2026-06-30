@@ -69,7 +69,7 @@ export interface CryptoManagerOptions {
    * (those produced before the versioned ciphertext format and which
    * therefore carry no embedded iteration count). Defaults to 100000 — the
    * value baked into every v0 sync ciphertext produced by versions of this
-   * library prior to 0.10.0. Override this only if you have legacy data that
+   * library prior to 0.11.0. Override this only if you have legacy data that
    * was produced with a non-default iteration count. Must be a positive
    * integer. Has no effect on v1 ciphertexts (which carry the iteration
    * count embedded in their header).

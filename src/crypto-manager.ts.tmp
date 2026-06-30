@@ -1663,7 +1663,8 @@ export class CryptoManager {
           }
           if (
             headerParseErr instanceof CryptoError &&
-            headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+            (headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS' ||
+              headerParseErr.code === 'INVALID_HEADER_PARAM')
           ) {
             throw headerParseErr;
           }
@@ -1884,7 +1885,8 @@ export class CryptoManager {
           }
           if (
             headerParseErr instanceof CryptoError &&
-            headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+            (headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS' ||
+              headerParseErr.code === 'INVALID_HEADER_PARAM')
           ) {
             throw headerParseErr;
           }
@@ -3155,7 +3157,8 @@ export class CryptoManager {
           }
           if (
             headerParseErr instanceof CryptoError &&
-            headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+            (headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS' ||
+              headerParseErr.code === 'INVALID_HEADER_PARAM')
           ) {
             throw headerParseErr;
           }

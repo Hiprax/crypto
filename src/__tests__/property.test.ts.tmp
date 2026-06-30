@@ -128,8 +128,7 @@ const FC_CONFIG_CHEAP: fc.Parameters = {
 //
 // Texts: include unicode, but keep length bounded — encryption itself is
 // O(n) so very large texts mostly just slow the suite without revealing
-// new bugs. Empty-string plaintext is exercised by dedicated unit tests, so
-// these property runs use minLength=1 to keep coverage on non-trivial inputs.
+// new bugs. The CryptoManager rejects empty strings, so set minLength=1.
 //
 // Passwords: hand-rolled arbitrary that constructs strings always
 // satisfying the password-strength validator. Filtering with
@@ -139,10 +138,9 @@ const FC_CONFIG_CHEAP: fc.Parameters = {
 // gives uniform coverage of the password-rule space.
 
 /**
- * Bounded UTF-8 text arbitrary. We start at minLength=1 (the empty string
- * is covered by dedicated unit tests) and cap at 200 characters — long
- * enough to span multiple AES blocks, short enough not to dominate the
- * suite's wall-clock.
+ * Bounded UTF-8 text arbitrary. We exclude the empty string and cap at
+ * 200 characters — long enough to span multiple AES blocks, short enough
+ * not to dominate the suite's wall-clock.
  *
  * We use `oneof` to mix in BOTH ASCII (the default `fc.string()` unit) and
  * arbitrary unicode codepoints (`unit: 'binary'`). Without the unicode

@@ -357,7 +357,7 @@ await crypto.decryptFile(
 
 ##### `encryptFileSync(inputPath: string, outputPath: string, password?: string, progress?: ProgressCallback): void`
 
-Synchronous version of file encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation. Like the async path, output is staged to a sibling temp file and atomically renamed to `outputPath` only on success; pre-existing files at `outputPath` are preserved on error. The optional `progress` callback fires twice — once before encryption (`0/totalBytes`) and once after the rename succeeds (`totalBytes/totalBytes`); the input is streamed internally in fixed 64 KiB chunks, but the synchronous encrypt path emits no per-chunk progress events between the two. See [Progress callbacks for file ops](#progress-callbacks-for-file-ops).
+Synchronous version of file encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation. Like the async path, output is staged to a sibling temp file and atomically renamed to `outputPath` only on success; pre-existing files at `outputPath` are preserved on error. The optional `progress` callback fires twice — once before encryption (`0/totalBytes`) and once after the rename succeeds (`totalBytes/totalBytes`) — because the sync encrypt path reads the entire input in a single `readFileSync` call. See [Progress callbacks for file ops](#progress-callbacks-for-file-ops).
 
 ```typescript
 crypto.encryptFileSync('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
@@ -673,7 +673,7 @@ All four file methods accept an optional fourth argument: a `progress` callback 
 | ------------------ | ------------------- | ---------------------------- | ------------------------------ | --------------------------------- |
 | `encryptFile`      | `(0, totalBytes)`   | per readable `data` event    | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
 | `decryptFile`      | `(0, totalBytes)`   | per readable `data` event    | `(totalBytes, totalBytes)`     | input file size (ciphertext)      |
-| `encryptFileSync`  | `(0, totalBytes)`   | _none_ — no per-chunk events | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
+| `encryptFileSync`  | `(0, totalBytes)`   | _none_ — sync reads in one go | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
 | `decryptFileSync`  | `(0, totalBytes)`   | per 64 KiB chunk             | `(totalBytes, totalBytes)`     | input file size (ciphertext)      |
 
 Universal invariants: `processed` is monotonically non-decreasing across events for a single call, every event reports the same `total`, and the **final** invocation always has `processed === total` (so callers can rely on a single "100% done" signal).

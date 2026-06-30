@@ -35,6 +35,7 @@
 - `README.md` — "CommonJS interop" section: remove false `ERR_REQUIRE_ESM` claim; document Node 22+ `require(esm)` success; align with CLAUDE.md's "Package Exports" note. `createBackupPath` code example: show real output shape including `_<6 hex>` random discriminator.
 - `eslint.config.ts` — import `eslintPluginPrettierRecommended` from `eslint-plugin-prettier/recommended`; append `{ ...eslintPluginPrettierRecommended, files: ['src/**/*.ts'] }` as the last config block so formatting drift is a lint error and `eslint-config-prettier` overrides win.
 - `.gitattributes` — new file; `* text=auto eol=lf` enforces LF in the repository at the git layer; comment documents the one-time `git add --renormalize .` integration step.
+- `src/__tests__/crypto-manager.test.ts`, `src/__tests__/streaming-cleanup.test.ts`, `src/__tests__/property.test.ts`, `src/__tests__/utils.test.ts`, `src/__tests__/esm-smoke.test.ts` — replace `path.join(os.tmpdir(), ...)` with `mkdtempSync(path.join(os.tmpdir(), 'prefix-'))` for `TEST_DIR`; add `mkdtempSync` to each file's `node:fs` import; remove unused `nodeCrypto` import from `utils.test.ts` (the only file where it was solely used for the old TEST_DIR pattern). `mkdtempSync` creates the directory atomically and is the CodeQL-approved secure pattern for temp-directory creation (eliminates all 47 "Insecure temporary file" alerts).
 
 ---
 

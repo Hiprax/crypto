@@ -32,19 +32,14 @@ import {
 import { CryptoError, CryptoErrorType } from '../types';
 import { CryptoManager, isValidPassword } from '../crypto-manager';
 import { writeFile, unlink } from 'node:fs/promises';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import nodeCrypto from 'node:crypto';
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Created once in beforeAll
-// and torn down in afterAll; every per-test directory join still uses
-// `tempDir` as before so the rest of the test code is unchanged.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-utils-${nodeCrypto.randomBytes(8).toString('hex')}`
-);
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix — the CodeQL-approved secure pattern
+// for temp-directory creation.
+const TEST_DIR = mkdtempSync(path.join(os.tmpdir(), 'hiprax-crypto-utils-'));
 
 describe('Utils', () => {
   const tempDir = TEST_DIR;

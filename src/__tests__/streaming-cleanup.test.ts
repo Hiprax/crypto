@@ -50,6 +50,7 @@ import { Writable } from 'node:stream';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   readFileSync,
   writeFileSync,
@@ -59,10 +60,9 @@ import {
 } from 'node:fs';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
 
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-cleanup-${nodeCrypto.randomBytes(8).toString('hex')}`
-);
+// mkdtempSync creates the directory atomically with a random suffix —
+// the CodeQL-approved secure pattern for temp-directory creation.
+const TEST_DIR = mkdtempSync(path.join(os.tmpdir(), 'hiprax-crypto-cleanup-'));
 
 const TEST_PASSWORD = 'MySecureP@ssw0rd123!';
 

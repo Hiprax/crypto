@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -38,14 +39,11 @@ const REPO_ROOT = process.cwd();
 const DIST_DIR = path.join(REPO_ROOT, 'dist');
 const DIST_INDEX = path.join(DIST_DIR, 'index.js');
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Each test still creates a
-// per-test sub-directory under TEST_DIR for self-contained probe scripts;
-// the suite-wide afterAll guarantees nothing leaks even if a test's local
-// cleanup is skipped.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-esm-smoke-${crypto.randomBytes(8).toString('hex')}`
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix — the CodeQL-approved secure pattern
+// for temp-directory creation. Each test creates its own sub-directory.
+const TEST_DIR = mkdtempSync(
+  path.join(os.tmpdir(), 'hiprax-crypto-esm-smoke-')
 );
 
 describe('ESM smoke (Task 31)', () => {

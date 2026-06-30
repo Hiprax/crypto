@@ -28,6 +28,7 @@ import { writeFile, unlink, readFile } from 'node:fs/promises';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -44,14 +45,10 @@ import os from 'node:os';
 import argon2Module from 'argon2';
 import nodeCrypto from 'node:crypto';
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Created once in beforeAll
-// and torn down in afterAll; every per-test directory join still uses
-// `tempDir` as before so the rest of the test code is unchanged.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-${nodeCrypto.randomBytes(8).toString('hex')}`
-);
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix, which is the CodeQL-approved secure
+// pattern for temp-file creation (avoids TOCTOU races).
+const TEST_DIR = mkdtempSync(path.join(os.tmpdir(), 'hiprax-crypto-'));
 
 describe('CryptoManager', () => {
   let crypto: CryptoManager;

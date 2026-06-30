@@ -43,6 +43,7 @@ import { writeFile, unlink, readFile } from 'node:fs/promises';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   writeFileSync,
   readFileSync,
@@ -54,14 +55,10 @@ import crypto from 'node:crypto';
 import { CryptoManager } from '../crypto-manager';
 import { CryptoError } from '../types';
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Created once in beforeAll
-// and torn down in afterAll. Sub-tests that need their own scratch dir
-// nest under TEST_DIR rather than os.tmpdir() directly.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-property-${crypto.randomBytes(8).toString('hex')}`
-);
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix — the CodeQL-approved secure pattern
+// for temp-directory creation. Sub-tests nest under TEST_DIR.
+const TEST_DIR = mkdtempSync(path.join(os.tmpdir(), 'hiprax-crypto-property-'));
 
 // ----------------------------------------------------------------------------
 // Test-only low-cost crypto config.

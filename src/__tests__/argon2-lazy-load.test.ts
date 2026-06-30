@@ -75,9 +75,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     jest.unstable_mockModule('argon2', loadProbe);
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     // Just constructing — no async crypto operation yet.
@@ -95,9 +94,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     jest.unstable_mockModule('argon2', loadProbe);
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     const cm = new CryptoManager();
@@ -113,10 +111,9 @@ describe('argon2 lazy-load (Task 9)', () => {
   });
 
   it('loads argon2 lazily on first async deriveKey/encryptText call', async () => {
-    const hash = jest.fn(
-      async () =>
-        // 32 bytes of constant data so the test is deterministic.
-        Buffer.alloc(32, 0xab)
+    const hash = jest.fn(async () =>
+      // 32 bytes of constant data so the test is deterministic.
+      Buffer.alloc(32, 0xab)
     );
     const loadProbe = jest.fn(() => ({
       hash,
@@ -125,9 +122,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     jest.unstable_mockModule('argon2', loadProbe);
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     const cm = new CryptoManager();
@@ -159,9 +155,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     });
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     const { CryptoError, CryptoErrorType } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
@@ -192,9 +187,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     });
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     const { CryptoError, CryptoErrorType } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
@@ -229,9 +223,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     // be observable via deriveKey rejection.
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     const cm = new CryptoManager();
@@ -274,9 +267,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     });
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     const cm = new CryptoManager();
@@ -285,11 +277,9 @@ describe('argon2 lazy-load (Task 9)', () => {
     // Fire many parallel deriveKey calls — they should all race to be
     // the first to call loadArgon2(). The in-flight promise pattern
     // means only ONE actual import runs.
-    const salts = Array.from({ length: 20 }, () =>
-      cm.generateSecureRandom(32)
-    );
+    const salts = Array.from({ length: 20 }, () => cm.generateSecureRandom(32));
     const results = await Promise.all(
-      salts.map((salt) => cm.deriveKey(password, salt))
+      salts.map(salt => cm.deriveKey(password, salt))
     );
 
     // All calls succeed (each gets back a 32-byte buffer).
@@ -317,9 +307,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     });
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     const { CryptoError, CryptoErrorType } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
@@ -327,11 +316,9 @@ describe('argon2 lazy-load (Task 9)', () => {
     const password = 'MySecureP@ssw0rd123!';
 
     // 20 concurrent calls, each expected to reject.
-    const salts = Array.from({ length: 20 }, () =>
-      cm.generateSecureRandom(32)
-    );
+    const salts = Array.from({ length: 20 }, () => cm.generateSecureRandom(32));
     const settled = await Promise.allSettled(
-      salts.map((salt) => cm.deriveKey(password, salt))
+      salts.map(salt => cm.deriveKey(password, salt))
     );
 
     expect(settled).toHaveLength(20);
@@ -382,9 +369,8 @@ describe('argon2 lazy-load (Task 9)', () => {
       throw new Error("Cannot find module 'hash-wasm'");
     });
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     const { CryptoError } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
@@ -417,9 +403,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     });
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     const cm = new CryptoManager();
@@ -456,9 +441,8 @@ describe('argon2 lazy-load (Task 9)', () => {
     }));
     mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
     const cm = new CryptoManager();
@@ -632,9 +616,8 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
       throw new Error("Cannot find module 'hash-wasm'");
     });
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
     const { CryptoError, CryptoErrorType } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
@@ -678,9 +661,7 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
       'hex'
     );
     const nativeHash = jest.fn(async () => Buffer.from(FIXED_OUTPUT));
-    const wasmArgon2id = jest.fn(
-      async () => new Uint8Array(FIXED_OUTPUT)
-    );
+    const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_OUTPUT));
     jest.unstable_mockModule('argon2', () => ({
       hash: nativeHash,
       argon2id: 2,
@@ -689,9 +670,8 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
       argon2id: wasmArgon2id,
     }));
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-      '../crypto-manager'
-    );
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
 
     const password = 'MySecureP@ssw0rd123!';
     const salt = Buffer.alloc(32, 0x42);
@@ -765,10 +745,7 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     const m2 = await import('../crypto-manager');
     m2.__resetArgon2ModuleCacheForTesting();
     const cm2 = new m2.CryptoManager();
-    const decrypted = await cm2.decryptText(
-      ciphertext,
-      'MySecureP@ssw0rd123!'
-    );
+    const decrypted = await cm2.decryptText(ciphertext, 'MySecureP@ssw0rd123!');
 
     expect(decrypted).toBe('cross-runtime hello');
   });

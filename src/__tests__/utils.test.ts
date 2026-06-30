@@ -294,9 +294,7 @@ describe('Utils', () => {
       } catch (err) {
         expect(err).toBeInstanceOf(CryptoError);
         expect((err as CryptoError).code).toBe('FILE_SIZE_TOO_LARGE');
-        expect((err as CryptoError).type).toBe(
-          CryptoErrorType.INVALID_INPUT
-        );
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
       }
     });
 
@@ -551,10 +549,7 @@ describe('Utils', () => {
     it('should validate output from CryptoManager encryptTextSync', () => {
       // The library outputs base64url, so encrypted text should be valid
       const cm = new CryptoManager();
-      const encrypted = cm.encryptTextSync(
-        'test data',
-        'MySecureP@ssw0rd123!'
-      );
+      const encrypted = cm.encryptTextSync('test data', 'MySecureP@ssw0rd123!');
       expect(isValidBase64Url(encrypted)).toBe(true);
     });
 
@@ -839,11 +834,7 @@ describe('Utils', () => {
       const fn = jest
         .fn()
         .mockRejectedValueOnce(
-          new CryptoError(
-            'Disk full',
-            CryptoErrorType.FILE_ERROR,
-            'DISK_FULL'
-          )
+          new CryptoError('Disk full', CryptoErrorType.FILE_ERROR, 'DISK_FULL')
         )
         .mockResolvedValue('recovered');
 
@@ -1357,9 +1348,9 @@ describe('Utils', () => {
         );
       }
       // Non-string: both functions must return false
-      expect(
-        validatePasswordStrength(null as unknown as string).isValid
-      ).toBe(isValidPassword(null as unknown as string));
+      expect(validatePasswordStrength(null as unknown as string).isValid).toBe(
+        isValidPassword(null as unknown as string)
+      );
     });
 
     it('regression: Aaaa1234_ is valid under both validators', () => {
@@ -1524,9 +1515,9 @@ describe('Utils', () => {
       // overreach onto valid printable content.
       expect(validatePath('plain/path/file.txt').isValid).toBe(true);
       expect(validatePath('file with spaces.txt').isValid).toBe(true);
-      expect(validatePath('file_with_underscores-and-hyphens.txt').isValid).toBe(
-        true
-      );
+      expect(
+        validatePath('file_with_underscores-and-hyphens.txt').isValid
+      ).toBe(true);
     });
 
     it('should accept path containing high-codepoint Unicode (>= 0x80)', () => {

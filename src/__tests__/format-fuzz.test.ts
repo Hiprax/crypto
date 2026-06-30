@@ -306,28 +306,25 @@ describe('parseHeader fuzzing harness (Task 12)', () => {
       // case from there. inspectHeader rejects an EMPTY string up-front
       // with INVALID_INPUT independent of the encoding.
       fc.assert(
-        fc.property(
-          fc.string({ minLength: 1, maxLength: 2048 }),
-          str => {
-            const outcome = safelyRun(() => cm.inspectHeader(str));
-            if (outcome.ok) {
-              if (outcome.value === null) return;
-              assertWellFormedParseResult(outcome.value);
-            } else {
-              expect(outcome.error).toBeInstanceOf(CryptoError);
-              const err = outcome.error as CryptoError;
-              // INVALID_INPUT and INVALID_BASE64URL are the
-              // inspectHeader-specific codes; other codes come from
-              // parseHeader's set.
-              const allowedCodes = new Set([
-                ...KNOWN_PARSE_ERROR_CODES,
-                'INVALID_INPUT',
-                'INVALID_BASE64URL',
-              ]);
-              expect(allowedCodes.has(err.code)).toBe(true);
-            }
+        fc.property(fc.string({ minLength: 1, maxLength: 2048 }), str => {
+          const outcome = safelyRun(() => cm.inspectHeader(str));
+          if (outcome.ok) {
+            if (outcome.value === null) return;
+            assertWellFormedParseResult(outcome.value);
+          } else {
+            expect(outcome.error).toBeInstanceOf(CryptoError);
+            const err = outcome.error as CryptoError;
+            // INVALID_INPUT and INVALID_BASE64URL are the
+            // inspectHeader-specific codes; other codes come from
+            // parseHeader's set.
+            const allowedCodes = new Set([
+              ...KNOWN_PARSE_ERROR_CODES,
+              'INVALID_INPUT',
+              'INVALID_BASE64URL',
+            ]);
+            expect(allowedCodes.has(err.code)).toBe(true);
           }
-        ),
+        }),
         FUZZ_CONFIG
       );
     });

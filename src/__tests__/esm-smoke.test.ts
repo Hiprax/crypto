@@ -72,8 +72,7 @@ describe('ESM smoke (Task 31)', () => {
       engines?: { node?: string };
       exports?: Record<
         string,
-        | string
-        | { types?: string; import?: string; require?: string }
+        string | { types?: string; import?: string; require?: string }
       >;
     };
     expect(pkg.type).toBe('module');
@@ -132,16 +131,12 @@ process.stdout.write(ok ? 'OK' : 'BAD: ' + JSON.stringify(Object.keys(mod)));
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
 
       // Node's stderr can contain ExperimentalWarning lines, but the
       // exit code MUST be 0 and stdout MUST contain 'OK'.
@@ -202,16 +197,12 @@ try {
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('ERR_REQUIRE_ESM');
     } finally {
@@ -245,16 +236,12 @@ process.stdout.write(ok ? 'OK' : 'BAD');
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('OK');
     } finally {
@@ -296,16 +283,12 @@ process.stdout.write(ok ? 'OK' : 'BAD');
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('OK');
     } finally {

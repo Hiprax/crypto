@@ -14,6 +14,14 @@
 - **Two JSDoc blocks corrected from "prior to 0.10.0" to "prior to 0.11.0"** (`src/types.ts`, `src/crypto-manager.ts`). The `legacyPbkdf2Iterations` JSDoc in `src/types.ts` and the `PBKDF2_LEGACY_ITERATIONS` constant JSDoc in `src/crypto-manager.ts` both described the legacy v0 format as produced by "versions of this library prior to 0.10.0". The canonical CHANGELOG, README, and CLAUDE.md all record the version cutover as 0.11.0 (the release that introduced the versioned HPCR header). Source JSDoc was the lone outlier. Updated in both files to "prior to 0.11.0". Runtime is unchanged; this is a doc-only correction.
 - **README `createBackupPath` example corrected to show the 6-hex random discriminator** (`README.md`). The code example showed `// "file_2024-01-01T12-00-00.backup.txt"` — a format that `createBackupPath` can never produce. The function always appends a `_<6 lowercase hex chars>` random discriminator between the timestamp and the suffix (e.g. `file_2026-06-30T12-00-00_a1b2c3.backup.txt`) to prevent intra-second collisions. Verified live: `createBackupPath('file.txt')` → `file_2026-06-30T00-52-57_aad3e4.backup.txt`. The example now shows the real format. The existing `createBackupPath` test suite in `src/__tests__/utils.test.ts` already pins the full output shape (including the hex discriminator) via a regex assertion; no new tests were needed.
 
+### Changed
+
+- **`eslint-plugin-prettier/recommended` wired into `eslint.config.ts`; formatting drift now surfaces as a lint error** (`eslint.config.ts`). `eslint-config-prettier` and `eslint-plugin-prettier` were declared as devDependencies but referenced nowhere in the ESLint flat config — `npm run lint` never checked formatting, and the two deps were dead weight. The fix adds `{ ...eslintPluginPrettierRecommended, files: ['src/**/*.ts'] }` as the last entry in the config array. The recommended config bundles `eslint-config-prettier` (which disables all ESLint formatting rules that conflict with Prettier) and enables the `prettier/prettier` rule as an error. Placement at the end of the array ensures `eslint-config-prettier`'s overrides win over any formatting-flavoured rules defined earlier. `npm run format` was run first to resolve all pre-existing formatting drift across 12 source files before the rule was activated; `npm run lint` now passes cleanly.
+
+### Added
+
+- **`.gitattributes` added to enforce LF line endings at the git layer** (`.gitattributes`). Both `.prettierrc` (`"endOfLine": "lf"`) and `.editorconfig` (`end_of_line = lf`) mandate LF, but no git-layer normalisation was configured — LF-in-repo was guaranteed only by each contributor's local `core.autocrlf` setting. A contributor with a different setting could commit CRLF and cause cross-platform churn or spurious diffs. The new `.gitattributes` applies `* text=auto eol=lf`: `text=auto` instructs Git to auto-detect binary files (no normalisation applied to them) and `eol=lf` normalises all text files to LF both in the index and in the working tree on every platform. A one-time `git add --renormalize .` during integration re-stages any existing files so CRLF already in the index is normalised before the next push.
+
 ### Files changed
 
 - `src/utils.ts` — `createProgressBar`: clamp percentage to `[0, 1]` with `Number.isFinite` check; sanitize `width` to a positive integer (fallback 30). `getFileExtension`, `isTextFile`, `sha256`: add `typeof … !== 'string'` guard throwing `CryptoError(INVALID_INPUT, 'INVALID_INPUT')`.
@@ -25,6 +33,8 @@
 - `src/__tests__/crypto-manager.test.ts` — new describe block `'Argon2id memoryCost >= 8 * parallelism floor (Phase 3)'` inside `'KDF parameter bounds'` (8 tests: direct `parseHeader` rejection, minimum sub-floor case, at-floor boundary, `decryptText` E2E in auto mode, `decryptText` in strict mode, `decryptText` in reject mode, `decryptTextSync` strict mode, `inspectHeader`).
 - `src/types.ts` — `CryptoManagerOptions.legacyPbkdf2Iterations` JSDoc: "prior to 0.10.0" → "prior to 0.11.0".
 - `README.md` — "CommonJS interop" section: remove false `ERR_REQUIRE_ESM` claim; document Node 22+ `require(esm)` success; align with CLAUDE.md's "Package Exports" note. `createBackupPath` code example: show real output shape including `_<6 hex>` random discriminator.
+- `eslint.config.ts` — import `eslintPluginPrettierRecommended` from `eslint-plugin-prettier/recommended`; append `{ ...eslintPluginPrettierRecommended, files: ['src/**/*.ts'] }` as the last config block so formatting drift is a lint error and `eslint-config-prettier` overrides win.
+- `.gitattributes` — new file; `* text=auto eol=lf` enforces LF in the repository at the git layer; comment documents the one-time `git add --renormalize .` integration step.
 
 ---
 

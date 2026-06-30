@@ -451,9 +451,7 @@ export function sanitizeFilename(filename: string): string {
   }
 
   // Remove or replace dangerous characters, then collapse whitespace.
-  let result = filename
-    .replace(/[<>:"/\\|?*]/g, '_')
-    .replace(/\s+/g, '_');
+  let result = filename.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
 
   // Neutralize any `..` sequences that survived the previous
   // replacements. This prevents a sanitized name from being naively

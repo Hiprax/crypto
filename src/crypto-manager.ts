@@ -1522,6 +1522,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the plaintext if the operation
+    // fails after the buffer is allocated (e.g. encryptData throws).
+    let textBuffer: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
@@ -1538,7 +1541,7 @@ export class CryptoManager {
       const header = this.buildHeader(KDF_ID_ARGON2ID);
 
       // Encrypt the text with header-bound AAD.
-      const textBuffer = Buffer.from(text, 'utf8');
+      textBuffer = Buffer.from(text, 'utf8');
       const { encrypted, tag } = this.encryptData(
         textBuffer,
         key,
@@ -1565,6 +1568,10 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      // Scrub the plaintext buffer if it was allocated before the failure.
+      if (textBuffer !== null) {
+        this.secureClear(textBuffer);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1609,6 +1616,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the decrypted buffer if the
+    // operation fails in the narrow window after decryptData returns.
+    let decrypted: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1706,7 +1716,7 @@ export class CryptoManager {
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
       const aad = headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      const decrypted = this.decryptData(encrypted, key, iv, tag, aad);
+      decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory. `combined` is cleared *after*
@@ -1720,6 +1730,10 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      // Scrub the decrypted buffer if it was allocated before the failure.
+      if (decrypted !== null) {
+        this.secureClear(decrypted);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1772,6 +1786,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the plaintext if the operation
+    // fails after the buffer is allocated (e.g. encryptData throws).
+    let textBuffer: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
@@ -1786,7 +1803,7 @@ export class CryptoManager {
       const header = this.buildHeader(KDF_ID_PBKDF2_SHA256);
 
       // Encrypt the text with header-bound AAD.
-      const textBuffer = Buffer.from(text, 'utf8');
+      textBuffer = Buffer.from(text, 'utf8');
       const { encrypted, tag } = this.encryptData(
         textBuffer,
         key,
@@ -1809,6 +1826,10 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      // Scrub the plaintext buffer if it was allocated before the failure.
+      if (textBuffer !== null) {
+        this.secureClear(textBuffer);
+      }
       if (key !== null) {
         this.secureClear(key);
       }
@@ -1850,6 +1871,9 @@ export class CryptoManager {
     }
 
     let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the decrypted buffer if the
+    // operation fails in the narrow window after decryptData returns.
+    let decrypted: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1926,7 +1950,7 @@ export class CryptoManager {
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
       const aad = headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      const decrypted = this.decryptData(encrypted, key, iv, tag, aad);
+      decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory. `combined` is cleared *after*
@@ -1940,6 +1964,10 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      // Scrub the decrypted buffer if it was allocated before the failure.
+      if (decrypted !== null) {
+        this.secureClear(decrypted);
+      }
       if (key !== null) {
         this.secureClear(key);
       }

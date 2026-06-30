@@ -7060,4 +7060,102 @@ describe('CryptoManager', () => {
       expect(ciphertext.length).toBe(HEADER_LENGTH + 32 + 12 + plaintext.length + 16);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 — memory-hygiene: text-method plaintext/decrypted buffer scrub
+  // ---------------------------------------------------------------------------
+  //
+  // The four text methods hoist their plaintext/decrypted buffer to the
+  // method's outer scope (`let ... = null`) so the catch block can zero-fill
+  // it if a failure occurs after allocation. This mirrors the fix already in
+  // place for encryptFileSync's plaintext chunk (v1.4.1).
+  //
+  // For the encrypt paths: a failure inside `encryptData` is the realistic
+  // scenario — the plaintext buffer is fully allocated before the call. We
+  // spy on `encryptData` to inject that failure and verify `secureClear` was
+  // invoked with the plaintext buffer in the catch.
+  //
+  // For the decrypt paths: the post-`decryptData` throw window is narrow
+  // (Buffer.toString cannot throw for a valid Buffer), so we cover symmetry
+  // only — asserting the round-trip and wrong-password paths are unaffected
+  // by the hoist.
+
+  describe('Phase 2 — text-method plaintext-buffer scrub on error path', () => {
+    // Use a text whose UTF-8 byte length (17) is distinct from the fixed
+    // crypto field sizes (key=32, salt=32, iv=12, tag=16) so we can
+    // unambiguously locate it in the secureClear call list.
+    const SCRUB_TEXT = 'phase2-scrub-test';
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('encryptText: secureClear is called with the plaintext textBuffer when encryptData throws', async () => {
+      const cm = new CryptoManager({ memoryCost: 2 ** 12, timeCost: 1, parallelism: 1 });
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+
+      // Inject a failure AFTER textBuffer is allocated but inside encryptData.
+      jest.spyOn(cm, 'encryptData').mockImplementation(() => {
+        throw new Error('injected encryptData failure after textBuffer allocation');
+      });
+
+      await expect(cm.encryptText(SCRUB_TEXT, testPassword)).rejects.toThrow();
+
+      // Without the fix, textBuffer was const inside the try and invisible
+      // to the catch — secureClear was never called with it on error.
+      // With the fix, the catch block calls secureClear(textBuffer).
+      const expectedLen = Buffer.from(SCRUB_TEXT, 'utf8').length;
+      const scrubCall = clearSpy.mock.calls.find(
+        ([buf]) => buf instanceof Buffer && buf.length === expectedLen
+      );
+      expect(scrubCall).toBeDefined();
+    });
+
+    it('encryptTextSync: secureClear is called with the plaintext textBuffer when encryptData throws', () => {
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+
+      jest.spyOn(cm, 'encryptData').mockImplementation(() => {
+        throw new Error('injected encryptData failure after textBuffer allocation');
+      });
+
+      expect(() => cm.encryptTextSync(SCRUB_TEXT, testPassword)).toThrow();
+
+      const expectedLen = Buffer.from(SCRUB_TEXT, 'utf8').length;
+      const scrubCall = clearSpy.mock.calls.find(
+        ([buf]) => buf instanceof Buffer && buf.length === expectedLen
+      );
+      expect(scrubCall).toBeDefined();
+    });
+
+    it('decryptText: hoist does not regress round-trip or wrong-password behavior', async () => {
+      const cm = new CryptoManager({ memoryCost: 2 ** 12, timeCost: 1, parallelism: 1 });
+      const enc = await cm.encryptText(SCRUB_TEXT, testPassword);
+
+      // Normal round-trip must still work.
+      await expect(cm.decryptText(enc, testPassword)).resolves.toBe(SCRUB_TEXT);
+
+      // Wrong password re-throws decryptData's CryptoError as-is (code: DECRYPTION_FAILED),
+      // not the method-level wrapper — only truly unexpected non-CryptoErrors become
+      // TEXT_DECRYPTION_FAILED.
+      await expect(
+        cm.decryptText(enc, 'WrongPass!1234567890Abc')
+      ).rejects.toMatchObject({ code: 'DECRYPTION_FAILED' });
+    });
+
+    it('decryptTextSync: hoist does not regress round-trip or wrong-password behavior', () => {
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const enc = cm.encryptTextSync(SCRUB_TEXT, testPassword);
+
+      // Normal round-trip must still work.
+      expect(cm.decryptTextSync(enc, testPassword)).toBe(SCRUB_TEXT);
+
+      // Wrong password re-throws decryptData's CryptoError as-is (code: DECRYPTION_FAILED).
+      expect(() =>
+        cm.decryptTextSync(enc, 'WrongPass!1234567890Abc')
+      ).toThrow(
+        expect.objectContaining({ code: 'DECRYPTION_FAILED' })
+      );
+    });
+  });
 });

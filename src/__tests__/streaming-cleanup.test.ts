@@ -1053,3 +1053,559 @@ describe('decryptFile short front-matter read (Phase 5)', () => {
     10_000
   );
 });
+
+// ---------------------------------------------------------------------------
+// 7. Phase 1 — Finding A regression: empty-body decryptFile stream-open crash
+// ---------------------------------------------------------------------------
+//
+// Before the 1.1 fix, decryptFile's empty-body path created outputStream but
+// attached no 'error' listener.  If the temp-file open failed (ENOTDIR,
+// ENOENT, AV lock on Windows), the stream emitted 'error' with no listener
+// and Node raised ERR_UNHANDLED_ERROR — crashing the entire host process.
+//
+// After the fix, a persistent onStreamError listener guards outputStream for
+// its full lifetime.  The same mock that previously killed the jest worker now
+// produces a clean CryptoError rejection.
+
+describe('Phase 1 — decryptFile empty-body stream-open failure (Finding A regression)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'empty-body decryptFile: stream-open error → CryptoError (no crash, no hang, no orphan .tmp, output untouched)',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Return a Writable whose underlying file open always fails asynchronously.
+      // We simulate this by destroying the stream via process.nextTick —
+      // the same timing as a real kernel-level ENOTDIR/ENOENT on open().
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        createWriteStream: jest.fn(() => {
+          const ws = new Writable({
+            write(
+              _chunk: unknown,
+              _encoding: string,
+              callback: (error?: Error | null) => void
+            ): void {
+              callback();
+            },
+          });
+          // Async destroy simulates the OS returning an error when the
+          // kernel tries to open the underlying file.
+          process.nextTick(() => {
+            ws.destroy(
+              new Error(
+                "ENOTDIR: not a directory, open '...simulated tempPath...'"
+              )
+            );
+          });
+          return ws;
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+      const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      // Build a valid empty-body v1 ciphertext using the same hand-assembly
+      // approach as the zero-body tests above, so decryptFile gets past key
+      // derivation and authentication before it hits the stream error.
+      const header = packHeader(KDF_ID_ARGON2ID, {
+        kind: 'argon2id',
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const salt = cm.generateSecureRandom(32);
+      const iv = cm.generateSecureRandom(12);
+      const key = await cm.deriveKey(TEST_PASSWORD, salt);
+      const aad = Buffer.concat([
+        Buffer.from('secure-crypto-tool-v2', 'utf8'),
+        header,
+      ]);
+      const { encrypted, tag } = cm.encryptData(
+        Buffer.alloc(0),
+        key,
+        iv,
+        aad
+      );
+      const ciphertext = Buffer.concat([header, salt, iv, encrypted, tag]);
+
+      const encPath = path.join(TEST_DIR, 'finding-a-enc.bin');
+      const outPath = path.join(TEST_DIR, 'finding-a-out.txt');
+      const sentinel =
+        'finding-a pre-existing output — must not be touched by a failing decryptFile';
+      writeFileSync(encPath, ciphertext);
+      writeFileSync(outPath, sentinel);
+
+      try {
+        // The critical assertion: the call rejects with a CryptoError, NOT
+        // crashes the process.  Without the 1.1 fix this line kills the
+        // jest worker.
+        await expect(
+          cm.decryptFile(encPath, outPath, TEST_PASSWORD)
+        ).rejects.toThrow(CryptoError);
+
+        // No orphan temp files left behind by the failed decrypt.
+        const stray = readdirSync(TEST_DIR).filter(
+          (e) => e.startsWith('finding-a-out.txt.') && e.endsWith('.tmp')
+        );
+        expect(stray).toHaveLength(0);
+
+        // Pre-existing output must be untouched.
+        expect(readFileSync(outPath, 'utf8')).toBe(sentinel);
+      } finally {
+        for (const p of [encPath, outPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 8. Phase 1 — Finding B regression: body-write error not masked by
+//    ERR_STREAM_DESTROYED
+// ---------------------------------------------------------------------------
+//
+// Before the fix, the `finally` block called outputStream.end(cb) on an
+// already-destroyed stream.  Node called cb(ERR_STREAM_DESTROYED), the
+// finally rejected, and that REPLACED the real ENOSPC error the body pipeline
+// had thrown.  The caller saw "Cannot call write after a stream was destroyed"
+// instead of the injected error.
+//
+// After the fix, the finally skips end() when outputStream.destroyed === true,
+// so the in-flight body error propagates unchanged to the outer catch.
+
+describe('Phase 1 — Finding B: body-write error not masked by ERR_STREAM_DESTROYED', () => {
+  // Local copy of the makeErrorStream helper (same pattern as Phase 2 suite).
+  function makeErrorStream(failOnWrite: number, hwm = 65536): Writable {
+    return new (class extends Writable {
+      private _n = 0;
+      constructor() {
+        super({ highWaterMark: hwm });
+      }
+      override _write(
+        _chunk: unknown,
+        _encoding: string,
+        callback: (error?: Error | null) => void
+      ): void {
+        this._n++;
+        if (this._n === failOnWrite) {
+          callback(
+            new Error(`ENOSPC: injected write error on call #${failOnWrite}`)
+          );
+        } else {
+          callback();
+        }
+      }
+    })();
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'encryptFile body-write error surfaces real ENOSPC cause, not ERR_STREAM_DESTROYED',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Fail on write #2.  Write #1 = prefix [header+salt+iv] (succeeds),
+      // write #2 = first body chunk from pipeline() (fails with ENOSPC).
+      // Requires non-empty input so pipeline() actually produces a body chunk.
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        createWriteStream: jest.fn(() => makeErrorStream(2)),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(TEST_DIR, 'finding-b-input.txt');
+      const outputPath = path.join(TEST_DIR, 'finding-b-output.bin');
+      writeFileSync(
+        inputPath,
+        'finding-b body payload for masking regression test'
+      );
+
+      try {
+        let caught: unknown;
+        try {
+          await cm.encryptFile(inputPath, outputPath, TEST_PASSWORD);
+        } catch (e) {
+          caught = e;
+        }
+
+        expect(caught).toBeInstanceOf(CryptoError);
+
+        // The real injected error must surface — NOT the ERR_STREAM_DESTROYED
+        // masking error that the pre-fix finally produced.
+        const msg = (caught as InstanceType<typeof CryptoError>).message;
+        expect(msg).not.toMatch(
+          /ERR_STREAM_DESTROYED|Cannot call write after a stream was destroyed/i
+        );
+        expect(msg).toContain('ENOSPC');
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 9. Phase 1 — async 0-byte file end-to-end round-trip
+// ---------------------------------------------------------------------------
+//
+// The sync equivalent (encryptFileSync / decryptFileSync of an empty file)
+// already exists in crypto-manager.test.ts.  This test closes the gap for the
+// async path, where encryptFile uses a real write stream and decryptFile's
+// empty-body branch skips the pipeline entirely.
+
+describe('Phase 1 — async 0-byte file end-to-end round-trip (Task 1.3)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    // Identity passthroughs so no stale mock from earlier suites bleeds in.
+    const realFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+    const realFsPromises = jest.requireActual<
+      typeof import('node:fs/promises')
+    >('node:fs/promises');
+    jest.unstable_mockModule('node:fs', () => ({ ...realFs }));
+    jest.unstable_mockModule('node:fs/promises', () => ({
+      ...realFsPromises,
+    }));
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'async: encryptFile → decryptFile of a 0-byte input produces a 0-byte output',
+    async () => {
+      const { CryptoManager } = await import('../crypto-manager');
+
+      const cm = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 1,
+        parallelism: 1,
+      });
+
+      const inputPath = path.join(TEST_DIR, 'e2e-zero-input.bin');
+      const encPath = path.join(TEST_DIR, 'e2e-zero-encrypted.bin');
+      const decPath = path.join(TEST_DIR, 'e2e-zero-decrypted.bin');
+      writeFileSync(inputPath, Buffer.alloc(0)); // 0-byte plaintext
+
+      try {
+        await cm.encryptFile(inputPath, encPath, TEST_PASSWORD);
+
+        // The ciphertext must be non-empty (header + salt + iv + tag overhead).
+        expect(existsSync(encPath)).toBe(true);
+        expect(statSync(encPath).size).toBeGreaterThan(0);
+
+        await cm.decryptFile(encPath, decPath, TEST_PASSWORD);
+
+        // The recovered plaintext must be exactly 0 bytes.
+        expect(existsSync(decPath)).toBe(true);
+        expect(statSync(decPath).size).toBe(0);
+        expect(readFileSync(decPath).length).toBe(0);
+      } finally {
+        for (const p of [inputPath, encPath, decPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    60_000 // Argon2 key derivation runs twice (once for encrypt, once for decrypt)
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 10. Phase 3 — Task 3.1: encryptFileSync scrubs the plaintext chunk buffer
+//     on error paths
+// ---------------------------------------------------------------------------
+//
+// Before the fix, `chunk` was declared `const` inside the `try` block — the
+// `catch` block could not reference it and only scrubbed `key`.  If anything
+// after `readSync` threw (ENOSPC mid-stream, cipher failure, etc.), up to
+// 64 KiB of user plaintext was left un-zeroed in heap until GC.
+//
+// After the fix, `chunk` is hoisted to `let chunk: Buffer | null = null`
+// before the `try` block, assigned where it used to be declared, and
+// `if (chunk !== null) { this.secureClear(chunk); }` runs at the top of the
+// `catch` block (alongside the existing `secureClear(key)` call).
+//
+// Note: this scope covers only `encryptFileSync`'s plaintext chunk.
+// `decryptFileSync`'s chunk holds ciphertext, not plaintext, and is
+// deliberately left unmodified.
+
+describe('Phase 3 — encryptFileSync plaintext-chunk scrub on error path (Task 3.1)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.resetModules();
+  });
+
+  it(
+    'mid-body writeFileSync failure triggers secureClear on the 64 KiB plaintext chunk',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Count calls to writeFileSync inside encryptFileSync's success path:
+      //   call #1 → prefix [header + salt + iv]  (must succeed)
+      //   call #2 → first ciphertext body chunk   (injected failure)
+      // Requiring a non-empty input guarantees the loop executes at least once
+      // and readSync populates the plaintext chunk before the write fails.
+      let writeFileSyncCalls = 0;
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        writeFileSync: jest.fn((...args: unknown[]) => {
+          writeFileSyncCalls += 1;
+          if (writeFileSyncCalls === 2) {
+            throw new Error('EIO: injected body write failure');
+          }
+          return (
+            realFs.writeFileSync as unknown as (...a: unknown[]) => void
+          )(...args);
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+      // Spy on this specific instance to observe every secureClear call.
+      const clearSpy = jest.spyOn(cm, 'secureClear');
+
+      const inputPath = path.join(TEST_DIR, 'ph3-chunk-scrub-input.txt');
+      const outputPath = path.join(
+        TEST_DIR,
+        'ph3-chunk-scrub-output.bin'
+      );
+      writeFileSync(
+        inputPath,
+        'non-empty plaintext — must populate chunk before write fails'
+      );
+
+      try {
+        expect(() =>
+          cm.encryptFileSync(inputPath, outputPath, TEST_PASSWORD)
+        ).toThrow();
+
+        // secureClear must have been called with the 64 KiB plaintext chunk.
+        // Without the fix, chunk was out of scope in the catch and was never
+        // passed to secureClear on error paths.
+        const chunkCall = clearSpy.mock.calls.find(
+          ([buf]) => buf instanceof Buffer && buf.length === 64 * 1024
+        );
+        expect(chunkCall).toBeDefined();
+      } finally {
+        for (const p of [inputPath, outputPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    },
+    10_000
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 11. Phase 3 — Task 3.2: benign inputFd closeSync failure does not discard
+//     completed work in encryptFileSync / decryptFileSync
+// ---------------------------------------------------------------------------
+//
+// Before the fix, the success path did `closeSync(inputFd)` bare in the `try`
+// block.  If it threw (rare EBADF/EIO on the read-only input fd, AFTER all
+// crypto and output-writing had succeeded and outputFd was already closed), the
+// exception landed in the `catch`, which called `safeUnlinkSync(tempPath)` and
+// discarded the complete, valid temp file — turning a benign close into total
+// data loss.
+//
+// After the fix, both methods wrap `closeSync(inputFd)` in a best-effort
+// try/catch that swallows the error and nulls `inputFd` unconditionally.  Only
+// an `outputFd` close failure (which CAN signal unflushed output) can now abort
+// before the rename.
+//
+// Mock strategy: intercept `closeSync` via `jest.unstable_mockModule('node:fs')`
+// and count calls globally across both operations.  For the encryptFileSync
+// test, call #2 (inputFd close) throws; for the decryptFileSync test, call #4
+// (inputFd close during decrypt, after calls 1-3 from encrypt+decrypt outputFd
+// closes succeed) throws.
+
+describe('Phase 3 — benign inputFd closeSync failure does not discard completed work (Task 3.2)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it(
+    'encryptFileSync: closeSync(inputFd) failure after full crypto+output success still completes',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // encryptFileSync success path closeSync order:
+      //   call #1 → closeSync(outputFd)   must succeed (output data integrity)
+      //   call #2 → closeSync(inputFd)    simulated benign failure
+      let closeSyncCalls = 0;
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        closeSync: jest.fn((...args: unknown[]) => {
+          closeSyncCalls += 1;
+          if (closeSyncCalls === 2) {
+            throw new Error('EIO: injected inputFd close failure');
+          }
+          return (
+            realFs.closeSync as unknown as (...a: unknown[]) => void
+          )(...args);
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+      const inputPath = path.join(TEST_DIR, 'ph3-enc-ci-plain.txt');
+      const outputPath = path.join(TEST_DIR, 'ph3-enc-ci-out.bin');
+      const decPath = path.join(TEST_DIR, 'ph3-enc-ci-dec.txt');
+      const plaintext = 'encrypt-closeSync-benign-failure test';
+      writeFileSync(inputPath, plaintext);
+
+      try {
+        // Must NOT throw despite call #2 (inputFd close) failing.
+        expect(() =>
+          cm.encryptFileSync(inputPath, outputPath, TEST_PASSWORD)
+        ).not.toThrow();
+
+        expect(existsSync(outputPath)).toBe(true);
+
+        // Round-trip decrypt to confirm data integrity.  The decrypt uses
+        // closeSync calls #3 (outputFd) and #4 (inputFd) — neither triggers
+        // the mock throw (only call #2 throws).
+        cm.decryptFileSync(outputPath, decPath, TEST_PASSWORD);
+        expect(readFileSync(decPath, 'utf8')).toBe(plaintext);
+      } finally {
+        for (const p of [inputPath, outputPath, decPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    }
+  );
+
+  it(
+    'decryptFileSync: closeSync(inputFd) failure after full crypto+auth success still completes',
+    async () => {
+      const realFs =
+        jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realFsPromises = jest.requireActual<
+        typeof import('node:fs/promises')
+      >('node:fs/promises');
+
+      // Call layout across both operations:
+      //   call #1 → encryptFileSync closeSync(outputFd)  → succeeds
+      //   call #2 → encryptFileSync closeSync(inputFd)   → succeeds
+      //   call #3 → decryptFileSync closeSync(outputFd)  → succeeds
+      //   call #4 → decryptFileSync closeSync(inputFd)   → injected failure
+      // Call #4 tests that the validated plaintext temp file is NOT discarded.
+      let closeSyncCalls = 0;
+      jest.unstable_mockModule('node:fs', () => ({
+        ...realFs,
+        closeSync: jest.fn((...args: unknown[]) => {
+          closeSyncCalls += 1;
+          if (closeSyncCalls === 4) {
+            throw new Error(
+              'EIO: injected inputFd close failure during decryptFileSync'
+            );
+          }
+          return (
+            realFs.closeSync as unknown as (...a: unknown[]) => void
+          )(...args);
+        }),
+      }));
+      jest.unstable_mockModule('node:fs/promises', () => ({
+        ...realFsPromises,
+      }));
+
+      const { CryptoManager } = await import('../crypto-manager');
+      const cm = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+      const inputPath = path.join(TEST_DIR, 'ph3-dec-ci-plain.txt');
+      const encPath = path.join(TEST_DIR, 'ph3-dec-ci-enc.bin');
+      const decPath = path.join(TEST_DIR, 'ph3-dec-ci-dec.txt');
+      const plaintext = 'decrypt-closeSync-benign-failure test';
+      writeFileSync(inputPath, plaintext);
+
+      try {
+        // Encrypt — uses closeSync calls #1 (outputFd) and #2 (inputFd),
+        // both succeed.
+        cm.encryptFileSync(inputPath, encPath, TEST_PASSWORD);
+        expect(existsSync(encPath)).toBe(true);
+
+        // Decrypt — uses closeSync calls #3 (outputFd, succeeds) and #4
+        // (inputFd, throws but is swallowed by the best-effort try/catch).
+        // Must NOT throw and must leave the decrypted plaintext intact.
+        expect(() =>
+          cm.decryptFileSync(encPath, decPath, TEST_PASSWORD)
+        ).not.toThrow();
+
+        expect(existsSync(decPath)).toBe(true);
+        expect(readFileSync(decPath, 'utf8')).toBe(plaintext);
+      } finally {
+        for (const p of [inputPath, encPath, decPath]) {
+          if (existsSync(p)) unlinkSync(p);
+        }
+      }
+    }
+  );
+});

@@ -87,8 +87,9 @@ export interface ValidatePathOptions {
  *   (`<`, `>`, `:`, `"`, `|`, `?`, `*` — with the Windows drive-letter
  *   prefix stripped before checking so e.g. `C:\\path` is allowed)
  * - rejects path-traversal attempts via literal `..` segments after
- *   `path.normalize` (the Windows drive-letter segment is ignored when
- *   scanning for `..`)
+ *   `path.normalize`, including Windows drive-relative variants such as
+ *   `C:..` — the `C:` prefix is stripped from the first segment before the
+ *   `..` scan so e.g. `validatePath('C:..\\Windows')` is correctly rejected
  * - if `options.allowedRoot` is provided, additionally requires that
  *   `path.resolve(filePath)` is contained within
  *   `path.resolve(options.allowedRoot)`. Containment is decided by a
@@ -159,12 +160,25 @@ export function validatePath(
 
   // Check for path traversal attempts
   const segments = path.normalize(filePath).split(path.sep);
-  // On Windows, ignore the first segment if it's a drive letter (e.g., 'C:')
-  const firstSegment = segments[0] ?? '';
-  const checkSegments =
-    process.platform === 'win32' && /^[a-zA-Z]:$/.test(firstSegment)
-      ? segments.slice(1)
-      : segments;
+  // On Windows, `path.normalize` keeps a drive specifier glued to whatever
+  // follows it — e.g. `path.normalize('C:..\\foo')` → `'C:..'` not `'..'`.
+  // The old strict `/^[a-zA-Z]:$/` test only matched bare 'C:' (absolute
+  // paths), so drive-relative traversals like 'C:..' were never stripped
+  // before the includes('..') check and slipped through undetected.
+  //
+  // The fix: if `segments[0]` starts with a drive prefix `/^[a-zA-Z]:/`
+  // (matching both 'C:' and 'C:..'), strip those two characters before the
+  // scan. When stripping leaves an empty string (the 'C:' pure-drive case),
+  // drop the segment entirely — identical to the original behaviour for
+  // absolute paths. When stripping leaves '..' or any other text, keep it as
+  // the first element so includes('..') catches it. POSIX is unaffected
+  // because '/^[a-zA-Z]:/' never matches on POSIX paths.
+  let checkSegments = segments;
+  if (process.platform === 'win32' && /^[a-zA-Z]:/.test(segments[0] ?? '')) {
+    const stripped = (segments[0] ?? '').slice(2);
+    checkSegments =
+      stripped === '' ? segments.slice(1) : [stripped, ...segments.slice(1)];
+  }
   if (checkSegments.includes('..')) {
     return {
       isValid: false,

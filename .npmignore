@@ -138,3 +138,14 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log* 
+
+# Orchestrator
+.orchestrator/
+orchestrator/
+.orchestrator.ps1
+.orchestrator.env
+orchestrator.ps1
+orchestrator.env
+phases.json
+PLAN.md
+plan.md

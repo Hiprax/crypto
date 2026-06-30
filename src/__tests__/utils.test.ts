@@ -126,6 +126,35 @@ describe('Utils', () => {
       expect(validatePath('path/../../secret.txt').isValid).toBe(false);
     });
 
+    it('should reject Windows drive-relative path traversal (C:.. bypass)', () => {
+      // These inputs are Windows-specific: 'C:..\\Windows\\foo', 'C:foo\\..\\..\\bar',
+      // and 'C:..' are drive-relative paths where path.normalize keeps '..' glued
+      // to the drive specifier ('C:..') instead of producing a standalone '..'
+      // segment. Previously the strict /^[a-zA-Z]:$/ drive-strip missed 'C:..'
+      // and the exact includes('..') check failed, so all three wrongly returned
+      // isValid:true. The fix strips the 'C:' prefix before the '..' scan.
+      if (process.platform !== 'win32') return;
+      const bs = String.fromCharCode(92); // backslash (avoids shell-escaping ambiguity)
+      const r1 = validatePath('C:..' + bs + 'Windows' + bs + 'foo');
+      expect(r1.isValid).toBe(false);
+      expect(r1.error).toBe('Path traversal is not allowed');
+
+      const r2 = validatePath('C:foo' + bs + '..' + bs + '..' + bs + 'bar');
+      expect(r2.isValid).toBe(false);
+      expect(r2.error).toBe('Path traversal is not allowed');
+
+      const r3 = validatePath('C:..');
+      expect(r3.isValid).toBe(false);
+      expect(r3.error).toBe('Path traversal is not allowed');
+    });
+
+    it('should still accept a legitimate absolute Windows path after the drive-strip fix', () => {
+      if (process.platform !== 'win32') return;
+      const bs = String.fromCharCode(92);
+      const r = validatePath('C:' + bs + 'Users' + bs + 'foo');
+      expect(r.isValid).toBe(true);
+    });
+
     it('should reject invalid input', () => {
       expect(validatePath('').isValid).toBe(false);
       expect(validatePath('').error).toBe(

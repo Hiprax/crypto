@@ -16,7 +16,7 @@ export type LegacyMode = 'auto' | 'strict' | 'reject';
  * Configuration options for CryptoManager
  */
 export interface CryptoManagerOptions {
-  /** Argon2 memory cost (default: 65536) */
+  /** Argon2 memory cost (default: 131072 — 2 ** 17, 128 MiB) */
   memoryCost?: number;
   /** Argon2 time cost (default: 3) */
   timeCost?: number;

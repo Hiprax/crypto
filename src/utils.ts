@@ -87,8 +87,9 @@ export interface ValidatePathOptions {
  *   (`<`, `>`, `:`, `"`, `|`, `?`, `*` — with the Windows drive-letter
  *   prefix stripped before checking so e.g. `C:\\path` is allowed)
  * - rejects path-traversal attempts via literal `..` segments after
- *   `path.normalize` (the Windows drive-letter segment is ignored when
- *   scanning for `..`)
+ *   `path.normalize`, including Windows drive-relative variants such as
+ *   `C:..` — the `C:` prefix is stripped from the first segment before the
+ *   `..` scan so e.g. `validatePath('C:..\\Windows')` is correctly rejected
  * - if `options.allowedRoot` is provided, additionally requires that
  *   `path.resolve(filePath)` is contained within
  *   `path.resolve(options.allowedRoot)`. Containment is decided by a
@@ -159,12 +160,25 @@ export function validatePath(
 
   // Check for path traversal attempts
   const segments = path.normalize(filePath).split(path.sep);
-  // On Windows, ignore the first segment if it's a drive letter (e.g., 'C:')
-  const firstSegment = segments[0] ?? '';
-  const checkSegments =
-    process.platform === 'win32' && /^[a-zA-Z]:$/.test(firstSegment)
-      ? segments.slice(1)
-      : segments;
+  // On Windows, `path.normalize` keeps a drive specifier glued to whatever
+  // follows it — e.g. `path.normalize('C:..\\foo')` → `'C:..'` not `'..'`.
+  // The old strict `/^[a-zA-Z]:$/` test only matched bare 'C:' (absolute
+  // paths), so drive-relative traversals like 'C:..' were never stripped
+  // before the includes('..') check and slipped through undetected.
+  //
+  // The fix: if `segments[0]` starts with a drive prefix `/^[a-zA-Z]:/`
+  // (matching both 'C:' and 'C:..'), strip those two characters before the
+  // scan. When stripping leaves an empty string (the 'C:' pure-drive case),
+  // drop the segment entirely — identical to the original behaviour for
+  // absolute paths. When stripping leaves '..' or any other text, keep it as
+  // the first element so includes('..') catches it. POSIX is unaffected
+  // because '/^[a-zA-Z]:/' never matches on POSIX paths.
+  let checkSegments = segments;
+  if (process.platform === 'win32' && /^[a-zA-Z]:/.test(segments[0] ?? '')) {
+    const stripped = (segments[0] ?? '').slice(2);
+    checkSegments =
+      stripped === '' ? segments.slice(1) : [stripped, ...segments.slice(1)];
+  }
   if (checkSegments.includes('..')) {
     return {
       isValid: false,
@@ -360,8 +374,16 @@ export function formatFileSize(bytes: number): string {
  * Get file extension
  * @param filePath - File path
  * @returns File extension (lowercase)
+ * @throws CryptoError (`INVALID_INPUT` / `INVALID_INPUT`) if `filePath` is not a string
  */
 export function getFileExtension(filePath: string): string {
+  if (typeof filePath !== 'string') {
+    throw new CryptoError(
+      'File path must be a string',
+      CryptoErrorType.INVALID_INPUT,
+      'INVALID_INPUT'
+    );
+  }
   return path.extname(filePath).toLowerCase();
 }
 
@@ -369,8 +391,16 @@ export function getFileExtension(filePath: string): string {
  * Check if file is a text file based on extension
  * @param filePath - File path
  * @returns True if text file
+ * @throws CryptoError (`INVALID_INPUT` / `INVALID_INPUT`) if `filePath` is not a string
  */
 export function isTextFile(filePath: string): boolean {
+  if (typeof filePath !== 'string') {
+    throw new CryptoError(
+      'File path must be a string',
+      CryptoErrorType.INVALID_INPUT,
+      'INVALID_INPUT'
+    );
+  }
   const textExtensions = [
     '.txt',
     '.md',
@@ -421,9 +451,7 @@ export function sanitizeFilename(filename: string): string {
   }
 
   // Remove or replace dangerous characters, then collapse whitespace.
-  let result = filename
-    .replace(/[<>:"/\\|?*]/g, '_')
-    .replace(/\s+/g, '_');
+  let result = filename.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
 
   // Neutralize any `..` sequences that survived the previous
   // replacements. This prevents a sanitized name from being naively
@@ -609,7 +637,7 @@ export function secureStringCompare(a: string, b: string): boolean {
  * @param current - Current value
  * @param total - Total value
  * @param width - Bar width (default: 30)
- * @returns Progress bar string
+ * @returns Progress bar string — never throws; clamps out-of-range inputs
  */
 export function createProgressBar(
   current: number,
@@ -620,9 +648,19 @@ export function createProgressBar(
     return '[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%';
   }
 
-  const percentage = Math.min(current / total, 1);
-  const filled = Math.round(width * percentage);
-  const empty = width - filled;
+  // Clamp to [0, 1]; treat non-finite current or total as 0 progress so the
+  // helper never surfaces a raw RangeError or emits "NaN%" in its output.
+  const percentage =
+    Number.isFinite(current) && Number.isFinite(total)
+      ? Math.min(Math.max(current / total, 0), 1)
+      : 0;
+
+  // Reject non-integer or non-positive widths (e.g. -3, 15.5, NaN) and fall
+  // back to the documented default so repeat() is never called with a bad count.
+  const w = Number.isInteger(width) && width > 0 ? width : 30;
+
+  const filled = Math.round(w * percentage);
+  const empty = w - filled;
 
   const filledBar = '█'.repeat(filled);
   const emptyBar = '░'.repeat(empty);
@@ -761,10 +799,22 @@ export async function getFileInfo(filePath: string): Promise<FileInfo> {
 /**
  * Validate password strength with detailed feedback.
  *
- * Mirrors the binary acceptance rules used by `CryptoManager.validatePassword`
- * (long passphrase OR 8+ chars with all four character categories) but
- * additionally returns a 0-5 score and human-readable feedback messages
- * suitable for surfacing in UIs.
+ * `isValid` is computed from the same two acceptance rules as
+ * `isValidPassword` in `crypto-manager.ts` — a password is accepted if
+ * EITHER:
+ *
+ *  1. **Passphrase rule (NIST SP 800-63B style):** length ≥ 20, regardless
+ *     of character composition.
+ *  2. **Composition rule:** length ≥ 8 AND contains at least one uppercase
+ *     letter, one lowercase letter, one digit, and one non-alphanumeric
+ *     character (`[^A-Za-z0-9]`).
+ *
+ * `score` (0–5) and `feedback` are **advisory** — they surface stylistic
+ * weaknesses such as repeated-character patterns that `isValid` intentionally
+ * ignores. A password may have `isValid: true` while still carrying a
+ * `feedback` entry (e.g. "Avoid repeated characters") or a score below 5.
+ * UI code should gate on `isValid` and use `score` / `feedback` for
+ * guidance only.
  *
  * The "special character" check accepts any character outside the
  * alphanumeric class (`[^A-Za-z0-9]`), broader than the previous narrow
@@ -772,7 +822,8 @@ export async function getFileInfo(filePath: string): Promise<FileInfo> {
  * `]`, and non-ASCII punctuation all count.
  *
  * @param password - Password to validate
- * @returns Object with validation result and feedback
+ * @returns Object with `isValid` (mirrors `isValidPassword` exactly),
+ *          `score` (advisory, 0–5), and `feedback` (advisory strings)
  */
 export function validatePasswordStrength(password: string): {
   isValid: boolean;
@@ -801,7 +852,26 @@ export function validatePasswordStrength(password: string): {
     };
   }
 
-  // Length check
+  // Pre-compute category booleans — used both for isValid (below) and for
+  // the advisory score/feedback checks, so each regex runs exactly once.
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumbers = /\d/.test(password);
+  // Any non-alphanumeric character counts as "special" — broader than the
+  // previous narrow allow-list and consistent with `isValidPassword`.
+  const hasSpecialChar = /[^A-Za-z0-9]/.test(password);
+
+  // Binary validity: mirrors the composition rule of `isValidPassword` exactly.
+  // Repeat-character penalties below may add to `feedback` and reduce `score`
+  // without affecting this verdict — they are advisory strength signals only.
+  const isValid =
+    password.length >= 8 &&
+    hasUpperCase &&
+    hasLowerCase &&
+    hasNumbers &&
+    hasSpecialChar;
+
+  // Length check (advisory)
   if (password.length < 8) {
     feedback.push('Password must be at least 8 characters long');
   } else if (password.length >= 12) {
@@ -810,35 +880,32 @@ export function validatePasswordStrength(password: string): {
     score += 1;
   }
 
-  // Character variety checks
-  if (/[A-Z]/.test(password)) {
+  // Character variety checks (advisory score and feedback)
+  if (hasUpperCase) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one uppercase letter');
   }
 
-  if (/[a-z]/.test(password)) {
+  if (hasLowerCase) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one lowercase letter');
   }
 
-  if (/\d/.test(password)) {
+  if (hasNumbers) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one number');
   }
 
-  // Broader "special character" rule: any non-alphanumeric character. This
-  // matches `CryptoManager.validatePassword` so the two validators do not
-  // disagree on the same input.
-  if (/[^A-Za-z0-9]/.test(password)) {
+  if (hasSpecialChar) {
     score += 1;
   } else {
     feedback.push('Password must contain at least one special character');
   }
 
-  // Additional strength checks
+  // Additional strength checks (advisory)
   if (password.length >= 16) {
     score += 1;
   }
@@ -852,8 +919,6 @@ export function validatePasswordStrength(password: string): {
     score -= 2;
     feedback.push('Avoid using the same character repeatedly');
   }
-
-  const isValid = score >= 4 && feedback.length === 0;
 
   return {
     isValid,
@@ -874,8 +939,16 @@ export function generateUUID(): string {
  * Hash a string using SHA-256
  * @param input - String to hash
  * @returns SHA-256 hash as hex string
+ * @throws CryptoError (`INVALID_INPUT` / `INVALID_INPUT`) if `input` is not a string
  */
 export function sha256(input: string): string {
+  if (typeof input !== 'string') {
+    throw new CryptoError(
+      'sha256 input must be a string',
+      CryptoErrorType.INVALID_INPUT,
+      'INVALID_INPUT'
+    );
+  }
   return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
 }
 

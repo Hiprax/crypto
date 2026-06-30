@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -38,14 +39,11 @@ const REPO_ROOT = process.cwd();
 const DIST_DIR = path.join(REPO_ROOT, 'dist');
 const DIST_INDEX = path.join(DIST_DIR, 'index.js');
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Each test still creates a
-// per-test sub-directory under TEST_DIR for self-contained probe scripts;
-// the suite-wide afterAll guarantees nothing leaks even if a test's local
-// cleanup is skipped.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-esm-smoke-${crypto.randomBytes(8).toString('hex')}`
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix — the CodeQL-approved secure pattern
+// for temp-directory creation. Each test creates its own sub-directory.
+const TEST_DIR = mkdtempSync(
+  path.join(os.tmpdir(), 'hiprax-crypto-esm-smoke-')
 );
 
 describe('ESM smoke (Task 31)', () => {
@@ -72,8 +70,7 @@ describe('ESM smoke (Task 31)', () => {
       engines?: { node?: string };
       exports?: Record<
         string,
-        | string
-        | { types?: string; import?: string; require?: string }
+        string | { types?: string; import?: string; require?: string }
       >;
     };
     expect(pkg.type).toBe('module');
@@ -132,16 +129,12 @@ process.stdout.write(ok ? 'OK' : 'BAD: ' + JSON.stringify(Object.keys(mod)));
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
 
       // Node's stderr can contain ExperimentalWarning lines, but the
       // exit code MUST be 0 and stdout MUST contain 'OK'.
@@ -202,16 +195,12 @@ try {
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('ERR_REQUIRE_ESM');
     } finally {
@@ -245,16 +234,12 @@ process.stdout.write(ok ? 'OK' : 'BAD');
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('OK');
     } finally {
@@ -296,16 +281,12 @@ process.stdout.write(ok ? 'OK' : 'BAD');
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        [probeFile],
-        {
-          cwd: REPO_ROOT,
-          encoding: 'utf8',
-          timeout: 30_000,
-          windowsHide: true,
-        }
-      );
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('OK');
     } finally {

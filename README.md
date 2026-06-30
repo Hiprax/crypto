@@ -8,7 +8,7 @@
 [![npm provenance](https://img.shields.io/badge/npm-provenance-brightgreen?logo=npm&logoColor=white)](https://www.npmjs.com/package/@hiprax/crypto)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![npm version](https://img.shields.io/npm/v/@hiprax/crypto)](https://www.npmjs.com/package/@hiprax/crypto)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.8.3-blue.svg)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.0.3-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22+-green.svg)](https://nodejs.org/)
 
 ## ✨ Features
@@ -56,7 +56,7 @@ Note: a successful first load is cached for the lifetime of the process (subsequ
 
 ### CommonJS interop
 
-`@hiprax/crypto` is ESM-only. The `package.json` `exports` map intentionally has no `require` entry so that CommonJS consumers receive a clear `ERR_REQUIRE_ESM` from Node rather than a confusing partial namespace. To use the library from a CommonJS file, use a dynamic `import()`:
+`@hiprax/crypto` is ESM-only. The `package.json` `exports` map has no `require` entry. The supported and portable interop for CommonJS callers is a dynamic `import()` from an `async` function — it is the only pattern the test suite verifies:
 
 ```js
 // my-cjs-file.cjs
@@ -68,6 +68,8 @@ async function main() {
 }
 main();
 ```
+
+On Node 22+ (the package minimum) a plain `require('@hiprax/crypto')` call may actually **succeed** via Node's built-in `require(esm)` path (enabled by default for ESM files with no top-level `await`). Do not rely on this: the behavior is undocumented as a stable API, the `require` path is untested by this library, and earlier minor releases of Node 22 may differ. `await import()` is the supported path.
 
 If you need pure-CJS interop, the recommended path is to migrate the calling module to ESM (`"type": "module"` or `.mjs`).
 
@@ -357,7 +359,7 @@ await crypto.decryptFile(
 
 ##### `encryptFileSync(inputPath: string, outputPath: string, password?: string, progress?: ProgressCallback): void`
 
-Synchronous version of file encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation. Like the async path, output is staged to a sibling temp file and atomically renamed to `outputPath` only on success; pre-existing files at `outputPath` are preserved on error. The optional `progress` callback fires twice — once before encryption (`0/totalBytes`) and once after the rename succeeds (`totalBytes/totalBytes`) — because the sync encrypt path reads the entire input in a single `readFileSync` call. See [Progress callbacks for file ops](#progress-callbacks-for-file-ops).
+Synchronous version of file encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation. Like the async path, output is staged to a sibling temp file and atomically renamed to `outputPath` only on success; pre-existing files at `outputPath` are preserved on error. The optional `progress` callback fires twice — once before encryption (`0/totalBytes`) and once after the rename succeeds (`totalBytes/totalBytes`); the input is streamed internally in fixed 64 KiB chunks, but the synchronous encrypt path emits no per-chunk progress events between the two. See [Progress callbacks for file ops](#progress-callbacks-for-file-ops).
 
 ```typescript
 crypto.encryptFileSync('input.txt', 'output.enc', 'MySecureP@ssw0rd123!');
@@ -605,7 +607,7 @@ const isText = isTextFile('document.txt');
 const safeName = sanitizeFilename('file<name>.txt'); // "file_name_.txt"
 
 // Create backup path
-const backupPath = createBackupPath('file.txt'); // "file_2024-01-01T12-00-00.backup.txt"
+const backupPath = createBackupPath('file.txt'); // "file_2026-06-30T12-00-00_a1b2c3.backup.txt"
 
 // Validate base64
 const isValid = isValidBase64('SGVsbG8gV29ybGQ=');
@@ -673,7 +675,7 @@ All four file methods accept an optional fourth argument: a `progress` callback 
 | ------------------ | ------------------- | ---------------------------- | ------------------------------ | --------------------------------- |
 | `encryptFile`      | `(0, totalBytes)`   | per readable `data` event    | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
 | `decryptFile`      | `(0, totalBytes)`   | per readable `data` event    | `(totalBytes, totalBytes)`     | input file size (ciphertext)      |
-| `encryptFileSync`  | `(0, totalBytes)`   | _none_ — sync reads in one go | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
+| `encryptFileSync`  | `(0, totalBytes)`   | _none_ — no per-chunk events | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
 | `decryptFileSync`  | `(0, totalBytes)`   | per 64 KiB chunk             | `(totalBytes, totalBytes)`     | input file size (ciphertext)      |
 
 Universal invariants: `processed` is monotonically non-decreasing across events for a single call, every event reports the same `total`, and the **final** invocation always has `processed === total` (so callers can rely on a single "100% done" signal).
@@ -788,7 +790,7 @@ if (
 v1.1.0 ships **two security fixes** that change the on-disk wire format for v1 ciphertexts (a security-fix patch release; v0 ciphertexts are unaffected):
 
 1. **The 22-byte v1 header is now bound to the AES-GCM auth tag** (via the AAD). Pre-fix, an attacker could flip bits in the header's reserved-byte regions (offsets 16–21 for Argon2id, 10–21 for PBKDF2-SHA256) without invalidating the auth tag — a categorical break of the integrity contract. Post-fix, ANY mutation of the header bytes (including reserved-byte regions) flips the GCM tag and decryption fails with `DECRYPTION_FAILED`.
-2. **`parseHeader` rejects pathologically-large KDF parameters** with `KDF_PARAMS_OUT_OF_BOUNDS` BEFORE invoking the KDF. Pre-fix, a malicious 100-byte ciphertext could request `memoryCost = 4 GiB` or `iterations = 100M` and pin the host for seconds-to-minutes. Caps: Argon2id `memoryCost <= 2^22` (4 GiB), `timeCost <= 100`, `parallelism <= 64`; PBKDF2 `iterations <= 10_000_000`.
+2. **`parseHeader` rejects pathologically-large KDF parameters** with `KDF_PARAMS_OUT_OF_BOUNDS` BEFORE invoking the KDF. Pre-fix, a malicious 100-byte ciphertext could request `memoryCost = 4 GiB` or `iterations = 100M` and pin the host for seconds-to-minutes. Caps: Argon2id `memoryCost <= 2^22` (4 GiB), `timeCost <= 100`, `parallelism <= 64`; PBKDF2 `iterations <= 10_000_000`. Additionally, `parseHeader` enforces the Argon2id RFC 9106 §3.1 cross-field floor `memoryCost >= 8 * parallelism` (code `INVALID_HEADER_PARAM`); no legitimately-produced ciphertext can violate this floor since the constructor enforces it at construction time.
 
 **Impact on existing v1 ciphertexts:** v1 ciphertexts produced by **v1.0.0 specifically** were encrypted with the unbound AAD and therefore will NOT decrypt under v1.1.0's default. Two migration paths:
 

@@ -176,15 +176,17 @@ describe('v1 ciphertext format snapshot tests (Task 13)', () => {
 
       // Dynamic import AFTER the mock is installed, so loadArgon2 sees
       // the mocked module on first call.
-      const { CryptoManager, __resetArgon2ModuleCacheForTesting } = await import(
-        '../crypto-manager'
-      );
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
       __resetArgon2ModuleCacheForTesting();
 
       const restoreRandom = installFixedRandomSpy(CryptoManager);
       try {
         const cm = new CryptoManager(TEST_ARGON2_OPTS);
-        const ciphertextB64 = await cm.encryptText(TEST_PLAINTEXT, TEST_PASSWORD);
+        const ciphertextB64 = await cm.encryptText(
+          TEST_PLAINTEXT,
+          TEST_PASSWORD
+        );
         const buf = Buffer.from(ciphertextB64, 'base64url');
 
         // ---- format-version + magic guard rails ----
@@ -220,10 +222,7 @@ describe('v1 ciphertext format snapshot tests (Task 13)', () => {
           .toString('hex');
         expect(ivHex).toMatchSnapshot('argon2id iv (12 bytes)');
         const tagHex = buf
-          .subarray(
-            HEADER_LENGTH + 32 + 12,
-            HEADER_LENGTH + 32 + 12 + 16
-          )
+          .subarray(HEADER_LENGTH + 32 + 12, HEADER_LENGTH + 32 + 12 + 16)
           .toString('hex');
         expect(tagHex).toMatchSnapshot('argon2id auth tag (16 bytes)');
         const ctHex = buf
@@ -302,10 +301,7 @@ describe('v1 ciphertext format snapshot tests (Task 13)', () => {
           .toString('hex');
         expect(ivHex).toMatchSnapshot('pbkdf2 iv (12 bytes)');
         const tagHex = buf
-          .subarray(
-            HEADER_LENGTH + 32 + 12,
-            HEADER_LENGTH + 32 + 12 + 16
-          )
+          .subarray(HEADER_LENGTH + 32 + 12, HEADER_LENGTH + 32 + 12 + 16)
           .toString('hex');
         expect(tagHex).toMatchSnapshot('pbkdf2 auth tag (16 bytes)');
         const ctHex = buf

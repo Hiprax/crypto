@@ -8,7 +8,6 @@ import {
 } from 'node:fs/promises';
 import {
   existsSync,
-  readFileSync,
   writeFileSync,
   mkdirSync,
   unlinkSync,
@@ -37,11 +36,7 @@ import {
   SecurityLevel,
   EncryptionAlgorithm,
 } from './types.js';
-import type {
-  KdfHeaderParams,
-  KdfId,
-  ParsedHeader,
-} from './format.js';
+import type { KdfHeaderParams, KdfId, ParsedHeader } from './format.js';
 import {
   HEADER_LENGTH,
   KDF_ID_ARGON2ID,
@@ -49,6 +44,10 @@ import {
   hasMagic,
   packHeader,
   parseHeader,
+  MAX_ARGON2_MEMORY_COST,
+  MAX_ARGON2_TIME_COST,
+  MAX_ARGON2_PARALLELISM,
+  MAX_PBKDF2_ITERATIONS,
 } from './format.js';
 import { isValidBase64Url } from './utils.js';
 
@@ -99,7 +98,7 @@ const PBKDF2_DEFAULT_ITERATIONS = 600000;
 
 /**
  * Iteration count assumed for legacy v0 sync ciphertexts (those produced by
- * versions of this library prior to 0.10.0, which used 100k iterations and
+ * versions of this library prior to 0.11.0, which used 100k iterations and
  * did not embed the iteration count in the ciphertext). v1 ciphertexts
  * carry the iteration count in their header and ignore this constant.
  */
@@ -656,6 +655,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.memoryCost !== undefined &&
+      options.memoryCost > MAX_ARGON2_MEMORY_COST
+    ) {
+      throw new CryptoError(
+        `memoryCost (${options.memoryCost}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_MEMORY_COST} (2^22 KiB = 4 GiB). Values above this cap ` +
+          `produce ciphertext that cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_MEMORY_COST}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'MEMORY_COST_TOO_LARGE'
+      );
+    }
+    if (
       options.timeCost !== undefined &&
       (!Number.isInteger(options.timeCost) || options.timeCost <= 0)
     ) {
@@ -666,6 +678,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.timeCost !== undefined &&
+      options.timeCost > MAX_ARGON2_TIME_COST
+    ) {
+      throw new CryptoError(
+        `timeCost (${options.timeCost}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_TIME_COST}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_TIME_COST}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'TIME_COST_TOO_LARGE'
+      );
+    }
+    if (
       options.parallelism !== undefined &&
       (!Number.isInteger(options.parallelism) || options.parallelism <= 0)
     ) {
@@ -673,6 +698,19 @@ export class CryptoManager {
         'parallelism must be a positive integer',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_PARALLELISM'
+      );
+    }
+    if (
+      options.parallelism !== undefined &&
+      options.parallelism > MAX_ARGON2_PARALLELISM
+    ) {
+      throw new CryptoError(
+        `parallelism (${options.parallelism}) exceeds the wire-format cap of ` +
+          `${MAX_ARGON2_PARALLELISM}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_ARGON2_PARALLELISM}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'PARALLELISM_TOO_LARGE'
       );
     }
     if (
@@ -687,6 +725,19 @@ export class CryptoManager {
       );
     }
     if (
+      options.pbkdf2Iterations !== undefined &&
+      options.pbkdf2Iterations > MAX_PBKDF2_ITERATIONS
+    ) {
+      throw new CryptoError(
+        `pbkdf2Iterations (${options.pbkdf2Iterations}) exceeds the wire-format cap of ` +
+          `${MAX_PBKDF2_ITERATIONS}. Values above this cap produce ciphertext that ` +
+          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
+          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'PBKDF2_ITERATIONS_TOO_LARGE'
+      );
+    }
+    if (
       options.legacyPbkdf2Iterations !== undefined &&
       (!Number.isInteger(options.legacyPbkdf2Iterations) ||
         options.legacyPbkdf2Iterations <= 0)
@@ -695,6 +746,19 @@ export class CryptoManager {
         'legacyPbkdf2Iterations must be a positive integer',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_LEGACY_PBKDF2_ITERATIONS'
+      );
+    }
+    if (
+      options.legacyPbkdf2Iterations !== undefined &&
+      options.legacyPbkdf2Iterations > MAX_PBKDF2_ITERATIONS
+    ) {
+      throw new CryptoError(
+        `legacyPbkdf2Iterations (${options.legacyPbkdf2Iterations}) exceeds the cap of ` +
+          `${MAX_PBKDF2_ITERATIONS}. This value is fed directly to pbkdf2Sync; ` +
+          `values above this cap risk blocking the event loop indefinitely. ` +
+          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
+        CryptoErrorType.INVALID_INPUT,
+        'LEGACY_PBKDF2_ITERATIONS_TOO_LARGE'
       );
     }
 
@@ -779,6 +843,40 @@ export class CryptoManager {
       hashLength: this.keyLength,
       saltLength: this.saltLength,
     };
+
+    // Argon2id mandates memoryCost >= 8 * parallelism. Enforcing this on the
+    // resolved (post-defaulting) values at construction time means the first
+    // async encryptText call fails fast with a clear error rather than an
+    // opaque KEY_DERIVATION_FAILED from deep inside the KDF. The library
+    // already validates defaultPassphrase at construction for the same reason
+    // (fail-fast philosophy). The defaults (memoryCost=2^17, parallelism=1)
+    // trivially pass, as do all documented opt-down profiles (2^16, 2^14,
+    // 2^12 with p=1). The sync PBKDF2 path ignores memoryCost entirely, so
+    // this check is scoped strictly to the Argon2 options that drive async paths.
+    const argon2MemFloor = 8 * this.argon2Options.parallelism;
+    if (this.argon2Options.memoryCost < argon2MemFloor) {
+      throw new CryptoError(
+        `memoryCost (${this.argon2Options.memoryCost}) must be at least ` +
+          `8 * parallelism (${argon2MemFloor} = 8 × ${this.argon2Options.parallelism}) ` +
+          `for Argon2id. Use a memoryCost of at least ${argon2MemFloor} or reduce parallelism.`,
+        CryptoErrorType.INVALID_INPUT,
+        'MEMORY_COST_TOO_SMALL'
+      );
+    }
+
+    // Validate aad type before coercing it to a Buffer. Buffer.from coerces
+    // arrays silently (e.g. [72, 73] → the two bytes "HI") and throws a raw
+    // Node TypeError for numbers and plain objects — neither result is a
+    // CryptoError, violating the library's uniform "all errors are CryptoError"
+    // contract. Catching both cases here gives callers the same typed
+    // CryptoError shape as every other constructor option.
+    if (options.aad !== undefined && typeof options.aad !== 'string') {
+      throw new CryptoError(
+        'aad must be a string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_AAD'
+      );
+    }
 
     // Use custom AAD or default
     const aadString = options.aad ?? 'secure-crypto-tool-v2';
@@ -1384,15 +1482,17 @@ export class CryptoManager {
 
   /**
    * Encrypt text with password
-   * @param text - Text to encrypt
+   * @param text - Text to encrypt (the empty string `''` is accepted and
+   *   produces a valid authenticated ciphertext; only `null` and `undefined`
+   *   are rejected)
    * @param password - Encryption password (optional if default passphrase is set)
    * @returns Base64url encoded encrypted data (v1 format)
    * @throws CryptoError if encryption fails
    */
   public async encryptText(text: string, password?: string): Promise<string> {
-    if (!text || typeof text !== 'string') {
+    if (text === undefined || text === null || typeof text !== 'string') {
       throw new CryptoError(
-        'Text must be a non-empty string',
+        'Text must be a string',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_TEXT'
       );
@@ -1417,13 +1517,17 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the plaintext if the operation
+    // fails after the buffer is allocated (e.g. encryptData throws).
+    let textBuffer: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(finalPassword, salt);
+      key = await this.deriveKey(finalPassword, salt);
 
       // Build v1 header (Argon2id parameters that were used). We build it
       // BEFORE encrypting so we can include the on-disk header bytes in
@@ -1433,7 +1537,7 @@ export class CryptoManager {
       const header = this.buildHeader(KDF_ID_ARGON2ID);
 
       // Encrypt the text with header-bound AAD.
-      const textBuffer = Buffer.from(text, 'utf8');
+      textBuffer = Buffer.from(text, 'utf8');
       const { encrypted, tag } = this.encryptData(
         textBuffer,
         key,
@@ -1460,6 +1564,13 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      // Scrub the plaintext buffer if it was allocated before the failure.
+      if (textBuffer !== null) {
+        this.secureClear(textBuffer);
+      }
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1500,6 +1611,10 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the decrypted buffer if the
+    // operation fails in the narrow window after decryptData returns.
+    let decrypted: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1518,20 +1633,50 @@ export class CryptoManager {
       let headerForAad: Buffer | null = null;
 
       if (hasMagic(combined)) {
-        const parsed = parseHeader(combined);
-        this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
-        if (parsed.params.kind === 'argon2id') {
-          argonOverrides = {
-            memoryCost: parsed.params.memoryCost,
-            timeCost: parsed.params.timeCost,
-            parallelism: parsed.params.parallelism,
-          };
+        // Attempt to parse as v1. parseHeader + assertKdfMatches are wrapped
+        // so that a rare magic-collision on a v0 random salt (~2^-32 per
+        // ciphertext) triggers the auto-mode recovery path rather than
+        // becoming a permanent data-loss. A genuine v1 ciphertext always has
+        // a valid parseable header, so this catch is unreachable for
+        // well-formed v1 data — only colliding v0 blobs land here. We never
+        // catch decipher.final() / GCM tag failures (those happen later and
+        // indicate wrong password or tampering, not misclassification).
+        try {
+          const parsed = parseHeader(combined);
+          this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
+          if (parsed.params.kind === 'argon2id') {
+            argonOverrides = {
+              memoryCost: parsed.params.memoryCost,
+              timeCost: parsed.params.timeCost,
+              parallelism: parsed.params.parallelism,
+            };
+          }
+          bodyOffset = parsed.headerLen;
+          // Slice on-disk header bytes (subarray shares memory with `combined`,
+          // so it is automatically scrubbed when we call `secureClear(combined)`
+          // at the end of the success path).
+          headerForAad = combined.subarray(0, parsed.headerLen);
+        } catch (headerParseErr) {
+          // Header parse failed. In non-auto modes, re-throw so that
+          // UNSUPPORTED_VERSION / UNSUPPORTED_KDF / KDF_MISMATCH remain
+          // observable to callers and future-versioned ciphertexts are not
+          // mis-reported as legacy. In auto mode we fall back to v0, with
+          // one exception: KDF_PARAMS_OUT_OF_BOUNDS is always re-thrown so
+          // that DoS-prevention (fast rejection before any KDF work) is
+          // preserved regardless of magic-collision possibility.
+          if (this.legacyMode !== 'auto') {
+            throw headerParseErr;
+          }
+          if (
+            headerParseErr instanceof CryptoError &&
+            headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+          ) {
+            throw headerParseErr;
+          }
+          // auto: treat the full buffer as v0 [salt][iv][tag][body].
+          // headerForAad stays null; argonOverrides stays undefined.
+          bodyOffset = 0;
         }
-        bodyOffset = parsed.headerLen;
-        // Slice on-disk header bytes (subarray shares memory with `combined`,
-        // so it is automatically scrubbed when we call `secureClear(combined)`
-        // at the end of the success path).
-        headerForAad = combined.subarray(0, parsed.headerLen);
       } else {
         this.enforceLegacyMode();
         bodyOffset = 0;
@@ -1562,12 +1707,13 @@ export class CryptoManager {
 
       // Derive key from password (use embedded params if present so we can
       // decrypt ciphertext produced by an instance with different defaults)
-      const key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      key = await this.deriveKey(finalPassword, salt, argonOverrides);
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
-      const aad = headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      const decrypted = this.decryptData(encrypted, key, iv, tag, aad);
+      const aad =
+        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+      decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory. `combined` is cleared *after*
@@ -1581,6 +1727,13 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      // Scrub the decrypted buffer if it was allocated before the failure.
+      if (decrypted !== null) {
+        this.secureClear(decrypted);
+      }
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1594,15 +1747,17 @@ export class CryptoManager {
 
   /**
    * Encrypt text with password (synchronous version)
-   * @param text - Text to encrypt
+   * @param text - Text to encrypt (the empty string `''` is accepted and
+   *   produces a valid authenticated ciphertext; only `null` and `undefined`
+   *   are rejected)
    * @param password - Encryption password (optional if default passphrase is set)
    * @returns Base64url encoded encrypted data (v1 format)
    * @throws CryptoError if encryption fails
    */
   public encryptTextSync(text: string, password?: string): string {
-    if (!text || typeof text !== 'string') {
+    if (text === undefined || text === null || typeof text !== 'string') {
       throw new CryptoError(
-        'Text must be a non-empty string',
+        'Text must be a string',
         CryptoErrorType.INVALID_INPUT,
         'INVALID_TEXT'
       );
@@ -1627,13 +1782,17 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the plaintext if the operation
+    // fails after the buffer is allocated (e.g. encryptData throws).
+    let textBuffer: Buffer | null = null;
     try {
       // Generate salt and IV
       const salt = this.generateSecureRandom(this.saltLength);
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt);
+      key = this.deriveKeySync(finalPassword, salt);
 
       // Build v1 header for sync (PBKDF2 KDF identifier). Built BEFORE
       // encryption so we can include its on-disk bytes in the AAD — see
@@ -1641,7 +1800,7 @@ export class CryptoManager {
       const header = this.buildHeader(KDF_ID_PBKDF2_SHA256);
 
       // Encrypt the text with header-bound AAD.
-      const textBuffer = Buffer.from(text, 'utf8');
+      textBuffer = Buffer.from(text, 'utf8');
       const { encrypted, tag } = this.encryptData(
         textBuffer,
         key,
@@ -1664,6 +1823,13 @@ export class CryptoManager {
 
       return encoded;
     } catch (error) {
+      // Scrub the plaintext buffer if it was allocated before the failure.
+      if (textBuffer !== null) {
+        this.secureClear(textBuffer);
+      }
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1701,6 +1867,10 @@ export class CryptoManager {
       );
     }
 
+    let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub the decrypted buffer if the
+    // operation fails in the narrow window after decryptData returns.
+    let decrypted: Buffer | null = null;
     try {
       // Decode base64url
       const combined = Buffer.from(encryptedText, 'base64url');
@@ -1717,13 +1887,32 @@ export class CryptoManager {
       let headerForAad: Buffer | null = null;
 
       if (hasMagic(combined)) {
-        const parsed = parseHeader(combined);
-        this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
-        if (parsed.params.kind === 'pbkdf2-sha256') {
-          pbkdf2Iterations = parsed.params.iterations;
+        // See decryptText for the full magic-collision recovery rationale.
+        // For the sync path, pbkdf2Iterations is already initialised to
+        // this.legacyPbkdf2Iterations (the v0 default), so no reset is
+        // needed in the catch block.
+        try {
+          const parsed = parseHeader(combined);
+          this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
+          if (parsed.params.kind === 'pbkdf2-sha256') {
+            pbkdf2Iterations = parsed.params.iterations;
+          }
+          bodyOffset = parsed.headerLen;
+          headerForAad = combined.subarray(0, parsed.headerLen);
+        } catch (headerParseErr) {
+          if (this.legacyMode !== 'auto') {
+            throw headerParseErr;
+          }
+          if (
+            headerParseErr instanceof CryptoError &&
+            headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+          ) {
+            throw headerParseErr;
+          }
+          // auto: v0 fallback — headerForAad stays null;
+          // pbkdf2Iterations stays at this.legacyPbkdf2Iterations.
+          bodyOffset = 0;
         }
-        bodyOffset = parsed.headerLen;
-        headerForAad = combined.subarray(0, parsed.headerLen);
       } else {
         this.enforceLegacyMode();
         bodyOffset = 0;
@@ -1753,12 +1942,13 @@ export class CryptoManager {
       const encrypted = combined.subarray(dataStart);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
-      const aad = headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      const decrypted = this.decryptData(encrypted, key, iv, tag, aad);
+      const aad =
+        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+      decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
       // Clear sensitive data from memory. `combined` is cleared *after*
@@ -1772,6 +1962,13 @@ export class CryptoManager {
 
       return result;
     } catch (error) {
+      // Scrub the decrypted buffer if it was allocated before the failure.
+      if (decrypted !== null) {
+        this.secureClear(decrypted);
+      }
+      if (key !== null) {
+        this.secureClear(key);
+      }
       if (error instanceof CryptoError) {
         throw error;
       }
@@ -1826,7 +2023,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || !outputPath) {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -1854,6 +2056,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -1893,7 +2096,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password
-      const key = await this.deriveKey(finalPassword, salt);
+      key = await this.deriveKey(finalPassword, salt);
 
       // Build v1 header for the Argon2id KDF used by async file encryption.
       const versionHeader = this.buildHeader(KDF_ID_ARGON2ID);
@@ -1920,20 +2123,85 @@ export class CryptoManager {
       // Open the temp output file once and stream everything through it.
       const outputStream = createWriteStream(tempPath, { flags: 'w' });
 
+      // Persistent stream-error guard for the lifetime of this operation.
+      // Records the first stream 'error' event so subsequent writeChunk
+      // calls fail fast, and rejects any writeChunk that is currently
+      // waiting for 'drain' (so the promise never hangs). Multiple 'error'
+      // listeners on a stream are fine — pipeline() attaches its own and
+      // they coexist independently.
+      let streamError: Error | null = null;
+      let pendingChunkReject: ((err: Error) => void) | null = null;
+      const onStreamError = (err: Error): void => {
+        streamError = err;
+        if (pendingChunkReject !== null) {
+          const rej = pendingChunkReject;
+          pendingChunkReject = null;
+          rej(err);
+        }
+      };
+      outputStream.on('error', onStreamError);
+
       // Helper to await a single write that may apply backpressure. We need
       // this for the upfront [v1 header][salt][iv] prefix and for the
       // trailing auth tag — pipeline() handles the body for us but it
       // doesn't know about these out-of-band writes.
+      //
+      // Guarantees: the promise settles exactly once (idempotent
+      // settleOnce guard); all transient 'drain' listeners are removed on
+      // settle; a stream 'error' always rejects rather than crashing the
+      // process (unhandled-error) or hanging (drain never fires after an
+      // error). The ok===true path no longer resolves synchronously before
+      // the write callback — that was the root cause of the silent-drop bug.
       const writeChunk = (chunk: Buffer): Promise<void> =>
         new Promise<void>((resolve, reject) => {
-          const ok = outputStream.write(chunk, (err) => {
-            if (err) reject(err);
-          });
-          if (ok) {
-            resolve();
-          } else {
-            outputStream.once('drain', resolve);
+          // Fail fast if the stream already errored before this call.
+          if (streamError !== null) {
+            reject(streamError);
+            return;
           }
+
+          let settled = false;
+          let drainListener: (() => void) | null = null;
+
+          const settleOnce = (err?: Error | null): void => {
+            if (settled) return;
+            settled = true;
+            // Deregister from the stream-level error handler.
+            pendingChunkReject = null;
+            // Remove any 'drain' listener (safe no-op if already fired
+            // or never registered).
+            if (drainListener !== null) {
+              outputStream.removeListener('drain', drainListener);
+              drainListener = null;
+            }
+            if (err) reject(err);
+            else resolve();
+          };
+
+          // Register so onStreamError can settle us if the stream errors
+          // while we are waiting for the write callback or for 'drain'.
+          pendingChunkReject = (err): void => settleOnce(err);
+
+          const ok = outputStream.write(chunk, err => {
+            // Write callback fires when this chunk's data has been
+            // processed. For ok===true: sole settlement path. For
+            // ok===false: drain may have already settled us (idempotent).
+            settleOnce(err ?? null);
+          });
+
+          if (!ok) {
+            // Backpressured: resolve as soon as the buffer drains so the
+            // producer can resume without waiting for the write callback
+            // (which arrives after drain). The write callback's
+            // settleOnce call is then a no-op.
+            drainListener = (): void => settleOnce(null);
+            outputStream.once('drain', drainListener);
+          }
+          // ok===true: the write callback (above) handles settlement.
+          // We deliberately do NOT call resolve() here synchronously —
+          // that was the bug: resolving before the callback meant a
+          // subsequent write-callback error was silently dropped, and
+          // the stream 'error' event went unhandled (process crash).
         });
 
       try {
@@ -2000,14 +2268,29 @@ export class CryptoManager {
         // Trailing auth tag.
         await writeChunk(cipher.getAuthTag());
       } finally {
-        // Always close the write stream so the OS can release the file
-        // handle before we attempt to rename or unlink it.
-        await new Promise<void>((resolve, reject) => {
-          outputStream.end((err?: Error | null) => {
-            if (err) reject(err);
-            else resolve();
+        // Close without rejecting — a close/flush error is captured by
+        // onStreamError and re-thrown below. Rejecting here would mask an
+        // in-flight error (a throw in `finally` replaces the current
+        // exception). Skip end() on an already-destroyed stream to avoid
+        // ERR_STREAM_DESTROYED; with the persistent 'error' listener
+        // attached, end(cb) still fires its callback on a failed-open
+        // stream, so this path neither hangs nor crashes the process.
+        if (!outputStream.destroyed) {
+          await new Promise<void>(resolve => {
+            outputStream.end(() => resolve());
           });
-        });
+        }
+        // Remove the persistent error listener now that the stream is
+        // closed — prevents a dangling reference on the (now-closed)
+        // stream object.
+        outputStream.removeListener('error', onStreamError);
+      }
+
+      // Surface any stream error captured by onStreamError that was not
+      // already thrown by writeChunk or pipeline (belt-and-suspenders;
+      // on the success path streamError is null — no-op).
+      if (streamError !== null) {
+        throw streamError;
       }
 
       // Atomically promote the temp file to the final output path.
@@ -2023,6 +2306,9 @@ export class CryptoManager {
       // Clear sensitive data
       this.secureClear(key);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file if we created one. Never touch the final
       // outputPath: it either already existed before this call (and is
       // therefore the caller's pre-existing data, which we must not delete)
@@ -2096,7 +2382,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): Promise<void> {
-    if (!inputPath || !outputPath) {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2115,6 +2406,7 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let key: Buffer | null = null;
 
     try {
       // Check if input file exists
@@ -2168,36 +2460,63 @@ export class CryptoManager {
         // one shot (v1 header + salt + iv = HEADER_LENGTH + saltLength +
         // ivLength) when the file is large enough, otherwise read what's
         // available and detect short files.
-        const maxFrontLen =
-          HEADER_LENGTH + this.saltLength + this.ivLength;
+        const maxFrontLen = HEADER_LENGTH + this.saltLength + this.ivLength;
         const frontReadLen = Math.min(maxFrontLen, totalSize);
         const front = Buffer.alloc(frontReadLen);
         if (frontReadLen > 0) {
-          await fileHandle.read(front, 0, frontReadLen, 0);
-        }
-
-        if (hasMagic(front)) {
-          if (front.length < HEADER_LENGTH) {
+          const { bytesRead: frontBytesRead } = await fileHandle.read(
+            front,
+            0,
+            frontReadLen,
+            0
+          );
+          if (frontBytesRead !== frontReadLen) {
             throw new CryptoError(
-              'File is too small to contain a valid v1 header',
+              'Failed to read full file header region',
               CryptoErrorType.INVALID_INPUT,
               'INVALID_ENCRYPTED_FILE_SIZE'
             );
           }
-          const parsed = parseHeader(front);
-          this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
-          if (parsed.params.kind === 'argon2id') {
-            argonOverrides = {
-              memoryCost: parsed.params.memoryCost,
-              timeCost: parsed.params.timeCost,
-              parallelism: parsed.params.parallelism,
-            };
+        }
+
+        if (hasMagic(front)) {
+          // See decryptText for the full magic-collision recovery rationale.
+          try {
+            if (front.length < HEADER_LENGTH) {
+              throw new CryptoError(
+                'File is too small to contain a valid v1 header',
+                CryptoErrorType.INVALID_INPUT,
+                'INVALID_ENCRYPTED_FILE_SIZE'
+              );
+            }
+            const parsed = parseHeader(front);
+            this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
+            if (parsed.params.kind === 'argon2id') {
+              argonOverrides = {
+                memoryCost: parsed.params.memoryCost,
+                timeCost: parsed.params.timeCost,
+                parallelism: parsed.params.parallelism,
+              };
+            }
+            formatHeaderLen = parsed.headerLen;
+            // Copy the on-disk header bytes into a fresh Buffer (rather than
+            // a subarray) so the AAD reference outlives any later
+            // mutation/scrub of `front`.
+            headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
+          } catch (headerParseErr) {
+            if (this.legacyMode !== 'auto') {
+              throw headerParseErr;
+            }
+            if (
+              headerParseErr instanceof CryptoError &&
+              headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+            ) {
+              throw headerParseErr;
+            }
+            // auto: v0 fallback — headerForAad stays null;
+            // argonOverrides stays undefined.
+            formatHeaderLen = 0;
           }
-          formatHeaderLen = parsed.headerLen;
-          // Copy the on-disk header bytes into a fresh Buffer (rather than
-          // a subarray) so the AAD reference outlives any later
-          // mutation/scrub of `front`.
-          headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
         } else {
           this.enforceLegacyMode();
           formatHeaderLen = 0;
@@ -2206,10 +2525,7 @@ export class CryptoManager {
         // Validate the file is at least large enough for the salt+iv+tag
         // metadata after the (possibly absent) format header.
         const minSize =
-          formatHeaderLen +
-          this.saltLength +
-          this.ivLength +
-          this.tagLength;
+          formatHeaderLen + this.saltLength + this.ivLength + this.tagLength;
         if (totalSize < minSize) {
           throw new CryptoError(
             'File is too small to be a valid encrypted file',
@@ -2257,7 +2573,7 @@ export class CryptoManager {
       const bodyLen = bodyEnd - bodyStart;
 
       // Derive key from password (use embedded params if v1).
-      const key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      key = await this.deriveKey(finalPassword, salt, argonOverrides);
 
       // Allocate a sibling temp path; only rename on success.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -2282,11 +2598,13 @@ export class CryptoManager {
       decipher.setAAD(decipherAad);
       decipher.setAuthTag(tag);
 
-      // Emit an initial progress event reflecting the bytes already read out
-      // of the file (header + salt + iv + tag). Reporting these as
-      // "processed" matches the user's mental model that progress is "how
-      // much of the input file have you consumed", not "how much body have
-      // you decrypted".
+      // Initial progress event — a literal `(0, totalSize)` start sentinel,
+      // matching the `decryptFileSync` contract. The metadata bytes
+      // (header + salt + iv + tag) have already been read off disk by this
+      // point, but we report `0` so callers can use the first event as a
+      // deterministic start marker; per-chunk events (via the `data` event
+      // on the body read stream) report `consumedFrontAndTag + bodyConsumed`
+      // bytes, and the final event reports `(totalSize, totalSize)`.
       const consumedFrontAndTag =
         bodyStart + this.tagLength; /* bytes already read from input */
       this.invokeProgress(progress, 0, totalSize);
@@ -2296,6 +2614,22 @@ export class CryptoManager {
       // fed back into update(). For empty bodies (bodyLen === 0) we skip
       // the read stream and just call decipher.final() to authenticate.
       const outputStream = createWriteStream(tempPath, { flags: 'w' });
+
+      // Persistent stream-error guard for the output stream's lifetime.
+      // Without this, an 'error' event on outputStream with no listener
+      // (e.g. a failed file-open when tempPath's parent is actually a
+      // regular file → ENOTDIR) causes Node to raise ERR_UNHANDLED_ERROR
+      // and crash the host process. With the listener, the error is
+      // captured in streamError and re-thrown explicitly after the finally
+      // so the outer catch can clean up the temp file and wrap it as
+      // FILE_DECRYPTION_FAILED. This mirrors the onStreamError guard that
+      // encryptFile has had since v1.4.0 (Phase 2 of the v1.4.0 plan).
+      let streamError: Error | null = null;
+      const onStreamError = (err: Error): void => {
+        if (streamError === null) streamError = err;
+      };
+      outputStream.on('error', onStreamError);
+
       try {
         if (bodyLen > 0) {
           const inputStream = createReadStream(inputPath, {
@@ -2348,7 +2682,7 @@ export class CryptoManager {
           const finalBuf = decipher.final();
           if (finalBuf.length > 0) {
             await new Promise<void>((resolve, reject) => {
-              outputStream.write(finalBuf, (err) => {
+              outputStream.write(finalBuf, err => {
                 if (err) reject(err);
                 else resolve();
               });
@@ -2356,12 +2690,27 @@ export class CryptoManager {
           }
         }
       } finally {
-        await new Promise<void>((resolve, reject) => {
-          outputStream.end((err?: Error | null) => {
-            if (err) reject(err);
-            else resolve();
+        // Close without rejecting — a close/flush error is captured by
+        // onStreamError and re-thrown below. Rejecting here would mask an
+        // in-flight error (a throw in `finally` replaces the current
+        // exception). Skip end() on an already-destroyed stream to avoid
+        // ERR_STREAM_DESTROYED; with the persistent 'error' listener
+        // attached, end(cb) still fires its callback on a failed-open
+        // stream, so this path neither hangs nor crashes the process.
+        if (!outputStream.destroyed) {
+          await new Promise<void>(resolve => {
+            outputStream.end(() => resolve());
           });
-        });
+        }
+        outputStream.removeListener('error', onStreamError);
+      }
+
+      // Surface a stream error captured by onStreamError that was not
+      // already thrown by the body pipeline (e.g. a failed temp-file open
+      // on the empty-body path where pipeline() is never called).
+      // On the success path streamError is null — this is a no-op.
+      if (streamError !== null) {
+        throw streamError;
       }
 
       // Atomic rename and scrub key material.
@@ -2377,6 +2726,9 @@ export class CryptoManager {
       this.secureClear(iv);
       this.secureClear(tag);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Clean up the temp file if any partial output exists. We never
       // touch outputPath itself: if rename succeeded, outputPath is the
       // valid plaintext; if rename failed, outputPath is whatever the
@@ -2407,17 +2759,21 @@ export class CryptoManager {
    * Output is written to a sibling temp file (`${outputPath}.<random>.tmp`)
    * and atomically renamed to `outputPath` only on success.
    *
+   * Reads the input in fixed 64 KiB chunks via `fs.readSync`, feeds each
+   * chunk through `cipher.update()`, and writes the resulting ciphertext
+   * chunk via `fs.writeFileSync(fd, ...)`. This keeps peak memory
+   * proportional to the chunk size regardless of input file size —
+   * matching the bounded-memory model already used by `decryptFileSync`.
+   * The on-disk layout `[v1 header][salt][iv][ciphertext body][auth tag]`
+   * is byte-identical to the previous single-read implementation.
+   *
    * **Progress reporting:** if a `progress` callback is supplied, it is
    * invoked once with `(0, totalBytes)` before encryption starts and once
    * with `(totalBytes, totalBytes)` after the temp file has been atomically
-   * renamed to the canonical `outputPath`. The sync encrypt path reads the
-   * full input into memory in a single `readFileSync` call (because the
-   * sync surface needs to be predictable for callers that don't want
-   * streaming), so per-chunk progress would be misleading — the two
-   * bracketing events accurately describe the synchronous "before" and
-   * "after" boundary. `totalBytes` equals the input file size in bytes. If
-   * the callback throws, the throw aborts the operation. See
-   * {@link ProgressCallback}.
+   * renamed to the canonical `outputPath`. No per-chunk events are emitted
+   * — the two bracketing calls preserve the contract callers already depend
+   * on. `totalBytes` equals the input file size in bytes. If the callback
+   * throws, the throw aborts the operation. See {@link ProgressCallback}.
    *
    * @example
    * ```typescript
@@ -2441,7 +2797,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || !outputPath) {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2469,20 +2830,33 @@ export class CryptoManager {
     }
 
     let tempPath: string | null = null;
+    let inputFd: number | null = null;
+    let outputFd: number | null = null;
+    let key: Buffer | null = null;
+    // Hoisted so the catch block can scrub up to 64 KiB of plaintext if the
+    // operation fails after the chunk buffer has been allocated. May be null
+    // if the failure occurs before the allocation (early validation throws).
+    let chunk: Buffer | null = null;
 
     try {
-      // Check if input file exists
-      if (!existsSync(inputPath)) {
-        throw new CryptoError(
-          `Input file does not exist: ${inputPath}`,
-          CryptoErrorType.FILE_ERROR,
-          'INPUT_FILE_NOT_FOUND'
-        );
+      // Open the input first to eliminate the TOCTOU race between an
+      // existsSync check and the later openSync call. ENOENT is re-thrown
+      // as INPUT_FILE_NOT_FOUND; other errors propagate to the outer catch.
+      try {
+        inputFd = openSync(inputPath, 'r');
+      } catch (openErr) {
+        if ((openErr as Error & { code?: string }).code === 'ENOENT') {
+          throw new CryptoError(
+            `Input file does not exist: ${inputPath}`,
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_NOT_FOUND'
+          );
+        }
+        throw openErr;
       }
 
-      // Stat the input now so the progress callback receives a stable
-      // `totalBytes` for both bracketing events.
-      const totalBytes = statSync(inputPath).size;
+      // Use the open fd for size — same inode, no intervening name lookup.
+      const totalBytes = fstatSync(inputFd as number).size;
 
       // Ensure output directory exists
       const outputDir = dirname(outputPath);
@@ -2509,10 +2883,7 @@ export class CryptoManager {
       const iv = this.generateSecureRandom(this.ivLength);
 
       // Derive key from password (synchronous)
-      const key = this.deriveKeySync(finalPassword, salt);
-
-      // Read input file
-      const inputData = readFileSync(inputPath);
+      key = this.deriveKeySync(finalPassword, salt);
 
       // Build v1 header for sync file (PBKDF2 KDF identifier). Built
       // BEFORE the cipher so we can include its on-disk bytes in the AAD
@@ -2527,25 +2898,73 @@ export class CryptoManager {
       ) as crypto.CipherGCM;
       cipher.setAAD(this.aadForV1(versionHeader));
 
-      // Encrypt the data
-      let encrypted = cipher.update(inputData);
-      encrypted = Buffer.concat([encrypted, cipher.final()]);
+      // Open the temp file for writing. (Input fd was opened at the top of
+      // this try block to eliminate TOCTOU — it is already assigned above.)
+      outputFd = openSync(tempPath, 'w');
 
-      // Get authentication tag
+      // Write the prefix: [v1 header][salt][iv]. These three fields are
+      // always written together up front; the ciphertext body follows
+      // chunk by chunk, and the auth tag is appended last.
+      writeFileSync(outputFd, Buffer.concat([versionHeader, salt, iv]));
+
+      // Stream the plaintext in fixed-size chunks. The reuse buffer keeps
+      // peak memory proportional to the chunk size regardless of input size.
+      chunk = Buffer.alloc(this.SYNC_ENCRYPT_CHUNK_SIZE);
+      let inputOffset = 0;
+
+      while (inputOffset < totalBytes) {
+        const bytesToRead = Math.min(
+          this.SYNC_ENCRYPT_CHUNK_SIZE,
+          totalBytes - inputOffset
+        );
+        const bytesRead = readSync(inputFd, chunk, 0, bytesToRead, inputOffset);
+        if (bytesRead <= 0) {
+          // Should never happen given the bounds checks above; treat as a
+          // concurrently truncated or corrupted input file.
+          throw new CryptoError(
+            'Unexpected EOF while reading plaintext body',
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_READ_FAILED'
+          );
+        }
+        const inSlice =
+          bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead);
+        const outSlice = cipher.update(inSlice);
+        if (outSlice.length > 0) {
+          writeFileSync(outputFd, outSlice);
+        }
+        inputOffset += bytesRead;
+      }
+
+      // Finalize the cipher — for AES-GCM this returns an empty Buffer
+      // because CTR mode flushes on each update(), but we write it for
+      // completeness in case mode changes.
+      const finalBuf = cipher.final();
+      if (finalBuf.length > 0) {
+        writeFileSync(outputFd, finalBuf);
+      }
+
+      // Append the GCM auth tag. Must be called AFTER cipher.final().
       const tag = cipher.getAuthTag();
+      writeFileSync(outputFd, tag);
 
-      // Write header: [v1 header][salt][iv][encrypted][tag] in one file open
-      // to keep things atomic-ish before the rename. Three appends would
-      // multiply the chance of a partial-write window before rename, so we
-      // stage the full payload and write it once.
-      const fullPayload = Buffer.concat([
-        versionHeader,
-        salt,
-        iv,
-        encrypted,
-        tag,
-      ]);
-      writeFileSync(tempPath, fullPayload);
+      // Close the output file BEFORE the rename so Windows lets us replace
+      // the destination.
+      closeSync(outputFd);
+      outputFd = null;
+
+      // Close the input fd (holding it open through the rename is
+      // unnecessary). A failure here is benign — the input is read-only
+      // and all crypto + output writing has already succeeded; only an
+      // outputFd close failure (above) can indicate unflushed or corrupt
+      // output. Wrap best-effort so a rare EIO/EBADF cannot discard the
+      // completed temp file.
+      try {
+        closeSync(inputFd);
+      } catch {
+        // ignore — benign close failure on read-only input fd
+      }
+      inputFd = null;
 
       // Atomic rename — final outputPath now reflects the full ciphertext.
       this.atomicRenameSync(tempPath, outputPath);
@@ -2554,17 +2973,33 @@ export class CryptoManager {
       // Final progress event after the rename has succeeded.
       this.invokeProgress(progress, totalBytes, totalBytes);
 
-      // Clear sensitive data. `encrypted`, `tag`, and `fullPayload` are
-      // public ciphertext components rather than secret material, but the
-      // cipher's internal state lingers in those buffers until GC and
-      // clearing them keeps the sync encrypt path symmetric with the
-      // async one. See Task 14 (FIX.md Iteration 2) for rationale.
+      // Scrub the plaintext reuse buffer and the derived key.
+      this.secureClear(chunk);
       this.secureClear(key);
-      this.secureClear(inputData);
-      this.secureClear(encrypted);
-      this.secureClear(tag);
-      this.secureClear(fullPayload);
     } catch (error) {
+      // Scrub the plaintext reuse buffer if it was allocated before the
+      // failure — it may hold up to 64 KiB of user plaintext in heap.
+      if (chunk !== null) {
+        this.secureClear(chunk);
+      }
+      if (key !== null) {
+        this.secureClear(key);
+      }
+      // Make sure we drop any open file descriptors before unlinking.
+      if (outputFd !== null) {
+        try {
+          closeSync(outputFd);
+        } catch {
+          // ignore
+        }
+      }
+      if (inputFd !== null) {
+        try {
+          closeSync(inputFd);
+        } catch {
+          // ignore
+        }
+      }
       // Clean up the temp file. Never touch outputPath: it either was the
       // caller's pre-existing data (which we must not delete) or it never
       // got created.
@@ -2587,6 +3022,13 @@ export class CryptoManager {
       );
     }
   }
+
+  /**
+   * Chunk size used by the synchronous streaming encryption path. Matches
+   * `SYNC_DECRYPT_CHUNK_SIZE` and `fs.createReadStream`'s default
+   * `highWaterMark` so the two sync I/O paths are symmetric.
+   */
+  private readonly SYNC_ENCRYPT_CHUNK_SIZE = 64 * 1024;
 
   /**
    * Chunk size used by the synchronous streaming decryption path. 64 KiB is
@@ -2643,7 +3085,12 @@ export class CryptoManager {
     password?: string,
     progress?: ProgressCallback
   ): void {
-    if (!inputPath || !outputPath) {
+    if (
+      !inputPath ||
+      typeof inputPath !== 'string' ||
+      !outputPath ||
+      typeof outputPath !== 'string'
+    ) {
       throw new CryptoError(
         'Input path and output path are required',
         CryptoErrorType.INVALID_INPUT,
@@ -2664,15 +3111,23 @@ export class CryptoManager {
     let tempPath: string | null = null;
     let inputFd: number | null = null;
     let outputFd: number | null = null;
+    let key: Buffer | null = null;
 
     try {
-      // Check if input file exists
-      if (!existsSync(inputPath)) {
-        throw new CryptoError(
-          `Input file does not exist: ${inputPath}`,
-          CryptoErrorType.FILE_ERROR,
-          'INPUT_FILE_NOT_FOUND'
-        );
+      // Open the input first to eliminate the TOCTOU race between an
+      // existsSync check and the later openSync call. ENOENT is re-thrown
+      // as INPUT_FILE_NOT_FOUND; other errors propagate to the outer catch.
+      try {
+        inputFd = openSync(inputPath, 'r');
+      } catch (openErr) {
+        if ((openErr as Error & { code?: string }).code === 'ENOENT') {
+          throw new CryptoError(
+            `Input file does not exist: ${inputPath}`,
+            CryptoErrorType.FILE_ERROR,
+            'INPUT_FILE_NOT_FOUND'
+          );
+        }
+        throw openErr;
       }
 
       // Ensure output directory exists
@@ -2689,9 +3144,8 @@ export class CryptoManager {
         }
       }
 
-      // Open input read-only and stat it to get the total size.
-      inputFd = openSync(inputPath, 'r');
-      const stat = fstatSync(inputFd);
+      // Stat the already-open fd to get the total size (no second name lookup).
+      const stat = fstatSync(inputFd as number);
       const totalSize = stat.size;
 
       // Read the front of the file (up to v1 header + salt + iv) so we can
@@ -2702,13 +3156,7 @@ export class CryptoManager {
       const frontReadLen = Math.min(maxFrontLen, totalSize);
       const front = Buffer.alloc(frontReadLen);
       if (frontReadLen > 0) {
-        const bytesReadFront = readSync(
-          inputFd,
-          front,
-          0,
-          frontReadLen,
-          0
-        );
+        const bytesReadFront = readSync(inputFd, front, 0, frontReadLen, 0);
         if (bytesReadFront !== frontReadLen) {
           throw new CryptoError(
             'Failed to read full file header region',
@@ -2727,20 +3175,36 @@ export class CryptoManager {
       let headerForAad: Buffer | null = null;
 
       if (hasMagic(front)) {
-        if (front.length < HEADER_LENGTH) {
-          throw new CryptoError(
-            'File is too small to contain a valid v1 header',
-            CryptoErrorType.INVALID_INPUT,
-            'INVALID_ENCRYPTED_FILE_SIZE'
-          );
+        // See decryptText for the full magic-collision recovery rationale.
+        try {
+          if (front.length < HEADER_LENGTH) {
+            throw new CryptoError(
+              'File is too small to contain a valid v1 header',
+              CryptoErrorType.INVALID_INPUT,
+              'INVALID_ENCRYPTED_FILE_SIZE'
+            );
+          }
+          const parsed = parseHeader(front);
+          this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
+          if (parsed.params.kind === 'pbkdf2-sha256') {
+            pbkdf2Iterations = parsed.params.iterations;
+          }
+          formatHeaderLen = parsed.headerLen;
+          headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
+        } catch (headerParseErr) {
+          if (this.legacyMode !== 'auto') {
+            throw headerParseErr;
+          }
+          if (
+            headerParseErr instanceof CryptoError &&
+            headerParseErr.code === 'KDF_PARAMS_OUT_OF_BOUNDS'
+          ) {
+            throw headerParseErr;
+          }
+          // auto: v0 fallback — headerForAad stays null;
+          // pbkdf2Iterations stays at this.legacyPbkdf2Iterations.
+          formatHeaderLen = 0;
         }
-        const parsed = parseHeader(front);
-        this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
-        if (parsed.params.kind === 'pbkdf2-sha256') {
-          pbkdf2Iterations = parsed.params.iterations;
-        }
-        formatHeaderLen = parsed.headerLen;
-        headerForAad = Buffer.from(front.subarray(0, formatHeaderLen));
       } else {
         this.enforceLegacyMode();
         formatHeaderLen = 0;
@@ -2772,13 +3236,7 @@ export class CryptoManager {
       // Read the trailing auth tag from the end of the file.
       const tag = Buffer.alloc(this.tagLength);
       const tagOffset = totalSize - this.tagLength;
-      const tagBytesRead = readSync(
-        inputFd,
-        tag,
-        0,
-        this.tagLength,
-        tagOffset
-      );
+      const tagBytesRead = readSync(inputFd, tag, 0, this.tagLength, tagOffset);
       if (tagBytesRead !== this.tagLength) {
         throw new CryptoError(
           'Failed to read full auth tag from file',
@@ -2788,7 +3246,7 @@ export class CryptoManager {
       }
 
       // Derive key (synchronous, PBKDF2).
-      const key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
 
       // Allocate temp path and open it for writing.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -2881,9 +3339,17 @@ export class CryptoManager {
       closeSync(outputFd);
       outputFd = null;
 
-      // Close input handle (keeping it open through the rename below is
-      // unnecessary).
-      closeSync(inputFd);
+      // Close the input handle (keeping it open through the rename below
+      // is unnecessary). A failure here is benign — the input is
+      // read-only and authentication + output writing have already
+      // succeeded; only an outputFd close failure (above) can indicate
+      // data loss. Wrap best-effort so a rare EIO/EBADF cannot discard
+      // the validated plaintext temp file.
+      try {
+        closeSync(inputFd);
+      } catch {
+        // ignore — benign close failure on read-only input fd
+      }
       inputFd = null;
 
       // Atomic rename — promotes the validated plaintext to the canonical
@@ -2905,6 +3371,9 @@ export class CryptoManager {
       this.secureClear(iv);
       this.secureClear(tag);
     } catch (error) {
+      if (key !== null) {
+        this.secureClear(key);
+      }
       // Make sure we drop any open file descriptors before unlinking.
       if (outputFd !== null) {
         try {

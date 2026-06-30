@@ -30,21 +30,16 @@ import {
   getFileInfo,
 } from '../utils';
 import { CryptoError, CryptoErrorType } from '../types';
-import { CryptoManager } from '../crypto-manager';
+import { CryptoManager, isValidPassword } from '../crypto-manager';
 import { writeFile, unlink } from 'node:fs/promises';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import nodeCrypto from 'node:crypto';
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Created once in beforeAll
-// and torn down in afterAll; every per-test directory join still uses
-// `tempDir` as before so the rest of the test code is unchanged.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-utils-${nodeCrypto.randomBytes(8).toString('hex')}`
-);
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix — the CodeQL-approved secure pattern
+// for temp-directory creation.
+const TEST_DIR = mkdtempSync(path.join(os.tmpdir(), 'hiprax-crypto-utils-'));
 
 describe('Utils', () => {
   const tempDir = TEST_DIR;
@@ -124,6 +119,35 @@ describe('Utils', () => {
     it('should reject path traversal attempts', () => {
       expect(validatePath('../secret.txt').isValid).toBe(false);
       expect(validatePath('path/../../secret.txt').isValid).toBe(false);
+    });
+
+    it('should reject Windows drive-relative path traversal (C:.. bypass)', () => {
+      // These inputs are Windows-specific: 'C:..\\Windows\\foo', 'C:foo\\..\\..\\bar',
+      // and 'C:..' are drive-relative paths where path.normalize keeps '..' glued
+      // to the drive specifier ('C:..') instead of producing a standalone '..'
+      // segment. Previously the strict /^[a-zA-Z]:$/ drive-strip missed 'C:..'
+      // and the exact includes('..') check failed, so all three wrongly returned
+      // isValid:true. The fix strips the 'C:' prefix before the '..' scan.
+      if (process.platform !== 'win32') return;
+      const bs = String.fromCharCode(92); // backslash (avoids shell-escaping ambiguity)
+      const r1 = validatePath('C:..' + bs + 'Windows' + bs + 'foo');
+      expect(r1.isValid).toBe(false);
+      expect(r1.error).toBe('Path traversal is not allowed');
+
+      const r2 = validatePath('C:foo' + bs + '..' + bs + '..' + bs + 'bar');
+      expect(r2.isValid).toBe(false);
+      expect(r2.error).toBe('Path traversal is not allowed');
+
+      const r3 = validatePath('C:..');
+      expect(r3.isValid).toBe(false);
+      expect(r3.error).toBe('Path traversal is not allowed');
+    });
+
+    it('should still accept a legitimate absolute Windows path after the drive-strip fix', () => {
+      if (process.platform !== 'win32') return;
+      const bs = String.fromCharCode(92);
+      const r = validatePath('C:' + bs + 'Users' + bs + 'foo');
+      expect(r.isValid).toBe(true);
     });
 
     it('should reject invalid input', () => {
@@ -265,9 +289,7 @@ describe('Utils', () => {
       } catch (err) {
         expect(err).toBeInstanceOf(CryptoError);
         expect((err as CryptoError).code).toBe('FILE_SIZE_TOO_LARGE');
-        expect((err as CryptoError).type).toBe(
-          CryptoErrorType.INVALID_INPUT
-        );
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
       }
     });
 
@@ -313,6 +335,23 @@ describe('Utils', () => {
       expect(getFileExtension('file.backup.txt')).toBe('.txt');
       expect(getFileExtension('file.name.with.dots.txt')).toBe('.txt');
     });
+
+    it('should throw CryptoError for non-string input (Phase 1 guard)', () => {
+      // Non-string input previously threw a raw Node TypeError; now throws
+      // a typed CryptoError consistent with the rest of the utils contract.
+      const nonStrings: unknown[] = [123, null, undefined, {}, []];
+      for (const val of nonStrings) {
+        let err: unknown;
+        try {
+          getFileExtension(val as string);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_INPUT');
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
+    });
   });
 
   describe('isTextFile', () => {
@@ -334,6 +373,21 @@ describe('Utils', () => {
       expect(isTextFile('file.TXT')).toBe(true);
       expect(isTextFile('file.MD')).toBe(true);
       expect(isTextFile('file.JSON')).toBe(true);
+    });
+
+    it('should throw CryptoError for non-string input (Phase 1 guard)', () => {
+      const nonStrings: unknown[] = [123, null, undefined, {}];
+      for (const val of nonStrings) {
+        let err: unknown;
+        try {
+          isTextFile(val as string);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_INPUT');
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
     });
   });
 
@@ -490,10 +544,7 @@ describe('Utils', () => {
     it('should validate output from CryptoManager encryptTextSync', () => {
       // The library outputs base64url, so encrypted text should be valid
       const cm = new CryptoManager();
-      const encrypted = cm.encryptTextSync(
-        'test data',
-        'MySecureP@ssw0rd123!'
-      );
+      const encrypted = cm.encryptTextSync('test data', 'MySecureP@ssw0rd123!');
       expect(isValidBase64Url(encrypted)).toBe(true);
     });
 
@@ -778,11 +829,7 @@ describe('Utils', () => {
       const fn = jest
         .fn()
         .mockRejectedValueOnce(
-          new CryptoError(
-            'Disk full',
-            CryptoErrorType.FILE_ERROR,
-            'DISK_FULL'
-          )
+          new CryptoError('Disk full', CryptoErrorType.FILE_ERROR, 'DISK_FULL')
         )
         .mockResolvedValue('recovered');
 
@@ -1149,6 +1196,62 @@ describe('Utils', () => {
     });
   });
 
+  describe('createProgressBar - robustness (Phase 1 hardening)', () => {
+    // All edge cases must return a well-formed "[...] N%" string and never throw.
+    const wellFormed = /^\[.*\] \d+%$/;
+
+    it('should clamp negative current to 0% without throwing', () => {
+      const result = createProgressBar(-5, 10);
+      expect(result).toMatch(wellFormed);
+      expect(result).toBe('[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%');
+    });
+
+    it('should fall back to default width (30) for negative width without throwing', () => {
+      // -3 is not a positive integer → width falls back to 30
+      const result = createProgressBar(5, 10, -3);
+      expect(result).toMatch(wellFormed);
+      expect(result).toMatch(/\[.{30}\] 50%/);
+    });
+
+    it('should treat NaN current as 0 progress without throwing or emitting NaN', () => {
+      const result = createProgressBar(NaN, 10);
+      expect(result).toMatch(wellFormed);
+      expect(result).not.toContain('NaN');
+      expect(result).toBe('[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%');
+    });
+
+    it('should treat Infinity current as 0 progress without throwing', () => {
+      const result = createProgressBar(Infinity, 10);
+      expect(result).toMatch(wellFormed);
+      expect(result).toBe('[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%');
+    });
+
+    it('should fall back to default width for non-integer width without throwing', () => {
+      // 15.5 is not an integer → falls back to 30
+      const result = createProgressBar(5, 10, 15.5);
+      expect(result).toMatch(wellFormed);
+      expect(result).toMatch(/\[.{30}\] 50%/);
+    });
+
+    it('should fall back to default width for zero width without throwing', () => {
+      // 0 is not positive → falls back to 30
+      const result = createProgressBar(5, 10, 0);
+      expect(result).toMatch(wellFormed);
+      expect(result).toMatch(/\[.{30}\] 50%/);
+    });
+
+    // Regression: existing happy-path behaviors must be unchanged
+    it('should preserve happy-path output exactly', () => {
+      expect(createProgressBar(50, 100)).toMatch(/\[.*\] 50%/);
+      expect(createProgressBar(0, 100)).toMatch(/\[░{30}\] 0%/);
+      expect(createProgressBar(100, 100)).toMatch(/\[█{30}\] 100%/);
+      expect(createProgressBar(150, 100)).toMatch(/\[.*\] 100%/);
+      expect(createProgressBar(10, 0)).toBe(
+        '[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0%'
+      );
+    });
+  });
+
   describe('validatePasswordStrength - additional cases', () => {
     it('should give higher score for longer passwords', () => {
       // Short password (8 chars) gets score of 1 for length
@@ -1209,6 +1312,59 @@ describe('Utils', () => {
     });
   });
 
+  // -----------------------------------------------------------------
+  // Phase 4 (pw-parity): validatePasswordStrength.isValid must agree
+  // exactly with isValidPassword across all inputs. Repeat-character
+  // penalties (score/feedback) must NOT affect isValid.
+  // -----------------------------------------------------------------
+  describe('validatePasswordStrength ⟷ isValidPassword parity', () => {
+    it('isValid must equal isValidPassword for every input in the battery', () => {
+      // Battery covers the two regression cases plus representative
+      // accept/reject inputs for both acceptance rules.
+      const battery: Array<string | null> = [
+        // Regression: repeat-char penalties previously flipped isValid vs isValidPassword
+        'Aaaa1234_', // repeat 'aaa' — isValidPassword=true, old isValid was false
+        'Passw0rd!!!', // repeat '!!!' — isValidPassword=true, old isValid was false
+        // 8+ chars, all 4 categories, has repeats — still valid
+        'Ab1!aaaa',
+        // Cases isValidPassword rejects
+        'aaaaaaaa', // 8 lower-only, no upper/digit/special
+        'short1!', // 7 chars — too short
+        '', // empty string
+        // Passphrase rule: 20 lowercase 'a's
+        'aaaaaaaaaaaaaaaaaaaa',
+        // 8 chars, all 4 categories, no repeats
+        'Ab1!dcef',
+      ];
+      expect.assertions(battery.length + 1); // +1 for the null case below
+      for (const pw of battery) {
+        expect(validatePasswordStrength(pw as string).isValid).toBe(
+          isValidPassword(pw as string)
+        );
+      }
+      // Non-string: both functions must return false
+      expect(validatePasswordStrength(null as unknown as string).isValid).toBe(
+        isValidPassword(null as unknown as string)
+      );
+    });
+
+    it('regression: Aaaa1234_ is valid under both validators', () => {
+      expect(validatePasswordStrength('Aaaa1234_').isValid).toBe(true);
+      expect(isValidPassword('Aaaa1234_')).toBe(true);
+    });
+
+    it('regression: Passw0rd!!! is valid under both validators', () => {
+      expect(validatePasswordStrength('Passw0rd!!!').isValid).toBe(true);
+      expect(isValidPassword('Passw0rd!!!')).toBe(true);
+    });
+
+    it('repeat-char feedback does not affect isValid when acceptance rules are met', () => {
+      const result = validatePasswordStrength('Aaaa1234_');
+      expect(result.isValid).toBe(true);
+      expect(result.feedback).toContain('Avoid repeated characters');
+    });
+  });
+
   describe('sha256 - additional cases', () => {
     it('should produce consistent results', () => {
       const hash1 = sha256('same input');
@@ -1226,6 +1382,23 @@ describe('Utils', () => {
       const hash = sha256('日本語テスト');
       expect(hash).toHaveLength(64);
       expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('should throw CryptoError for non-string input (Phase 1 guard)', () => {
+      // Previously threw a raw Node TypeError; now throws a typed CryptoError
+      // matching the library's "all errors are CryptoError" contract.
+      const nonStrings: unknown[] = [123, null, undefined, {}, []];
+      for (const val of nonStrings) {
+        let err: unknown;
+        try {
+          sha256(val as string);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_INPUT');
+        expect((err as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
     });
   });
 
@@ -1337,9 +1510,9 @@ describe('Utils', () => {
       // overreach onto valid printable content.
       expect(validatePath('plain/path/file.txt').isValid).toBe(true);
       expect(validatePath('file with spaces.txt').isValid).toBe(true);
-      expect(validatePath('file_with_underscores-and-hyphens.txt').isValid).toBe(
-        true
-      );
+      expect(
+        validatePath('file_with_underscores-and-hyphens.txt').isValid
+      ).toBe(true);
     });
 
     it('should accept path containing high-codepoint Unicode (>= 0x80)', () => {

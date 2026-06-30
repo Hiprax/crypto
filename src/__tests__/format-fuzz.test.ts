@@ -86,6 +86,11 @@ function assertWellFormedParseResult(result: ParsedHeader): void {
       expect(result.params.timeCost).toBeGreaterThan(0);
       expect(Number.isInteger(result.params.parallelism)).toBe(true);
       expect(result.params.parallelism).toBeGreaterThan(0);
+      // parseHeader now enforces the RFC 9106 §3.1 cross-field floor:
+      // any successfully-parsed Argon2id header guarantees this invariant.
+      expect(result.params.memoryCost).toBeGreaterThanOrEqual(
+        8 * result.params.parallelism
+      );
     }
   } else {
     expect(result.params.kind).toBe('pbkdf2-sha256');
@@ -301,28 +306,25 @@ describe('parseHeader fuzzing harness (Task 12)', () => {
       // case from there. inspectHeader rejects an EMPTY string up-front
       // with INVALID_INPUT independent of the encoding.
       fc.assert(
-        fc.property(
-          fc.string({ minLength: 1, maxLength: 2048 }),
-          str => {
-            const outcome = safelyRun(() => cm.inspectHeader(str));
-            if (outcome.ok) {
-              if (outcome.value === null) return;
-              assertWellFormedParseResult(outcome.value);
-            } else {
-              expect(outcome.error).toBeInstanceOf(CryptoError);
-              const err = outcome.error as CryptoError;
-              // INVALID_INPUT and INVALID_BASE64URL are the
-              // inspectHeader-specific codes; other codes come from
-              // parseHeader's set.
-              const allowedCodes = new Set([
-                ...KNOWN_PARSE_ERROR_CODES,
-                'INVALID_INPUT',
-                'INVALID_BASE64URL',
-              ]);
-              expect(allowedCodes.has(err.code)).toBe(true);
-            }
+        fc.property(fc.string({ minLength: 1, maxLength: 2048 }), str => {
+          const outcome = safelyRun(() => cm.inspectHeader(str));
+          if (outcome.ok) {
+            if (outcome.value === null) return;
+            assertWellFormedParseResult(outcome.value);
+          } else {
+            expect(outcome.error).toBeInstanceOf(CryptoError);
+            const err = outcome.error as CryptoError;
+            // INVALID_INPUT and INVALID_BASE64URL are the
+            // inspectHeader-specific codes; other codes come from
+            // parseHeader's set.
+            const allowedCodes = new Set([
+              ...KNOWN_PARSE_ERROR_CODES,
+              'INVALID_INPUT',
+              'INVALID_BASE64URL',
+            ]);
+            expect(allowedCodes.has(err.code)).toBe(true);
           }
-        ),
+        }),
         FUZZ_CONFIG
       );
     });

@@ -40,21 +40,25 @@
 import { describe, it, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import fc from 'fast-check';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { CryptoManager } from '../crypto-manager';
 import { CryptoError } from '../types';
 
-// Unique per-suite scratch directory so concurrent jest workers / repeated
-// runs cannot collide on file paths (Task 21). Created once in beforeAll
-// and torn down in afterAll. Sub-tests that need their own scratch dir
-// nest under TEST_DIR rather than os.tmpdir() directly.
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `hiprax-crypto-property-${crypto.randomBytes(8).toString('hex')}`
-);
+// Unique per-suite scratch directory. mkdtempSync creates the directory
+// atomically with a random suffix — the CodeQL-approved secure pattern
+// for temp-directory creation. Sub-tests nest under TEST_DIR.
+const TEST_DIR = mkdtempSync(path.join(os.tmpdir(), 'hiprax-crypto-property-'));
 
 // ----------------------------------------------------------------------------
 // Test-only low-cost crypto config.
@@ -69,9 +73,7 @@ const TEST_DIR = path.join(
 // embedded in the v1 ciphertext header, so subsequent decryption with the
 // same instance works correctly). 10 000 iterations is well below
 // production guidance but keeps the property suite responsive.
-function makeFastCrypto(opts?: {
-  defaultPassphrase?: string;
-}): CryptoManager {
+function makeFastCrypto(opts?: { defaultPassphrase?: string }): CryptoManager {
   return new CryptoManager({
     memoryCost: 2 ** 14, // 16 MiB
     timeCost: 1,
@@ -121,7 +123,8 @@ const FC_CONFIG_CHEAP: fc.Parameters = {
 //
 // Texts: include unicode, but keep length bounded — encryption itself is
 // O(n) so very large texts mostly just slow the suite without revealing
-// new bugs. The CryptoManager rejects empty strings, so set minLength=1.
+// new bugs. Empty-string plaintext is exercised by dedicated unit tests, so
+// these property runs use minLength=1 to keep coverage on non-trivial inputs.
 //
 // Passwords: hand-rolled arbitrary that constructs strings always
 // satisfying the password-strength validator. Filtering with
@@ -131,9 +134,10 @@ const FC_CONFIG_CHEAP: fc.Parameters = {
 // gives uniform coverage of the password-rule space.
 
 /**
- * Bounded UTF-8 text arbitrary. We exclude the empty string and cap at
- * 200 characters — long enough to span multiple AES blocks, short enough
- * not to dominate the suite's wall-clock.
+ * Bounded UTF-8 text arbitrary. We start at minLength=1 (the empty string
+ * is covered by dedicated unit tests) and cap at 200 characters — long
+ * enough to span multiple AES blocks, short enough not to dominate the
+ * suite's wall-clock.
  *
  * We use `oneof` to mix in BOTH ASCII (the default `fc.string()` unit) and
  * arbitrary unicode codepoints (`unit: 'binary'`). Without the unicode
@@ -158,11 +162,7 @@ const arbText = fc
   // text` is the canonical "round-trips through UTF-8" check — unpaired
   // surrogates fail this and would spuriously fail the round-trip
   // property even if encryption is correct.
-  .filter(
-    s =>
-      s.length > 0 &&
-      Buffer.from(s, 'utf8').toString('utf8') === s
-  );
+  .filter(s => s.length > 0 && Buffer.from(s, 'utf8').toString('utf8') === s);
 
 /**
  * Hand-curated strong-password arbitrary.
@@ -305,6 +305,89 @@ describe('property-based tests (Task 19)', () => {
       } finally {
         // Best-effort cleanup of the per-test scratch dir.
         const { rm } = await import('node:fs/promises');
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('sync file path: decryptFileSync(encryptFileSync(buf, p), p) reproduces input bytes', async () => {
+      // Per-test scratch directory nested under TEST_DIR.
+      const dir = path.join(
+        TEST_DIR,
+        `sync-file-rt-${crypto.randomBytes(8).toString('hex')}`
+      );
+      const inputPath = path.join(dir, 'in.bin');
+      const encryptedPath = path.join(dir, 'enc.bin');
+      const decryptedPath = path.join(dir, 'dec.bin');
+      const { mkdir, rm } = await import('node:fs/promises');
+      await mkdir(dir, { recursive: true });
+
+      // 64 KiB matches SYNC_ENCRYPT_CHUNK_SIZE / SYNC_DECRYPT_CHUNK_SIZE.
+      // Three size classes exercise the full chunking boundary space:
+      //   - empty   (0 bytes)       — cipher produces header+salt+iv+final()+tag only
+      //   - sub-chunk (1..CHUNK-1)  — single partial chunk
+      //   - multi-chunk (CHUNK+1..2*CHUNK+1) — at least two full iterations of the loop
+      const SYNC_CHUNK = 65536;
+      const arbSyncPlaintext = fc.oneof(
+        { weight: 1, arbitrary: fc.constant(new Uint8Array(0)) },
+        {
+          weight: 3,
+          arbitrary: fc.uint8Array({ minLength: 1, maxLength: SYNC_CHUNK - 1 }),
+        },
+        {
+          weight: 1,
+          arbitrary: fc.uint8Array({
+            minLength: SYNC_CHUNK + 1,
+            maxLength: SYNC_CHUNK * 2 + 1,
+          }),
+        }
+      );
+
+      // Valid pbkdf2Iterations within bounds; kept low for suite speed.
+      const arbPbkdf2Iters = fc.integer({ min: 1_000, max: 10_000 });
+
+      try {
+        await fc.assert(
+          fc.asyncProperty(
+            arbSyncPlaintext,
+            arbStrongPassword,
+            arbPbkdf2Iters,
+            async (plaintext, pwd, pbkdf2Iterations) => {
+              // Create a fresh CryptoManager with the given pbkdf2Iterations.
+              // The iteration count is embedded in the v1 ciphertext header by
+              // encryptFileSync and read back by decryptFileSync, so the same
+              // instance correctly round-trips at any valid iteration count.
+              const cm = new CryptoManager({
+                memoryCost: 2 ** 14,
+                timeCost: 1,
+                parallelism: 1,
+                pbkdf2Iterations,
+              });
+              const inputBuf = Buffer.from(plaintext);
+              writeFileSync(inputPath, inputBuf);
+              cm.encryptFileSync(inputPath, encryptedPath, pwd);
+              cm.decryptFileSync(encryptedPath, decryptedPath, pwd);
+              const out = readFileSync(decryptedPath);
+              // Hash-compare for large multi-chunk buffers.
+              const hashIn = crypto
+                .createHash('sha256')
+                .update(inputBuf)
+                .digest('hex');
+              const hashOut = crypto
+                .createHash('sha256')
+                .update(out)
+                .digest('hex');
+              expect(hashOut).toBe(hashIn);
+              // Cleanup between runs so each iteration starts fresh.
+              for (const f of [inputPath, encryptedPath, decryptedPath]) {
+                if (existsSync(f)) unlinkSync(f);
+              }
+            }
+          ),
+          // 20 runs covers all three size classes (1:3:1 weighting gives
+          // ~4 empty + 12 sub-chunk + 4 multi-chunk per 20 cases).
+          { numRuns: 20, endOnFailure: true }
+        );
+      } finally {
         await rm(dir, { recursive: true, force: true });
       }
     });
@@ -642,9 +725,11 @@ describe('property-based tests (Task 19)', () => {
       const inputPath = path.join(dir, 'in.bin');
       const encryptedPath = path.join(dir, 'enc.bin');
       const decryptedPath = path.join(dir, 'dec.bin');
-      const { mkdir, writeFile: writeFileAsync, rm } = await import(
-        'node:fs/promises'
-      );
+      const {
+        mkdir,
+        writeFile: writeFileAsync,
+        rm,
+      } = await import('node:fs/promises');
       await mkdir(dir, { recursive: true });
 
       try {

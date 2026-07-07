@@ -6651,6 +6651,8 @@ describe('CryptoManager', () => {
           const encPath = scratch('async-enc');
           const decPath = scratch('async-dec');
           const failDecPath = scratch('async-faildec');
+          const boundEncPath = scratch('async-boundenc');
+          const boundFailDecPath = scratch('async-boundfaildec');
 
           try {
             writeFileSync(inputPath, 'legacyHeaderAad async file payload.');
@@ -6671,8 +6673,25 @@ describe('CryptoManager', () => {
               type: CryptoErrorType.DECRYPTION_FAILED,
             });
             expect(existsSync(failDecPath)).toBe(false);
+
+            // And the reverse: a bound (default-produced) ciphertext must
+            // NOT decrypt on the legacyHeaderAad manager.
+            await cmBound.encryptFile(inputPath, boundEncPath, testPassword);
+            await expect(
+              cmLegacy.decryptFile(boundEncPath, boundFailDecPath, testPassword)
+            ).rejects.toMatchObject({
+              type: CryptoErrorType.DECRYPTION_FAILED,
+            });
+            expect(existsSync(boundFailDecPath)).toBe(false);
           } finally {
-            cleanup(inputPath, encPath, decPath, failDecPath);
+            cleanup(
+              inputPath,
+              encPath,
+              decPath,
+              failDecPath,
+              boundEncPath,
+              boundFailDecPath
+            );
           }
         }, 30_000);
 
@@ -6687,6 +6706,8 @@ describe('CryptoManager', () => {
           const encPath = scratch('sync-enc');
           const decPath = scratch('sync-dec');
           const failDecPath = scratch('sync-faildec');
+          const boundEncPath = scratch('sync-boundenc');
+          const boundFailDecPath = scratch('sync-boundfaildec');
 
           try {
             writeFileSync(inputPath, 'legacyHeaderAad sync file payload.');
@@ -6712,8 +6733,34 @@ describe('CryptoManager', () => {
               CryptoErrorType.DECRYPTION_FAILED
             );
             expect(existsSync(failDecPath)).toBe(false);
+
+            // And the reverse: a bound (default-produced) ciphertext must
+            // NOT decrypt on the legacyHeaderAad manager.
+            cmBound.encryptFileSync(inputPath, boundEncPath, testPassword);
+            let thrownReverse: unknown;
+            try {
+              cmLegacy.decryptFileSync(
+                boundEncPath,
+                boundFailDecPath,
+                testPassword
+              );
+            } catch (err) {
+              thrownReverse = err;
+            }
+            expect(thrownReverse).toBeInstanceOf(CryptoError);
+            expect((thrownReverse as CryptoError).type).toBe(
+              CryptoErrorType.DECRYPTION_FAILED
+            );
+            expect(existsSync(boundFailDecPath)).toBe(false);
           } finally {
-            cleanup(inputPath, encPath, decPath, failDecPath);
+            cleanup(
+              inputPath,
+              encPath,
+              decPath,
+              failDecPath,
+              boundEncPath,
+              boundFailDecPath
+            );
           }
         });
       });

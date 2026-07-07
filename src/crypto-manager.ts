@@ -1078,6 +1078,48 @@ export class CryptoManager {
   }
 
   /**
+   * Re-type a key-derivation failure that surfaced during a DECRYPT
+   * operation so it carries `DECRYPTION_FAILED` instead of the
+   * direction-neutral `ENCRYPTION_FAILED` produced by `deriveKey` /
+   * `deriveKeySync`.
+   *
+   * The KDF methods are public, direction-agnostic API: a direct
+   * `deriveKey`/`deriveKeySync` call is neither an encrypt nor a decrypt, so
+   * they keep their historical `ENCRYPTION_FAILED` typing. Only the four
+   * decrypt call sites re-map, at the call site, because that is where we
+   * actually know the operation is a decryption. Doing the re-map here rather
+   * than inside the KDF preserves the KDF methods' contract and their
+   * direct-call tests.
+   *
+   * Only the two derivation-failure shapes are re-typed:
+   * `ENCRYPTION_FAILED` + (`KEY_DERIVATION_FAILED` | `SYNC_KEY_DERIVATION_FAILED`).
+   * The `.code` is preserved so callers keying on `.code` are unaffected;
+   * only the `.type` category is corrected. Everything else passes through
+   * untouched — in particular `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`)
+   * and `INVALID_SALT` / `INVALID_PASSWORD` (type `INVALID_INPUT`), which are
+   * already correctly typed.
+   *
+   * @param error - The value thrown by a decrypt-path key derivation call.
+   * @returns The original error, or a re-typed `CryptoError` when it is a
+   *   derivation failure.
+   */
+  private remapKdfErrorForDecryption(error: unknown): unknown {
+    if (
+      error instanceof CryptoError &&
+      error.type === CryptoErrorType.ENCRYPTION_FAILED &&
+      (error.code === 'KEY_DERIVATION_FAILED' ||
+        error.code === 'SYNC_KEY_DERIVATION_FAILED')
+    ) {
+      return new CryptoError(
+        error.message,
+        CryptoErrorType.DECRYPTION_FAILED,
+        error.code
+      );
+    }
+    return error;
+  }
+
+  /**
    * Encrypt data using AES-256-GCM.
    *
    * @security **(key, iv) reuse is catastrophic.** AES-GCM provides
@@ -1706,8 +1748,13 @@ export class CryptoManager {
       const encrypted = combined.subarray(dataStart);
 
       // Derive key from password (use embedded params if present so we can
-      // decrypt ciphertext produced by an instance with different defaults)
-      key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      // decrypt ciphertext produced by an instance with different defaults).
+      // Re-type any KDF failure to DECRYPTION_FAILED — this is a decrypt op.
+      try {
+        key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      } catch (err) {
+        throw this.remapKdfErrorForDecryption(err);
+      }
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
@@ -1941,8 +1988,13 @@ export class CryptoManager {
       const tag = combined.subarray(tagStart, dataStart);
       const encrypted = combined.subarray(dataStart);
 
-      // Derive key from password (synchronous)
-      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      // Derive key from password (synchronous). Re-type any KDF failure to
+      // DECRYPTION_FAILED — this is a decrypt op.
+      try {
+        key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      } catch (err) {
+        throw this.remapKdfErrorForDecryption(err);
+      }
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
@@ -2572,8 +2624,13 @@ export class CryptoManager {
       const bodyEnd = totalSize - this.tagLength; // exclusive
       const bodyLen = bodyEnd - bodyStart;
 
-      // Derive key from password (use embedded params if v1).
-      key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      // Derive key from password (use embedded params if v1). Re-type any
+      // KDF failure to DECRYPTION_FAILED — this is a decrypt op.
+      try {
+        key = await this.deriveKey(finalPassword, salt, argonOverrides);
+      } catch (err) {
+        throw this.remapKdfErrorForDecryption(err);
+      }
 
       // Allocate a sibling temp path; only rename on success.
       tempPath = this.buildTempOutputPath(outputPath);
@@ -3245,8 +3302,13 @@ export class CryptoManager {
         );
       }
 
-      // Derive key (synchronous, PBKDF2).
-      key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      // Derive key (synchronous, PBKDF2). Re-type any KDF failure to
+      // DECRYPTION_FAILED — this is a decrypt op.
+      try {
+        key = this.deriveKeySync(finalPassword, salt, pbkdf2Iterations);
+      } catch (err) {
+        throw this.remapKdfErrorForDecryption(err);
+      }
 
       // Allocate temp path and open it for writing.
       tempPath = this.buildTempOutputPath(outputPath);

@@ -3323,6 +3323,165 @@ describe('CryptoManager', () => {
     });
   });
 
+  describe('KDF failure during decryption surfaces DECRYPTION_FAILED', () => {
+    // Verifies the decrypt-path error remap: when key derivation throws
+    // during a DECRYPT operation, the surfaced CryptoError must carry
+    // `type === DECRYPTION_FAILED` (correct category for the operation) while
+    // preserving the original `.code`. Direct KDF calls (encrypt-neutral API)
+    // keep their `ENCRYPTION_FAILED` typing — see the guard-rail tests.
+    //
+    // Spies are installed only AFTER the valid ciphertext is produced, since
+    // encryption also calls the same KDF; installing earlier would corrupt
+    // the ciphertext-under-test.
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    // --- Async paths (Argon2id, Task 1.2) ---
+
+    it('decryptText surfaces DECRYPTION_FAILED + KEY_DERIVATION_FAILED', async () => {
+      const mgr = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      const encrypted = await mgr.encryptText(testText, testPassword);
+
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('simulated KDF failure'));
+
+      expect.assertions(3);
+      try {
+        await mgr.decryptText(encrypted, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+    });
+
+    it('decryptFile surfaces DECRYPTION_FAILED + KEY_DERIVATION_FAILED and leaves no partial output', async () => {
+      const mgr = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      const plainPath = path.join(tempDir, 'kdf-fail-async.txt');
+      const encPath = path.join(tempDir, 'kdf-fail-async.bin');
+      const outPath = path.join(tempDir, 'kdf-fail-async.out');
+      await writeFile(plainPath, testText, 'utf8');
+      await mgr.encryptFile(plainPath, encPath, testPassword);
+
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('simulated KDF failure'));
+
+      expect.assertions(4);
+      try {
+        await mgr.decryptFile(encPath, outPath, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+      expect(existsSync(outPath)).toBe(false);
+    });
+
+    it('guard-rail: direct deriveKey still surfaces ENCRYPTION_FAILED', async () => {
+      const mgr = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('simulated KDF failure'));
+
+      const salt = mgr.generateSecureRandom(32);
+      expect.assertions(3);
+      try {
+        await mgr.deriveKey(testPassword, salt);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.ENCRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+    });
+
+    // --- Sync paths (PBKDF2, Task 1.3) ---
+
+    it('decryptTextSync surfaces DECRYPTION_FAILED + SYNC_KEY_DERIVATION_FAILED', () => {
+      const mgr = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const encrypted = mgr.encryptTextSync(testText, testPassword);
+
+      jest.spyOn(nodeCrypto, 'pbkdf2Sync').mockImplementation(((): never => {
+        throw new Error('simulated PBKDF2 failure');
+      }) as unknown as typeof nodeCrypto.pbkdf2Sync);
+
+      expect.assertions(3);
+      try {
+        mgr.decryptTextSync(encrypted, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
+      }
+    });
+
+    it('decryptFileSync surfaces DECRYPTION_FAILED + SYNC_KEY_DERIVATION_FAILED and leaves no partial output', () => {
+      const mgr = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const plainPath = path.join(tempDir, 'kdf-fail-sync.txt');
+      const encPath = path.join(tempDir, 'kdf-fail-sync.bin');
+      const outPath = path.join(tempDir, 'kdf-fail-sync.out');
+      writeFileSync(plainPath, testText, 'utf8');
+      mgr.encryptFileSync(plainPath, encPath, testPassword);
+
+      jest.spyOn(nodeCrypto, 'pbkdf2Sync').mockImplementation(((): never => {
+        throw new Error('simulated PBKDF2 failure');
+      }) as unknown as typeof nodeCrypto.pbkdf2Sync);
+
+      expect.assertions(4);
+      try {
+        mgr.decryptFileSync(encPath, outPath, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
+      }
+      expect(existsSync(outPath)).toBe(false);
+    });
+
+    it('guard-rail: direct deriveKeySync still surfaces ENCRYPTION_FAILED', () => {
+      const mgr = new CryptoManager({ pbkdf2Iterations: 1000 });
+      jest.spyOn(nodeCrypto, 'pbkdf2Sync').mockImplementation(((): never => {
+        throw new Error('simulated PBKDF2 failure');
+      }) as unknown as typeof nodeCrypto.pbkdf2Sync);
+
+      const salt = mgr.generateSecureRandom(32);
+      expect.assertions(3);
+      try {
+        mgr.deriveKeySync(testPassword, salt);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.ENCRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
+      }
+    });
+  });
+
   describe('encryptData - internal error wrapping', () => {
     // Same Task 22 rationale as the deriveKeySync block above.
     afterEach(() => {
@@ -6405,6 +6564,205 @@ describe('CryptoManager', () => {
         // the option's default (or removing it) is loud.
         const result = await cmLegacy.decryptText(tampered, testPassword);
         expect(result).toBe(testText);
+      });
+
+      // --- Task 3.1: sync-text coverage -------------------------------
+      describe('sync text (PBKDF2)', () => {
+        it('round-trips encryptTextSync/decryptTextSync under legacyHeaderAad: true', () => {
+          const cmLegacy = new CryptoManager({
+            pbkdf2Iterations: 1000,
+            legacyHeaderAad: true,
+          });
+          const enc = cmLegacy.encryptTextSync(testText, testPassword);
+          // Sanity: it is a v1 ciphertext (carries the HPCR magic).
+          expect(hasMagic(Buffer.from(enc, 'base64url'))).toBe(true);
+          expect(cmLegacy.decryptTextSync(enc, testPassword)).toBe(testText);
+        });
+
+        it('cross-flag decrypt fails with DECRYPTION_FAILED (legacy-produced -> default manager, and vice versa)', () => {
+          const cmLegacy = new CryptoManager({
+            pbkdf2Iterations: 1000,
+            legacyHeaderAad: true,
+          });
+          const cmBound = new CryptoManager({
+            pbkdf2Iterations: 1000,
+            // legacyHeaderAad defaults to false (header bytes bound into AAD).
+          });
+
+          // Legacy-produced ciphertext (AAD = `this.aad` only) must NOT
+          // decrypt on a default manager, which expects the header bytes
+          // bound into the AAD.
+          const legacyEnc = cmLegacy.encryptTextSync(testText, testPassword);
+          try {
+            cmBound.decryptTextSync(legacyEnc, testPassword);
+            throw new Error('Expected cross-flag decrypt to throw');
+          } catch (err) {
+            expect(err).toBeInstanceOf(CryptoError);
+            expect((err as CryptoError).type).toBe(
+              CryptoErrorType.DECRYPTION_FAILED
+            );
+          }
+
+          // And the reverse: a bound (default-produced) ciphertext must NOT
+          // decrypt on the legacyHeaderAad manager.
+          const boundEnc = cmBound.encryptTextSync(testText, testPassword);
+          try {
+            cmLegacy.decryptTextSync(boundEnc, testPassword);
+            throw new Error('Expected cross-flag decrypt to throw');
+          } catch (err) {
+            expect(err).toBeInstanceOf(CryptoError);
+            expect((err as CryptoError).type).toBe(
+              CryptoErrorType.DECRYPTION_FAILED
+            );
+          }
+        });
+      });
+
+      // --- Task 3.2: file-path coverage (async + sync) ----------------
+      describe('file paths', () => {
+        // Fresh, uniquely-named files per test under the suite's TEST_DIR so
+        // concurrent jest workers cannot collide; cleaned up in a finally.
+        function scratch(label: string): string {
+          return path.join(
+            tempDir,
+            `legacy-aad-${label}-${nodeCrypto.randomBytes(6).toString('hex')}`
+          );
+        }
+
+        function cleanup(...paths: string[]): void {
+          for (const p of paths) {
+            if (existsSync(p)) unlinkSync(p);
+          }
+        }
+
+        it('async file: round-trips under legacyHeaderAad: true and cross-flag decrypt fails with DECRYPTION_FAILED', async () => {
+          const argonOpts = {
+            memoryCost: 2 ** 12,
+            timeCost: 2,
+            parallelism: 1,
+          } as const;
+          const cmLegacy = new CryptoManager({
+            ...argonOpts,
+            legacyHeaderAad: true,
+          });
+          const cmBound = new CryptoManager({ ...argonOpts });
+
+          const inputPath = scratch('async-in');
+          const encPath = scratch('async-enc');
+          const decPath = scratch('async-dec');
+          const failDecPath = scratch('async-faildec');
+          const boundEncPath = scratch('async-boundenc');
+          const boundFailDecPath = scratch('async-boundfaildec');
+
+          try {
+            writeFileSync(inputPath, 'legacyHeaderAad async file payload.');
+
+            // Round-trip under the same (legacy) flag.
+            await cmLegacy.encryptFile(inputPath, encPath, testPassword);
+            expect(hasMagic(readFileSync(encPath))).toBe(true);
+            await cmLegacy.decryptFile(encPath, decPath, testPassword);
+            expect(readFileSync(decPath).toString()).toBe(
+              'legacyHeaderAad async file payload.'
+            );
+
+            // Cross-flag: a default manager must fail to decrypt the
+            // legacy-produced ciphertext (AAD mismatch), leaving no output.
+            await expect(
+              cmBound.decryptFile(encPath, failDecPath, testPassword)
+            ).rejects.toMatchObject({
+              type: CryptoErrorType.DECRYPTION_FAILED,
+            });
+            expect(existsSync(failDecPath)).toBe(false);
+
+            // And the reverse: a bound (default-produced) ciphertext must
+            // NOT decrypt on the legacyHeaderAad manager.
+            await cmBound.encryptFile(inputPath, boundEncPath, testPassword);
+            await expect(
+              cmLegacy.decryptFile(boundEncPath, boundFailDecPath, testPassword)
+            ).rejects.toMatchObject({
+              type: CryptoErrorType.DECRYPTION_FAILED,
+            });
+            expect(existsSync(boundFailDecPath)).toBe(false);
+          } finally {
+            cleanup(
+              inputPath,
+              encPath,
+              decPath,
+              failDecPath,
+              boundEncPath,
+              boundFailDecPath
+            );
+          }
+        }, 30_000);
+
+        it('sync file: round-trips under legacyHeaderAad: true and cross-flag decrypt fails with DECRYPTION_FAILED', () => {
+          const cmLegacy = new CryptoManager({
+            pbkdf2Iterations: 1000,
+            legacyHeaderAad: true,
+          });
+          const cmBound = new CryptoManager({ pbkdf2Iterations: 1000 });
+
+          const inputPath = scratch('sync-in');
+          const encPath = scratch('sync-enc');
+          const decPath = scratch('sync-dec');
+          const failDecPath = scratch('sync-faildec');
+          const boundEncPath = scratch('sync-boundenc');
+          const boundFailDecPath = scratch('sync-boundfaildec');
+
+          try {
+            writeFileSync(inputPath, 'legacyHeaderAad sync file payload.');
+
+            // Round-trip under the same (legacy) flag.
+            cmLegacy.encryptFileSync(inputPath, encPath, testPassword);
+            expect(hasMagic(readFileSync(encPath))).toBe(true);
+            cmLegacy.decryptFileSync(encPath, decPath, testPassword);
+            expect(readFileSync(decPath).toString()).toBe(
+              'legacyHeaderAad sync file payload.'
+            );
+
+            // Cross-flag: a default manager must fail to decrypt the
+            // legacy-produced ciphertext (AAD mismatch), leaving no output.
+            let thrown: unknown;
+            try {
+              cmBound.decryptFileSync(encPath, failDecPath, testPassword);
+            } catch (err) {
+              thrown = err;
+            }
+            expect(thrown).toBeInstanceOf(CryptoError);
+            expect((thrown as CryptoError).type).toBe(
+              CryptoErrorType.DECRYPTION_FAILED
+            );
+            expect(existsSync(failDecPath)).toBe(false);
+
+            // And the reverse: a bound (default-produced) ciphertext must
+            // NOT decrypt on the legacyHeaderAad manager.
+            cmBound.encryptFileSync(inputPath, boundEncPath, testPassword);
+            let thrownReverse: unknown;
+            try {
+              cmLegacy.decryptFileSync(
+                boundEncPath,
+                boundFailDecPath,
+                testPassword
+              );
+            } catch (err) {
+              thrownReverse = err;
+            }
+            expect(thrownReverse).toBeInstanceOf(CryptoError);
+            expect((thrownReverse as CryptoError).type).toBe(
+              CryptoErrorType.DECRYPTION_FAILED
+            );
+            expect(existsSync(boundFailDecPath)).toBe(false);
+          } finally {
+            cleanup(
+              inputPath,
+              encPath,
+              decPath,
+              failDecPath,
+              boundEncPath,
+              boundFailDecPath
+            );
+          }
+        });
       });
     });
   });

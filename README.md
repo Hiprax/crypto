@@ -256,6 +256,8 @@ const crypto = new CryptoManager(options?: CryptoManagerOptions);
 - `legacyMode` (`'auto' | 'strict' | 'reject'`): How to handle legacy (pre-v1) ciphertexts during decryption — `'auto'` (default) accepts them, `'strict'` rejects with `LEGACY_FORMAT_REJECTED`, `'reject'` rejects with `UNSUPPORTED_FORMAT`. New ciphertexts are always produced in v1 format. See [Ciphertext Format](#ciphertext-format-v1).
 - `pbkdf2Iterations` (number): PBKDF2 iteration count for sync key derivation (default: **600000** — matches OWASP 2023+ recommendation for PBKDF2-HMAC-SHA256). The chosen value is embedded in every v1 ciphertext header produced by sync paths so it travels with the ciphertext and decryption remains correct even if you change the default later. Must be a positive integer.
 - `legacyPbkdf2Iterations` (number): PBKDF2 iteration count assumed when decrypting **legacy v0** sync ciphertexts (those produced before the versioned ciphertext format and which carry no embedded iteration count). Default: 100000 — the value baked into every v0 sync ciphertext produced by versions of this library prior to 0.11.0. Override only if you have legacy data that was produced with a non-default iteration count. Has no effect on v1 ciphertexts.
+- `skipPasswordValidation` (boolean): When `true`, the constructor skips strength validation of `defaultPassphrase` only (default: `false`). This does **not** disable encryption-time password validation, and does **not** disable Unicode NFC normalisation — use it solely to construct a manager for decrypting legacy data whose password predates the current strength rules. See [Password Requirements](#password-requirements).
+- `legacyHeaderAad` (boolean): Backward-compat shim for v1 ciphertexts produced by **v1.0.0** (default: `false`). When `true`, v1 ciphertext AAD reverts to the v1.0.0 format (just `aad`, header bytes not bound) so v1.0.0-produced ciphertexts still decrypt; the default `false` binds the header bytes into the AAD. Affects v1 ciphertexts only (v0 always uses `aad` alone). Leave `false` for new code; use only as a temporary migration aid. See [Migration: v1.0.0 → v1.1.0](#migration-v100--v110).
 
 #### Methods
 
@@ -495,6 +497,19 @@ Checks if a default passphrase is configured.
 const hasDefault = crypto.hasDefaultPassphrase();
 // Returns: boolean indicating if default passphrase is set
 ```
+
+##### `getLegacyMode(): LegacyMode`
+
+Returns the configured legacy-format handling mode — one of `'auto'`, `'strict'`, or `'reject'` (see the `legacyMode` constructor option).
+
+```typescript
+const mode = crypto.getLegacyMode();
+// Returns: 'auto' | 'strict' | 'reject'
+```
+
+##### `inspectHeader(input: string | Buffer): ParsedHeader | null`
+
+Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Buffer` (file contents). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; Buffers are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_VERSION`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
 
 ### Types and Enums
 

@@ -639,23 +639,22 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     }
   });
 
-  it('native and WASM produce identical raw key bytes for the same input (RFC 9106 parity)', async () => {
-    // CRITICAL invariant: ciphertext compatibility across the two
-    // providers depends on bit-identical raw key output. We pin a known
-    // test vector here so any future provider drift surfaces loudly.
+  it('adapter wiring: both provider adapters pass a fixed key through unchanged (mocked)', async () => {
+    // SCOPE: this test verifies the ADAPTER WIRING only — that the native
+    // and WASM adapters pass parameters through and convert their output to
+    // a Buffer identically. Both providers are mocked to return the same
+    // fixed constant, so it does NOT exercise a real Argon2id computation
+    // and is NOT itself evidence of RFC 9106 parity.
     //
-    // Vector: password='MySecureP@ssw0rd123!', salt=32 bytes of 0x42,
-    // memoryCost=2^16 (64 MiB), timeCost=3, parallelism=1,
-    // hashLength=32. Expected hex (verified at implementation time
-    // against the real native argon2 0.44 and hash-wasm 4.12.0):
+    // The REAL cross-provider parity evidence (unmocked known-answer
+    // vectors from the genuine argon2 + hash-wasm installs, and a golden
+    // native-produced ciphertext decrypted through the real WASM fallback)
+    // lives in `argon2-provider-parity.test.ts` and
+    // `argon2-golden-ciphertext.test.ts`.
     //
-    //   e368bb157114953b17017a398bcf20d9a8800227cfdbc5d38eb6564111e8a188
-    //
-    // We mock both providers with this fixed output to keep the test
-    // deterministic AND fast (real Argon2 at 64 MiB takes ~200ms; doing
-    // it twice would dominate the test suite). The real-world parity
-    // is verified by the CI integration suite (which exercises the
-    // unmocked imports against the fixed vector).
+    // We mock both providers with a fixed output to keep this wiring check
+    // deterministic and fast (a real Argon2 derivation at these params
+    // would dominate the suite).
     const FIXED_OUTPUT = Buffer.from(
       'e368bb157114953b17017a398bcf20d9a8800227cfdbc5d38eb6564111e8a188',
       'hex'
@@ -710,10 +709,15 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     expect(wasmKey.equals(FIXED_OUTPUT)).toBe(true);
   });
 
-  it('a v1 ciphertext encrypted under native decrypts under WASM (and vice versa)', async () => {
-    // Direct round-trip: encrypt with native-mocked, decrypt with
-    // WASM-mocked, both producing the same fixed key. If the parameter
-    // mapping or output handling drifts, this test fails.
+  it('adapter wiring: a v1 ciphertext round-trips across the two mocked provider adapters', async () => {
+    // SCOPE: wiring only. Encrypt with native-mocked, decrypt with
+    // WASM-mocked, both producing the same FIXED key — this checks that the
+    // parameter mapping and output handling line up across the adapters, not
+    // that a real Argon2id computation agrees across providers. The genuine
+    // cross-provider decrypt evidence (native-produced ciphertext through the
+    // real WASM fallback) lives in `argon2-golden-ciphertext.test.ts`; the
+    // real known-answer vectors live in `argon2-provider-parity.test.ts`.
+    // If the parameter mapping or output handling drifts, this test fails.
     const FIXED_KEY = Buffer.alloc(32, 0xa5);
     const nativeHash = jest.fn(async () => Buffer.from(FIXED_KEY));
     const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_KEY));
@@ -748,5 +752,66 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     const decrypted = await cm2.decryptText(ciphertext, 'MySecureP@ssw0rd123!');
 
     expect(decrypted).toBe('cross-runtime hello');
+  });
+});
+
+describe('ARGON2_NOT_AVAILABLE passes through the decrypt-path KDF remap (Task 1.2d)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  afterEach(() => {
+    jest.resetModules();
+    jest.restoreAllMocks();
+  });
+
+  it('decryptText surfaces MEMORY_ERROR / ARGON2_NOT_AVAILABLE, NOT DECRYPTION_FAILED', async () => {
+    // The decrypt-path remap re-types ONLY derivation-failure CryptoErrors
+    // (ENCRYPTION_FAILED + KEY_DERIVATION_FAILED). ARGON2_NOT_AVAILABLE is a
+    // MEMORY_ERROR raised when neither provider can load, and it must reach
+    // the caller untouched. We craft a well-formed v1 Argon2id blob so the
+    // decrypt path reaches key derivation (which fails on the missing
+    // provider) BEFORE any GCM work — no real KDF output is required.
+    jest.unstable_mockModule('argon2', () => {
+      throw new Error("Cannot find module 'argon2'");
+    });
+    mockHashWasmUnavailable();
+
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
+    __resetArgon2ModuleCacheForTesting();
+
+    // [header][salt: 32][iv: 12][tag: 16][ciphertext] — the text wire layout.
+    // memoryCost 4096 clears the DoS caps and the RFC 9106 8×parallelism floor.
+    const header = packHeader(KDF_ID_ARGON2ID, {
+      kind: 'argon2id',
+      memoryCost: 4096,
+      timeCost: 2,
+      parallelism: 1,
+    });
+    const salt = Buffer.alloc(32, 0x11);
+    const iv = Buffer.alloc(12, 0x22);
+    const tag = Buffer.alloc(16, 0x33);
+    const body = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    const blob = Buffer.concat([header, salt, iv, tag, body]).toString(
+      'base64url'
+    );
+
+    const cm = new CryptoManager();
+    const password = 'MySecureP@ssw0rd123!';
+
+    try {
+      await cm.decryptText(blob, password);
+      throw new Error('Expected decryptText to throw ARGON2_NOT_AVAILABLE');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CryptoError);
+      const e = err as InstanceType<typeof CryptoError>;
+      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+      // Explicitly assert it was NOT remapped to a decryption error.
+      expect(e.type).not.toBe(CryptoErrorType.DECRYPTION_FAILED);
+    }
   });
 });

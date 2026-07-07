@@ -100,6 +100,7 @@ test-results.xml
 # Temporary files
 tmp/
 temp/
+*.tmp
 
 # Orchestrator
 .orchestrator/

@@ -3323,6 +3323,165 @@ describe('CryptoManager', () => {
     });
   });
 
+  describe('KDF failure during decryption surfaces DECRYPTION_FAILED', () => {
+    // Verifies the decrypt-path error remap: when key derivation throws
+    // during a DECRYPT operation, the surfaced CryptoError must carry
+    // `type === DECRYPTION_FAILED` (correct category for the operation) while
+    // preserving the original `.code`. Direct KDF calls (encrypt-neutral API)
+    // keep their `ENCRYPTION_FAILED` typing — see the guard-rail tests.
+    //
+    // Spies are installed only AFTER the valid ciphertext is produced, since
+    // encryption also calls the same KDF; installing earlier would corrupt
+    // the ciphertext-under-test.
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    // --- Async paths (Argon2id, Task 1.2) ---
+
+    it('decryptText surfaces DECRYPTION_FAILED + KEY_DERIVATION_FAILED', async () => {
+      const mgr = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      const encrypted = await mgr.encryptText(testText, testPassword);
+
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('simulated KDF failure'));
+
+      expect.assertions(3);
+      try {
+        await mgr.decryptText(encrypted, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+    });
+
+    it('decryptFile surfaces DECRYPTION_FAILED + KEY_DERIVATION_FAILED and leaves no partial output', async () => {
+      const mgr = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      const plainPath = path.join(tempDir, 'kdf-fail-async.txt');
+      const encPath = path.join(tempDir, 'kdf-fail-async.bin');
+      const outPath = path.join(tempDir, 'kdf-fail-async.out');
+      await writeFile(plainPath, testText, 'utf8');
+      await mgr.encryptFile(plainPath, encPath, testPassword);
+
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('simulated KDF failure'));
+
+      expect.assertions(4);
+      try {
+        await mgr.decryptFile(encPath, outPath, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+      expect(existsSync(outPath)).toBe(false);
+    });
+
+    it('guard-rail: direct deriveKey still surfaces ENCRYPTION_FAILED', async () => {
+      const mgr = new CryptoManager({
+        memoryCost: 2 ** 12,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      jest
+        .spyOn(argon2Module, 'hash')
+        .mockRejectedValue(new Error('simulated KDF failure'));
+
+      const salt = mgr.generateSecureRandom(32);
+      expect.assertions(3);
+      try {
+        await mgr.deriveKey(testPassword, salt);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.ENCRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('KEY_DERIVATION_FAILED');
+      }
+    });
+
+    // --- Sync paths (PBKDF2, Task 1.3) ---
+
+    it('decryptTextSync surfaces DECRYPTION_FAILED + SYNC_KEY_DERIVATION_FAILED', () => {
+      const mgr = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const encrypted = mgr.encryptTextSync(testText, testPassword);
+
+      jest.spyOn(nodeCrypto, 'pbkdf2Sync').mockImplementation(((): never => {
+        throw new Error('simulated PBKDF2 failure');
+      }) as unknown as typeof nodeCrypto.pbkdf2Sync);
+
+      expect.assertions(3);
+      try {
+        mgr.decryptTextSync(encrypted, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
+      }
+    });
+
+    it('decryptFileSync surfaces DECRYPTION_FAILED + SYNC_KEY_DERIVATION_FAILED and leaves no partial output', () => {
+      const mgr = new CryptoManager({ pbkdf2Iterations: 1000 });
+      const plainPath = path.join(tempDir, 'kdf-fail-sync.txt');
+      const encPath = path.join(tempDir, 'kdf-fail-sync.bin');
+      const outPath = path.join(tempDir, 'kdf-fail-sync.out');
+      writeFileSync(plainPath, testText, 'utf8');
+      mgr.encryptFileSync(plainPath, encPath, testPassword);
+
+      jest.spyOn(nodeCrypto, 'pbkdf2Sync').mockImplementation(((): never => {
+        throw new Error('simulated PBKDF2 failure');
+      }) as unknown as typeof nodeCrypto.pbkdf2Sync);
+
+      expect.assertions(4);
+      try {
+        mgr.decryptFileSync(encPath, outPath, testPassword);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.DECRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
+      }
+      expect(existsSync(outPath)).toBe(false);
+    });
+
+    it('guard-rail: direct deriveKeySync still surfaces ENCRYPTION_FAILED', () => {
+      const mgr = new CryptoManager({ pbkdf2Iterations: 1000 });
+      jest.spyOn(nodeCrypto, 'pbkdf2Sync').mockImplementation(((): never => {
+        throw new Error('simulated PBKDF2 failure');
+      }) as unknown as typeof nodeCrypto.pbkdf2Sync);
+
+      const salt = mgr.generateSecureRandom(32);
+      expect.assertions(3);
+      try {
+        mgr.deriveKeySync(testPassword, salt);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CryptoError);
+        expect((error as CryptoError).type).toBe(
+          CryptoErrorType.ENCRYPTION_FAILED
+        );
+        expect((error as CryptoError).code).toBe('SYNC_KEY_DERIVATION_FAILED');
+      }
+    });
+  });
+
   describe('encryptData - internal error wrapping', () => {
     // Same Task 22 rationale as the deriveKeySync block above.
     afterEach(() => {

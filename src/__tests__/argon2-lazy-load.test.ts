@@ -750,3 +750,64 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     expect(decrypted).toBe('cross-runtime hello');
   });
 });
+
+describe('ARGON2_NOT_AVAILABLE passes through the decrypt-path KDF remap (Task 1.2d)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  afterEach(() => {
+    jest.resetModules();
+    jest.restoreAllMocks();
+  });
+
+  it('decryptText surfaces MEMORY_ERROR / ARGON2_NOT_AVAILABLE, NOT DECRYPTION_FAILED', async () => {
+    // The decrypt-path remap re-types ONLY derivation-failure CryptoErrors
+    // (ENCRYPTION_FAILED + KEY_DERIVATION_FAILED). ARGON2_NOT_AVAILABLE is a
+    // MEMORY_ERROR raised when neither provider can load, and it must reach
+    // the caller untouched. We craft a well-formed v1 Argon2id blob so the
+    // decrypt path reaches key derivation (which fails on the missing
+    // provider) BEFORE any GCM work — no real KDF output is required.
+    jest.unstable_mockModule('argon2', () => {
+      throw new Error("Cannot find module 'argon2'");
+    });
+    mockHashWasmUnavailable();
+
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
+    __resetArgon2ModuleCacheForTesting();
+
+    // [header][salt: 32][iv: 12][tag: 16][ciphertext] — the text wire layout.
+    // memoryCost 4096 clears the DoS caps and the RFC 9106 8×parallelism floor.
+    const header = packHeader(KDF_ID_ARGON2ID, {
+      kind: 'argon2id',
+      memoryCost: 4096,
+      timeCost: 2,
+      parallelism: 1,
+    });
+    const salt = Buffer.alloc(32, 0x11);
+    const iv = Buffer.alloc(12, 0x22);
+    const tag = Buffer.alloc(16, 0x33);
+    const body = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    const blob = Buffer.concat([header, salt, iv, tag, body]).toString(
+      'base64url'
+    );
+
+    const cm = new CryptoManager();
+    const password = 'MySecureP@ssw0rd123!';
+
+    try {
+      await cm.decryptText(blob, password);
+      throw new Error('Expected decryptText to throw ARGON2_NOT_AVAILABLE');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CryptoError);
+      const e = err as InstanceType<typeof CryptoError>;
+      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+      // Explicitly assert it was NOT remapped to a decryption error.
+      expect(e.type).not.toBe(CryptoErrorType.DECRYPTION_FAILED);
+    }
+  });
+});

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Key-derivation failures during decryption now surface `CryptoError` with `type: DECRYPTION_FAILED` instead of `ENCRYPTION_FAILED`** (`src/crypto-manager.ts`). The public `deriveKey`/`deriveKeySync` methods are direction-neutral and wrap internal failures as `ENCRYPTION_FAILED` (codes `KEY_DERIVATION_FAILED` / `SYNC_KEY_DERIVATION_FAILED`). When that failure happened *inside a decrypt operation* (e.g. a crafted v1 header carrying `memoryCost = 2^22` that the `hash-wasm` fallback cannot allocate on WASM32, or any transient KDF fault), the encryption-typed error leaked out of `decryptText` / `decryptTextSync` / `decryptFile` / `decryptFileSync` — a mis-categorised error for the operation. A new private `remapKdfErrorForDecryption` helper, applied at exactly the four decrypt-path derivation call sites, re-types only these two derivation-failure shapes to `DECRYPTION_FAILED`. The `.code` is **unchanged**, so callers keying on `.code` are unaffected; only the `.type` category is corrected. Direct `deriveKey`/`deriveKeySync` calls keep their `ENCRYPTION_FAILED` typing, and `ARGON2_NOT_AVAILABLE` (`MEMORY_ERROR`) / `INVALID_INPUT`-typed errors pass through untouched. New regression tests (`src/__tests__/crypto-manager.test.ts`, `src/__tests__/argon2-lazy-load.test.ts`) cover all four decrypt paths, the direct-KDF guard-rails, and the `ARGON2_NOT_AVAILABLE` decrypt passthrough.
+
 ## [1.4.3] - 2026-06-30
 
 ### Security

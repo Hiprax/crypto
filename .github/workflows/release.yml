@@ -5,8 +5,8 @@ name: Release
 # GitHub Release (notes pulled from the matching CHANGELOG.md section).
 #
 # `workflow_dispatch` provides a manual fallback to re-run a previously
-# pushed tag without having to delete + re-push it (e.g. if NPM_TOKEN was
-# expired on the first run).
+# pushed tag without having to delete + re-push it (e.g. if a prior run
+# failed before the publish step succeeded).
 on:
   push:
     tags:
@@ -18,7 +18,8 @@ on:
         required: true
         type: string
 
-# `id-token: write` is required for npm provenance via OIDC.
+# `id-token: write` is required for npm trusted publishing (OIDC): it mints
+# both the short-lived publish credential and the provenance attestation.
 # `contents: write` is required for `softprops/action-gh-release` to create
 # the GitHub Release object. Both are kept at the workflow level (not job
 # level) so any future job added to this workflow inherits the minimum it
@@ -101,10 +102,16 @@ jobs:
         # and the `"files"` field in package.json govern the result.
         run: npm pack --dry-run
 
+      # Trusted publishing (OIDC) requires npm >= 11.5.1 to understand the
+      # credential-exchange flow; Node 22 ships npm 10, so upgrade first. No
+      # NPM_TOKEN is used — short-lived publish credentials are minted
+      # automatically from the `id-token: write` grant when the package's
+      # trusted-publisher config on npmjs.com matches this repo + workflow.
+      - name: Upgrade npm to an OIDC-capable version
+        run: npm install -g npm@latest
+
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Extract changelog notes for this release
         id: changelog

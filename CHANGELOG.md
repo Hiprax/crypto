@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Release workflow migrated to npm trusted publishing (OIDC)** (`.github/workflows/release.yml`). The `npm publish` step no longer reads a long-lived `NPM_TOKEN` secret; short-lived publish credentials are now minted automatically from the workflow's `id-token: write` grant, and provenance is generated automatically. A new step upgrades the runner's npm to an OIDC-capable version (`>= 11.5.1`) before publishing, since Node 22 ships npm 10. CI-only change with no impact on the published package contents.
+
 ## [1.4.4] - 2026-07-07
 
 ### Fixed

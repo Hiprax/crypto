@@ -639,23 +639,22 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     }
   });
 
-  it('native and WASM produce identical raw key bytes for the same input (RFC 9106 parity)', async () => {
-    // CRITICAL invariant: ciphertext compatibility across the two
-    // providers depends on bit-identical raw key output. We pin a known
-    // test vector here so any future provider drift surfaces loudly.
+  it('adapter wiring: both provider adapters pass a fixed key through unchanged (mocked)', async () => {
+    // SCOPE: this test verifies the ADAPTER WIRING only — that the native
+    // and WASM adapters pass parameters through and convert their output to
+    // a Buffer identically. Both providers are mocked to return the same
+    // fixed constant, so it does NOT exercise a real Argon2id computation
+    // and is NOT itself evidence of RFC 9106 parity.
     //
-    // Vector: password='MySecureP@ssw0rd123!', salt=32 bytes of 0x42,
-    // memoryCost=2^16 (64 MiB), timeCost=3, parallelism=1,
-    // hashLength=32. Expected hex (verified at implementation time
-    // against the real native argon2 0.44 and hash-wasm 4.12.0):
+    // The REAL cross-provider parity evidence (unmocked known-answer
+    // vectors from the genuine argon2 + hash-wasm installs, and a golden
+    // native-produced ciphertext decrypted through the real WASM fallback)
+    // lives in `argon2-provider-parity.test.ts` and
+    // `argon2-golden-ciphertext.test.ts`.
     //
-    //   e368bb157114953b17017a398bcf20d9a8800227cfdbc5d38eb6564111e8a188
-    //
-    // We mock both providers with this fixed output to keep the test
-    // deterministic AND fast (real Argon2 at 64 MiB takes ~200ms; doing
-    // it twice would dominate the test suite). The real-world parity
-    // is verified by the CI integration suite (which exercises the
-    // unmocked imports against the fixed vector).
+    // We mock both providers with a fixed output to keep this wiring check
+    // deterministic and fast (a real Argon2 derivation at these params
+    // would dominate the suite).
     const FIXED_OUTPUT = Buffer.from(
       'e368bb157114953b17017a398bcf20d9a8800227cfdbc5d38eb6564111e8a188',
       'hex'
@@ -710,10 +709,15 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
     expect(wasmKey.equals(FIXED_OUTPUT)).toBe(true);
   });
 
-  it('a v1 ciphertext encrypted under native decrypts under WASM (and vice versa)', async () => {
-    // Direct round-trip: encrypt with native-mocked, decrypt with
-    // WASM-mocked, both producing the same fixed key. If the parameter
-    // mapping or output handling drifts, this test fails.
+  it('adapter wiring: a v1 ciphertext round-trips across the two mocked provider adapters', async () => {
+    // SCOPE: wiring only. Encrypt with native-mocked, decrypt with
+    // WASM-mocked, both producing the same FIXED key — this checks that the
+    // parameter mapping and output handling line up across the adapters, not
+    // that a real Argon2id computation agrees across providers. The genuine
+    // cross-provider decrypt evidence (native-produced ciphertext through the
+    // real WASM fallback) lives in `argon2-golden-ciphertext.test.ts`; the
+    // real known-answer vectors live in `argon2-provider-parity.test.ts`.
+    // If the parameter mapping or output handling drifts, this test fails.
     const FIXED_KEY = Buffer.alloc(32, 0xa5);
     const nativeHash = jest.fn(async () => Buffer.from(FIXED_KEY));
     const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_KEY));

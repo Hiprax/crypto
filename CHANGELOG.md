@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.4.4] - 2026-07-07
 
 ### Fixed
 
@@ -13,6 +13,21 @@
 - **Golden cross-provider ciphertext decrypt test** (`src/__tests__/argon2-golden-ciphertext.test.ts`). New dedicated file proving the fallback chain end-to-end: a v1 ciphertext produced by the real native provider decrypts correctly through the library's real `hash-wasm` fallback adapter, with `__peekArgon2ProviderForTesting()` reporting `'wasm'`. It lives in its own file (not `argon2-lazy-load.test.ts`) because Jest `unstable_mockModule` factories are file-scoped and survive `resetModules()`; it registers exactly one mock — `argon2` set to import-throw — and never mocks `hash-wasm`, skipping only on a genuinely-absent `ARGON2_NOT_AVAILABLE`.
 - **Corrected the scope comments on the two mocked provider-adapter tests** (`src/__tests__/argon2-lazy-load.test.ts`). Both tests are now accurately described as ADAPTER WIRING checks (fixed-output mocks verifying parameter pass-through and Buffer conversion), not RFC 9106 parity proofs; the stale reference to a nonexistent CI integration suite was removed and both now point at the real evidence in `argon2-provider-parity.test.ts` and `argon2-golden-ciphertext.test.ts`.
 - **`legacyHeaderAad` regression coverage extended to the sync-text and both file paths** (`src/__tests__/crypto-manager.test.ts`, `describe('legacyHeaderAad option')`). Previously the option was exercised only on the async `encryptText`/`decryptText` path. New tests add: a sync-text round-trip (`encryptTextSync`/`decryptTextSync` under `legacyHeaderAad: true`) plus a cross-flag failure proof (a legacy-produced ciphertext fails to decrypt on a default manager, and a default-produced ciphertext fails on the legacy manager, both with `type: DECRYPTION_FAILED` from the AAD mismatch); and async-file (`encryptFile`/`decryptFile`) and sync-file (`encryptFileSync`/`decryptFileSync`) round-trips under `legacyHeaderAad: true`, each with the same cross-flag `DECRYPTION_FAILED` assertion and a check that no partial output file is left behind. This locks the four remaining `aadForV1` decrypt-side consumers against regression.
+
+### Files changed
+
+- `src/crypto-manager.ts` — new private `remapKdfErrorForDecryption` helper; wrapped the four decrypt-path key-derivation call sites (`decryptText`, `decryptTextSync`, `decryptFile`, `decryptFileSync`) in a narrow try/catch that re-types only the two derivation-failure shapes from `ENCRYPTION_FAILED` to `DECRYPTION_FAILED` (`.code` unchanged; `ARGON2_NOT_AVAILABLE` / `INVALID_INPUT` pass through).
+- `src/__tests__/crypto-manager.test.ts` — new `describe('KDF failure during decryption surfaces DECRYPTION_FAILED')` block (async `decryptText`/`decryptFile`, sync `decryptTextSync`/`decryptFileSync`, plus direct-`deriveKey`/`deriveKeySync` guard-rails asserting `ENCRYPTION_FAILED` is retained); extended `describe('legacyHeaderAad option')` with sync-text, async-file, and sync-file round-trips plus cross-flag `DECRYPTION_FAILED` assertions and partial-output checks.
+- `src/__tests__/argon2-lazy-load.test.ts` — added the `ARGON2_NOT_AVAILABLE` decrypt-passthrough test (crafted well-formed v1 Argon2id blob via `packHeader`, both providers mocked unavailable, asserts `MEMORY_ERROR` / `ARGON2_NOT_AVAILABLE` is NOT remapped to `DECRYPTION_FAILED`); rewrote the false CI-suite comment on the mocked parity test to describe adapter wiring only and added a matching clarifying comment on the mocked round-trip test, both pointing at the real evidence.
+- `src/__tests__/argon2-provider-parity.test.ts` — new file; real-provider Argon2id known-answer parity tests (no module mocks) asserting native `argon2` and `hash-wasm` derive an identical pinned 32-byte vector, availability-gated with the probe-is-the-call pattern (logged skip on genuine absence).
+- `src/__tests__/argon2-golden-ciphertext.test.ts` — new file; a native-produced golden v1 ciphertext decrypts through the library's real `hash-wasm` fallback (only `argon2` mocked to import-throw; `hash-wasm` never mocked), asserting `__peekArgon2ProviderForTesting()` reports `'wasm'`, skipping only on a genuinely-absent `ARGON2_NOT_AVAILABLE`.
+- `README.md` — constructor Options list gained `skipPasswordValidation` and `legacyHeaderAad` bullets (cross-linked to the Password Requirements and v1.0.0 → v1.1.0 Migration sections); Methods section gained `getLegacyMode(): LegacyMode` and `inspectHeader(input: string | Buffer): ParsedHeader | null` entries.
+- `CHANGELOG.md` — this release entry.
+- `.gitignore` — added `*.tmp` (defence-in-depth so stray backup files can never be staged).
+- `package.json` — `version` bumped `1.4.3` → `1.4.4`.
+- `package-lock.json` — `version` synced to `1.4.4`.
+
+---
 
 ## [1.4.3] - 2026-06-30
 

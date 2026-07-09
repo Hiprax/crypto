@@ -1,10 +1,29 @@
 # Changelog
 
-## [Unreleased]
+## [1.4.5] - 2026-07-09
+
+### Added
+
+- **Documented post-quantum security posture, backed by standards-body and peer-reviewed sources** (`README.md`, `SECURITY.md`). The library is symmetric-only — it contains no RSA/ECDH/ECDSA or any other public-key primitive, so Shor's algorithm has no target and the NIST PQC standards (FIPS 203/204/205) replace nothing this library uses; AES-256-GCM, Argon2id, PBKDF2-HMAC-SHA256, and SHA-256 all sit at parameter sizes NIST IR 8547, NSA CNSA 2.0, and BSI TR-02102-1 treat as quantum-resistant (Grover's algorithm yields only a quadratic, poorly-parallelizable, depth-limited speedup). The docs now state this affirmatively instead of hedging:
+  - `README.md` — new **"Post-Quantum Security"** section (placed after Security Features): Shor-vs-Grover explainer, primitive-by-primitive status table, eight-source "proofs" list (NIST PQC FAQ, NIST IR 8547, NSA CNSA 2.0, BSI TR-02102-1, Amy et al. SAC 2016, Blocki-Holman-Lee TCC 2022 + EUROCRYPT 2025 follow-up, Song et al. 2023 Argon2 Grover-circuit estimate, Kaplan et al. CRYPTO 2016 with the Q2-model inapplicability explanation), the honest residual-risk framing (password entropy is the quantum attack surface; per-message salts + memory-hard Argon2id blunt it; diceware passphrase guidance for harvest-now-decrypt-later threat models), why a Kyber/Dilithium hybrid mode is deliberately absent (no key exchange or signatures to hybridize), and the wire-format crypto-agility story including the ecosystem (Sigstore/TLS) boundary. Also added a `post-quantum: ready` badge linking to the section and a Features bullet.
+  - `README.md` — utility-function docs gained post-quantum sizing guidance for random secrets: `generateRandomHex(64)` / `generateRandomString(44)` for a 128-bit quantum margin on bearer secrets; `generateUUID` flagged as an identifier, not a bearer secret (122 random bits).
+  - `SECURITY.md` — new **"Post-quantum posture"** section (five numbered, audit-referenceable positions with primary sources, the Sigstore/TLS distribution-channel boundary, and an explicit in-scope test for quantum-related reports: concrete attacks under a realistic Q1 threat model only).
 
 ### Changed
 
+- **README threat model: the "Post-quantum security" out-of-scope bullet was replaced with an accurate posture statement** (`README.md`). The old bullet blanket-claimed the primitives "are not post-quantum" and that the library "is not sufficient on its own" against harvest-now-decrypt-later adversaries — contradicting NIST/NSA/BSI guidance that 256-bit symmetric cryptography is quantum-resistant. The rewritten bullet ("Low password entropy against a future quantum adversary") scopes the genuine residual risk correctly: Grover attacks the password's entropy, not AES-256, and the mitigation is a high-entropy passphrase on the async Argon2id path.
+- **SECURITY.md out-of-scope wording no longer waves off quantum reports as inherently speculative** (`SECURITY.md`). The dismissive `"what if quantum computers" reports are not actionable` line now routes reporters to the documented post-quantum posture and defines exactly what would make a quantum-related report actionable.
 - **Release workflow migrated to npm trusted publishing (OIDC)** (`.github/workflows/release.yml`). The `npm publish` step no longer reads a long-lived `NPM_TOKEN` secret; short-lived publish credentials are now minted automatically from the workflow's `id-token: write` grant, and provenance is generated automatically. A new step upgrades the runner's npm to an OIDC-capable version (`>= 11.5.1`) before publishing, since Node 22 ships npm 10. CI-only change with no impact on the published package contents.
+
+### Files changed
+
+- `README.md` — new "Post-Quantum Security" section; `post-quantum: ready` badge; Features bullet; rewritten threat-model bullet; post-quantum sizing note + inline comments in the utility examples.
+- `SECURITY.md` — new "Post-quantum posture" section; reworded the theoretical-attacks out-of-scope bullet to reference it.
+- `CHANGELOG.md` — this entry (also promotes the previously-unreleased OIDC trusted-publishing workflow note into this release).
+- `package.json` — `version` bumped `1.4.4` → `1.4.5`.
+- `package-lock.json` — `version` synced to `1.4.5`.
+
+---
 
 ## [1.4.4] - 2026-07-07
 

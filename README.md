@@ -6,6 +6,7 @@
 [![codecov](https://codecov.io/gh/Hiprax/crypto/branch/main/graph/badge.svg)](https://codecov.io/gh/Hiprax/crypto)
 [![CodeQL](https://github.com/Hiprax/crypto/actions/workflows/codeql.yml/badge.svg)](https://github.com/Hiprax/crypto/actions/workflows/codeql.yml)
 [![npm provenance](https://img.shields.io/badge/npm-provenance-brightgreen?logo=npm&logoColor=white)](https://www.npmjs.com/package/@hiprax/crypto)
+[![Post-Quantum Ready](https://img.shields.io/badge/post--quantum-ready-blueviolet)](#-post-quantum-security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![npm version](https://img.shields.io/npm/v/@hiprax/crypto)](https://www.npmjs.com/package/@hiprax/crypto)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0.3-blue.svg)](https://www.typescriptlang.org/)
@@ -15,6 +16,7 @@
 
 - 🔐 **AES-256-GCM** authenticated encryption
 - 🔑 **Argon2id** memory-hard key derivation
+- 🔮 **Post-quantum resistant by design** — symmetric-only cryptography, nothing for Shor's algorithm to break ([proofs](#-post-quantum-security))
 - 📁 **Streaming file encryption AND decryption** (bounded memory regardless of file size) with atomic temp-file output
 - 🛡️ **Memory-safe** operations with secure clearing
 - ✅ **Strong password** validation with detailed feedback
@@ -590,6 +592,8 @@ const escape = validatePath('C:\\Users\\..\\Windows', {
 // escape.isValid === false, escape.error === 'Path is outside the allowed root'
 
 // Generate secure random string
+// (default 32 chars ≈ 190 bits of entropy; request >= 44 chars for a full
+// 128-bit post-quantum margin — see the sizing note below this block)
 const randomString = generateRandomString(32);
 
 // Validate password strength with detailed feedback
@@ -597,13 +601,14 @@ const passwordCheck = validatePasswordStrength('MyPassword123!');
 console.log('Score:', passwordCheck.score); // 0-5
 console.log('Feedback:', passwordCheck.feedback); // Array of suggestions
 
-// Generate UUID
+// Generate UUID (v4 — 122 random bits; an identifier, NOT a bearer secret)
 const uuid = generateUUID();
 
 // Hash string with SHA-256
 const hash = sha256('hello world');
 
-// Generate random hex string
+// Generate random hex string (each hex char = 4 bits; use >= 64 chars for
+// 256-bit bearer secrets — see the sizing note below this block)
 const hex = generateRandomHex(16);
 
 // Secure string comparison (constant time)
@@ -651,6 +656,8 @@ console.log('Size:', fileInfo.size);
 console.log('Extension:', fileInfo.extension);
 console.log('Is Text:', fileInfo.isTextFile);
 ```
+
+> **Sizing random secrets for a post-quantum margin.** `generateRandomString` and `generateRandomHex` draw from the OS CSPRNG, so their strength is purely a function of length. Grover's algorithm halves the effective entropy of a random secret against a quantum adversary, so to preserve a 128-bit post-quantum margin, size bearer secrets (API keys, session tokens, capability URLs) at **256 bits**: `generateRandomHex(64)` (64 hex chars) or `generateRandomString(44)` (≈262 bits). The defaults (32 chars) are ample for identifiers and classical threat models. `generateUUID` output carries 122 random bits and is designed as a collision-resistant *identifier* — do not use it as an unguessable bearer token where post-quantum unpredictability matters. See [Post-Quantum Security](#-post-quantum-security).
 
 ## 🔧 Configuration
 
@@ -954,6 +961,60 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 - **Type Safety**: Full TypeScript support prevents type-related vulnerabilities
 - **Parameter Validation**: Comprehensive input validation with detailed error messages
 
+## 🔮 Post-Quantum Security
+
+**Every byte this library encrypts is protected by cryptography that the world's leading standards bodies treat as quantum-resistant.** Not by accident — by design: the library is _symmetric-only_, and symmetric cryptography at 256-bit strength survives the quantum era.
+
+Quantum computers threaten cryptography through two very different algorithms:
+
+- **Shor's algorithm** completely breaks public-key cryptography — RSA, Diffie-Hellman, ECDH, ECDSA, all elliptic curves. This is the catastrophic, exponential break driving the global post-quantum migration. **This library contains zero public-key cryptography** — no key exchange, no signatures, no certificates — so there is nothing for Shor's algorithm to attack.
+- **Grover's algorithm** yields only a _quadratic_ speedup against symmetric cryptography: a 256-bit key drops to roughly 128-bit effective strength — still far beyond any conceivable attack, and in practice even that figure is pessimistic for the attacker because Grover parallelizes poorly and is gate-depth limited. Every key, salt, and KDF output in this library is 256-bit.
+
+The NIST post-quantum standards (FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA) replace **public-key** primitives only; NIST states explicitly that its symmetric standards are **not** part of the PQC transition. A symmetric-only library therefore needs **no post-quantum migration** — no algorithm swap, no format change, and nothing for consumers to update, ever, for quantum reasons.
+
+### Primitive-by-primitive
+
+| Primitive                          | Role                     | Post-quantum status                                                                                                                                                                                                              |
+| ---------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **AES-256-GCM**                    | Authenticated encryption | NIST post-quantum security **Category 5** (the highest tier). NSA CNSA 2.0 retains AES-256 for National Security Systems **up to TOP SECRET** in the quantum era. BSI recommends 256-bit symmetric keys for long-term protection. |
+| **Argon2id** (async KDF)           | Password → key           | Memory-hardness _survives_ quantum evaluation: peer-reviewed analysis shows the memory cost carries over into the reversible circuits Grover requires, making every quantum guess astronomically expensive.                       |
+| **PBKDF2-HMAC-SHA256** (sync KDF)  | Password → key           | HMAC and KDF constructions are listed by NIST IR 8547 among the symmetric standards that will **not** be transitioned. 256-bit output ≈ 128-bit effective post-quantum strength.                                                  |
+| **SHA-256** (utility)              | Hashing                  | 256-bit preimage strength = NIST post-quantum **Category 5**.                                                                                                                                                                     |
+| **CSPRNG** (`crypto.randomBytes`)  | Salts, IVs               | OS-level SP 800-90A DRBGs reseeded from kernel entropy; quantum computing changes nothing structural about their security.                                                                                                        |
+
+### The proofs
+
+These are not marketing claims — each one traces to an official standards-body position or peer-reviewed result:
+
+1. **NIST, Post-Quantum Cryptography FAQ** — Grover's algorithm "will provide little or no advantage in attacking AES", key lengths do not need to be doubled, and even AES-128 "will remain secure for decades to come". <https://csrc.nist.gov/projects/post-quantum-cryptography/faqs>
+2. **NIST IR 8547, _Transition to Post-Quantum Cryptography Standards_** — symmetric standards (block ciphers, hash functions, HMAC, KDFs) are excluded from the PQC transition; AES-256 anchors security **Category 5**; the 2030/2035 deprecation timelines apply to RSA/ECC only. <https://nvlpubs.nist.gov/nistpubs/ir/2024/NIST.IR.8547.ipd.pdf>
+3. **NSA, Commercial National Security Algorithm Suite 2.0** — retains AES-256 as the symmetric cipher for National Security Systems up to TOP SECRET; only public-key algorithms are replaced (by ML-KEM / ML-DSA). <https://media.defense.gov/2022/Sep/07/2003071836/-1/-1/0/CSI_CNSA_2.0_FAQ_.PDF>
+4. **BSI TR-02102-1** (Germany's federal cyber-security agency) — the impact of quantum computers on symmetric mechanisms is far milder than on asymmetric ones; 256-bit keys are recommended for high or long-term protection needs. <https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TG02102/BSI-TR-02102-1.pdf>
+5. **Amy, Di Matteo, Gheorghiu, Mosca, Parent & Schanck (SAC 2016)** — a fault-tolerant Grover preimage attack on SHA-256 costs ≈2^153.8 surface-code cycles of _depth_, vastly above the naive 2^128 query count, because Grover cannot be parallelized efficiently. <https://arxiv.org/abs/1603.09383>
+6. **Blocki, Holman & Lee (TCC 2022)**, with the EUROCRYPT 2025 follow-up — memory-hard functions retain their cost inside the reversible circuits a quantum attacker must build; cheap memory-erasing classical strategies do not translate into cheap quantum circuits. <https://arxiv.org/abs/2110.04191>, <https://eprint.iacr.org/2024/334>
+7. **Song, Eum, Kwon, Sim, Lee & Seo (2023)** — a concrete Grover-oracle quantum circuit for Argon2, quantifying the enormous qubit and depth cost of attacking a memory-hard KDF on quantum hardware. <https://eprint.iacr.org/2023/1150>
+8. **Kaplan, Leurent, Leverrier & Naya-Plasencia (CRYPTO 2016)** — the only known "quantum break" of GCM (a Simon's-algorithm forgery) requires the attacker to query your _live keyed encryption device in quantum superposition_ (the "Q2" model) — a scenario that cannot arise against encrypted data at rest. Even within that model, GCM's _confidentiality_ core (CTR mode) remains provably secure. <https://arxiv.org/abs/1602.05973>
+
+### The one honest caveat: the password is the battlefield
+
+A quantum computer will not break AES-256 — it will try to guess your password. Grover's algorithm halves the effective entropy of a password search, so the _password_, not the cipher, is the residual quantum attack surface. Three design properties blunt that attack:
+
+- Every ciphertext uses a fresh **32-byte random salt**, so an attacker cannot amortize one search across many ciphertexts — precomputation and batch attacks are dead on arrival.
+- On the async path, every single guess must pay the full **Argon2id memory-hard evaluation** (128 MiB at the default profile) — which on quantum hardware must be built as a reversible circuit holding the entire memory array in logical qubits, an astronomical overhead (proofs 6-7 above).
+- The sync PBKDF2 path is equally quantum-resistant at the primitive level, but it is not memory-hard — prefer the async (Argon2id) methods for long-lived, high-value data.
+
+**Recommendation for "harvest now, decrypt later" threat models:** use the async (Argon2id) methods with a high-entropy passphrase — for example **8-10 randomly generated diceware words (≈103-129 bits of entropy)**. Even against an idealized Grover attacker that leaves ≈52-65 bits of _quantum-effective_ entropy where every guess costs a full memory-hard KDF evaluation — comfortably out of reach.
+
+### Why there is no Kyber/Dilithium "hybrid mode"
+
+Because it would be security theater. ML-KEM (Kyber) protects **key exchange**; ML-DSA (Dilithium) provides **digital signatures**. This library performs neither: keys are derived locally from your password, and nothing is ever negotiated over a wire or signed. There is no classical key exchange to hybridize and no signature scheme to upgrade. Bolting PQC primitives onto a symmetric-only design would add attack surface and dependencies without adding security.
+
+### Crypto-agility, just in case
+
+Every v1 ciphertext embeds its own KDF identifier and full KDF parameters in the [versioned header](#ciphertext-format-v1), so stronger defaults or an additional KDF can ship in a **minor release** while every old ciphertext remains decryptable forever — they are self-describing. The header's version byte (`0x01`) reserves a clean, well-defined escape hatch (`0x02`) for a cipher change if cryptographic guidance ever demands one; none is needed or foreseen. One layer is deliberately out of this library's hands: the distribution channel (npm provenance signatures, registry TLS) relies on the ecosystem's classical public-key infrastructure. That layer is npm's and Sigstore's to migrate, is a real-time integrity check rather than harvestable ciphertext, and has no bearing on the confidentiality of anything you encrypt.
+
+The formal, audit-facing version of this posture lives in [SECURITY.md](SECURITY.md#post-quantum-posture).
+
 ## 🧪 Testing
 
 Run the test suite:
@@ -1077,7 +1138,7 @@ A cryptography library is only as useful as its honesty about what it does and d
 - **Rubber-hose cryptanalysis.** If the password is coerced out of the user, the library cannot help. Strong-password validation does not survive an attacker who can compel the user to reveal it.
 - **Weak passwords.** Encryption is only as strong as the password. The library validates strength at encryption time (8-char composition rule OR ≥20-char passphrase rule — see [Password Requirements](#password-requirements)), but the caller is responsible for sourcing high-entropy inputs and protecting against credential reuse. A weak password makes Argon2id/PBKDF2 brute-force tractable regardless of the parameters.
 - **Side-channel attacks beyond constant-time comparison.** The library uses `crypto.timingSafeEqual` for tag/string comparisons, but it does NOT defend against cache-timing, power-analysis, electromagnetic-emanation, or microarchitectural side channels in the underlying AES-256-GCM, Argon2id, or PBKDF2 implementations (which run in OpenSSL via Node.js's `crypto` module and the `argon2` native addon). Hardened deployments must rely on the host's mitigations (microcode, hypervisor isolation, etc.).
-- **Post-quantum security.** AES-256-GCM, Argon2id, and PBKDF2-HMAC-SHA256 are not post-quantum primitives. AES-256 retains a useful security margin against Grover's algorithm (effective ~128-bit security), but symmetric KDFs derived from low-entropy passwords offer no quantum-resistance gain. There is no Kyber/Dilithium hybrid mode in this library; if your threat model includes a "harvest now, decrypt later" adversary with future quantum capability, this library is not sufficient on its own.
+- **Low password entropy against a future quantum adversary.** The primitives themselves are quantum-resistant — the library contains no public-key cryptography for Shor's algorithm to break, and AES-256, Argon2id, and PBKDF2-HMAC-SHA256 retain ≥128-bit effective strength under Grover's algorithm per NIST, NSA CNSA 2.0, and BSI guidance (see [Post-Quantum Security](#-post-quantum-security) for the full posture and sources). What no cipher can fix is a weak password: Grover halves the effective entropy of the password search space, so a "harvest now, decrypt later" adversary with future quantum capability attacks the password, not AES-256. If that adversary is in your threat model, use the async (Argon2id) path with a high-entropy passphrase (e.g. 8-10 random diceware words, ≈103-129 bits). The deliberate absence of a Kyber/Dilithium hybrid mode is not a gap: those standards replace key exchange and signatures, and this library performs neither.
 - **OS CSPRNG compromise.** All randomness (salt, IV, temp-file suffix) is sourced from `crypto.randomBytes`/`crypto.randomUUID`, which delegate to the host OS's CSPRNG (`getrandom(2)` on Linux, `BCryptGenRandom` on Windows, `SecRandomCopyBytes` on macOS). If the OS RNG is backdoored, virtualised onto a deterministic shim, or seeded with insufficient entropy at boot, the library inherits that compromise — IVs may collide, salts may be predictable, and the IND-CPA guarantee degrades. Detecting OS-level RNG compromise is outside the library's scope.
 - **String-copy memory leaks via V8.** `secureClear` zeroes the underlying `ArrayBuffer` slab of a Buffer, but V8 may have already created internal string copies of password or plaintext data for hashing, interning, or deoptimisation paths. Those copies are unreachable to `Buffer.fill(0)` and live until garbage collection. Treat `secureClear` as defence-in-depth, not as a forensic-grade wipe. The same caveat applies — more directly, by deliberate retention rather than incidental V8 behaviour — to `CryptoManager` instances configured with `defaultPassphrase`: the library stores the passphrase as a regular V8 string for the manager's lifetime and cannot scrub it. For sensitive workloads, pass the password explicitly to each `encrypt*` / `decrypt*` call instead of configuring `defaultPassphrase`. See [Password Requirements](#password-requirements) for the full retention discussion.
 - **Symlink-based path traversal.** `validatePath` is a syntactic check; it does not call `fs.realpath` and does not prevent a path like `/safe/dir/symlinkToEtc` from escaping via the symlink. Callers that need symlink-safe path validation must perform their own `realpath`-based check or operate inside a chroot/sandbox.

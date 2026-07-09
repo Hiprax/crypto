@@ -128,11 +128,77 @@ just through the normal channel:
   limitation of the underlying construction, not a bug.
 - **Theoretical attacks against AES-256-GCM, Argon2id, or PBKDF2-HMAC-SHA256
   themselves.** If a generic break of one of these primitives is published,
-  we will respond — but speculative or "what if quantum computers" reports
-  are not actionable in this codebase.
+  we will respond. Generic "quantum computers will eventually break this"
+  reports are answered by the documented
+  [post-quantum posture](#post-quantum-posture) below and are not actionable
+  unless they present a concrete new attack that invalidates it.
 - **Missing best-practice hardening that has no documented impact** (e.g.
   "the library should also support XChaCha20"). File those as feature
   requests through GitHub Issues.
+
+## Post-quantum posture
+
+The library's position on quantum computing is documented here so security
+reports and audits can reference it directly.
+
+1. **There is no public-key cryptography in this library.** No RSA, no
+   elliptic curves, no key exchange, no signatures, no certificates. Shor's
+   algorithm — the quantum attack that catastrophically breaks public-key
+   cryptography and motivates the NIST PQC standards (FIPS 203 ML-KEM,
+   FIPS 204 ML-DSA, FIPS 205 SLH-DSA) — has no target here. Consequently
+   there is **no post-quantum migration to perform**: those standards
+   replace primitives this library does not use.
+2. **Every primitive is treated as quantum-resistant by the relevant
+   standards bodies at the parameter sizes used.** AES-256-GCM sits at NIST
+   post-quantum security Category 5 and is retained by NSA CNSA 2.0 for
+   National Security Systems up to TOP SECRET; NIST IR 8547 explicitly
+   excludes the symmetric standards (block ciphers, hash functions, HMAC,
+   KDFs) from the PQC transition; BSI TR-02102-1 recommends 256-bit
+   symmetric keys for long-term protection, which is what the library uses.
+   Grover's algorithm yields only a quadratic speedup that parallelizes
+   poorly and is gate-depth limited — NIST's own FAQ states it will provide
+   "little or no advantage in attacking AES".
+3. **The residual quantum-relevant risk is password entropy, not the
+   cryptography.** Grover halves the effective entropy of an offline
+   password search. Mitigations in the design: per-message 32-byte random
+   salts (no cross-ciphertext amortization) and the memory-hard Argon2id
+   KDF, whose evaluation cost provably carries over into the reversible
+   circuits a quantum attacker must build (Blocki-Holman-Lee, TCC 2022).
+   Callers with harvest-now-decrypt-later threat models should use the
+   async (Argon2id) path with a high-entropy passphrase — see the README
+   "Post-Quantum Security" section for caller-facing guidance.
+4. **Crypto-agility is built into the wire format.** Each v1 ciphertext
+   embeds its KDF identifier and full KDF parameters, so defaults can be
+   raised (or a KDF added) in a minor release while old ciphertexts remain
+   decryptable; the header's version byte reserves a clean escape hatch
+   (`0x02`) should guidance ever require a cipher change. None is needed or
+   foreseen.
+5. **Hybrid PQC modes (ML-KEM/ML-DSA) are deliberately absent** because the
+   library performs no key exchange and no signing; there is nothing to
+   hybridize, and adding those primitives would add attack surface without
+   adding security.
+
+The distribution channel (npm provenance via Sigstore, registry TLS) relies
+on the ecosystem's classical public-key infrastructure. That layer is
+outside this package's control, is a real-time integrity mechanism rather
+than harvestable ciphertext, and does not affect the confidentiality of
+data encrypted with this library.
+
+Primary sources: NIST PQC FAQ
+(<https://csrc.nist.gov/projects/post-quantum-cryptography/faqs>);
+NIST IR 8547
+(<https://nvlpubs.nist.gov/nistpubs/ir/2024/NIST.IR.8547.ipd.pdf>);
+NSA CNSA 2.0 FAQ
+(<https://media.defense.gov/2022/Sep/07/2003071836/-1/-1/0/CSI_CNSA_2.0_FAQ_.PDF>);
+BSI TR-02102-1; Kaplan et al., CRYPTO 2016
+(<https://arxiv.org/abs/1602.05973>), whose Simon's-algorithm forgery
+applies only in the superposition-query (Q2) model and not to data at
+rest; Blocki, Holman & Lee, TCC 2022
+(<https://arxiv.org/abs/2110.04191>).
+
+Reports claiming quantum vulnerability are in scope **only** if they
+present a concrete attack that invalidates one of the five points above
+under a realistic (classical-query, Q1) threat model.
 
 ## Security-relevant configuration defaults
 

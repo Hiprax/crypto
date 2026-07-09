@@ -4371,9 +4371,9 @@ describe('CryptoManager', () => {
       // A v0 salt may collide not just on the 4-byte "HPCR" magic but also
       // form a structurally-recognised v1 header whose KDF parameter field is
       // zero, so parseHeader throws INVALID_HEADER_PARAM (rather than the more
-      // common UNSUPPORTED_VERSION). The documented contract (CLAUDE.md
-      // legacyMode, the CHANGELOG magic-collision entry, and decryptText's own
-      // in-catch comment) names ONLY KDF_PARAMS_OUT_OF_BOUNDS as the
+      // common UNSUPPORTED_VERSION). The documented contract (the CHANGELOG
+      // magic-collision entry and decryptText's own in-catch comment) names
+      // ONLY KDF_PARAMS_OUT_OF_BOUNDS as the
       // always-re-thrown DoS exception in auto mode — every other structural
       // parse failure, INVALID_HEADER_PARAM included, must be caught and
       // recovered as v0. Earlier, three of the four paths (decryptText,

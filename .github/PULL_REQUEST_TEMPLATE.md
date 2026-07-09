@@ -30,5 +30,5 @@ out explicitly.
 - [ ] `npm run type-check` passes
 - [ ] `npm test` passes (including new/updated tests for the changed code)
 - [ ] `CHANGELOG.md` updated with a dated entry under a new `## Unreleased` or version heading
-- [ ] `CLAUDE.md` / `README.md` updated if user-facing behaviour, public API, or architecture changed
+- [ ] `README.md` updated if user-facing behaviour, public API, or architecture changed
 - [ ] No new runtime dependencies added (or, if added, justified in the PR body)

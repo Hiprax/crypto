@@ -41,7 +41,7 @@ Thumbs.db
 logs/
 *.log
 
-# AI
+# Local working files (never committed)
 .claude/
 claude/
 CLAUDE.md

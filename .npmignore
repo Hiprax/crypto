@@ -75,7 +75,7 @@ logs/
 tmp/
 temp/
 
-# AI
+# Local working files (never published)
 .claude/
 claude/
 CLAUDE.md

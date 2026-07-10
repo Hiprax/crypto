@@ -51,6 +51,8 @@ import {
 } from './format-core.js';
 import {
   utf8Encode,
+  utf8Decode,
+  bytesToBase64url,
   concatBytes,
   base64urlToBytes,
   isValidBase64url,
@@ -963,6 +965,145 @@ export abstract class CryptoCore {
         `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
         CryptoErrorType.DECRYPTION_FAILED,
         'DECRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Encrypt a string with a password, returning a base64url-encoded v1
+   * ciphertext.
+   *
+   * Re-expressed as a thin base64url⇄bytes wrapper over {@link encryptBytes}:
+   * `bytesToBase64url(await encryptBytes(utf8Encode(text), password))`. There
+   * is exactly ONE wire format and ONE code path — the identical bytes the
+   * isomorphic {@link encryptBytes} produces — so a string encrypted here in
+   * Node decrypts in the browser and vice-versa.
+   *
+   * The empty string `''` is accepted and produces a valid authenticated
+   * ciphertext; only `null`/`undefined` and non-string values are rejected
+   * with `INVALID_TEXT`. Password presence (`INVALID_PASSWORD`) and strength
+   * (`WEAK_PASSWORD`) are enforced by {@link encryptBytes} and surface
+   * unchanged. A non-CryptoError that escapes {@link encryptBytes} is wrapped
+   * as `TEXT_ENCRYPTION_FAILED` (defence in depth — {@link encryptBytes}
+   * already maps engine failures to `CryptoError`).
+   *
+   * @param text - text to encrypt
+   * @param password - encryption password (optional if a default passphrase
+   *   is configured)
+   * @returns base64url-encoded v1 ciphertext string
+   * @throws CryptoError on invalid input, weak/missing password, or failure
+   */
+  public async encryptText(text: string, password?: string): Promise<string> {
+    if (text === undefined || text === null || typeof text !== 'string') {
+      throw new CryptoError(
+        'Text must be a string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_TEXT'
+      );
+    }
+
+    // Transient UTF-8 byte copy of the plaintext. Hoisted so the catch can
+    // scrub it if the operation fails after allocation. encryptBytes does NOT
+    // scrub its `data` argument (the caller owns that buffer), so scrubbing
+    // the copy we allocate here is this method's responsibility. The original
+    // V8 string `text` is immutable and GC-managed — it cannot be scrubbed.
+    let plaintextBytes: Uint8Array | null = null;
+    // The assembled ciphertext buffer is hoisted so it can be zeroed after
+    // encoding (and in the catch). These are public wire bytes, not secrets —
+    // but clearing them keeps the encrypt path's hygiene symmetric with the
+    // decrypt path (which zeroes the decoded ciphertext buffer) and with the
+    // Node `encryptTextSync` sibling, which also scrubs its combined buffer.
+    let ciphertext: Uint8Array | null = null;
+    try {
+      plaintextBytes = utf8Encode(text);
+      ciphertext = await this.encryptBytes(plaintextBytes, password);
+      const encoded = bytesToBase64url(ciphertext);
+      this.secureClear(plaintextBytes);
+      this.secureClear(ciphertext);
+      return encoded;
+    } catch (error) {
+      if (plaintextBytes !== null) {
+        this.secureClear(plaintextBytes);
+      }
+      if (ciphertext !== null) {
+        this.secureClear(ciphertext);
+      }
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Text encryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.ENCRYPTION_FAILED,
+        'TEXT_ENCRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Decrypt a base64url-encoded v1 (or legacy v0) ciphertext string with a
+   * password.
+   *
+   * Re-expressed as a thin base64url⇄bytes wrapper over {@link decryptBytes}:
+   * `utf8Decode(await decryptBytes(base64urlToBytes(ct), password))`. All
+   * format handling (v1 header parse, embedded-parameter override,
+   * header-bound AAD, and the `legacyMode` v0 fallback with the
+   * magic-collision recovery and `KDF_PARAMS_OUT_OF_BOUNDS` re-throw) lives in
+   * {@link decryptBytes}, so the text path and the byte path cannot drift.
+   *
+   * Empty or non-string input is rejected with `INVALID_ENCRYPTED_TEXT`. A
+   * non-CryptoError that escapes {@link decryptBytes} is wrapped as
+   * `TEXT_DECRYPTION_FAILED`; every confidentiality-relevant failure (wrong
+   * password, tampering) surfaces as the generic `DECRYPTION_FAILED` produced
+   * by {@link decryptBytes} (no padding/auth oracle).
+   *
+   * @param encryptedText - base64url-encoded ciphertext (v0 or v1)
+   * @param password - decryption password (optional if a default passphrase
+   *   is configured)
+   * @returns the decrypted text
+   * @throws CryptoError on invalid input, wrong password, tampering, or an
+   *   unsupported/mismatched format
+   */
+  public async decryptText(
+    encryptedText: string,
+    password?: string
+  ): Promise<string> {
+    if (!encryptedText || typeof encryptedText !== 'string') {
+      throw new CryptoError(
+        'Encrypted text must be a non-empty string',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_ENCRYPTED_TEXT'
+      );
+    }
+
+    // Decoded ciphertext bytes and recovered plaintext bytes, hoisted so the
+    // catch can scrub whichever were allocated before a failure. Both are
+    // buffers this method owns: `combinedBytes` is a fresh base64url decode
+    // (decryptBytes does not scrub its caller-owned input), and `plaintext`
+    // is decryptBytes's fresh output. The V8 `result` string is GC-managed
+    // and cannot be scrubbed.
+    let combinedBytes: Uint8Array | null = null;
+    let plaintext: Uint8Array | null = null;
+    try {
+      combinedBytes = base64urlToBytes(encryptedText);
+      plaintext = await this.decryptBytes(combinedBytes, password);
+      const result = utf8Decode(plaintext);
+      this.secureClear(plaintext);
+      this.secureClear(combinedBytes);
+      return result;
+    } catch (error) {
+      if (plaintext !== null) {
+        this.secureClear(plaintext);
+      }
+      if (combinedBytes !== null) {
+        this.secureClear(combinedBytes);
+      }
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Text decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.DECRYPTION_FAILED,
+        'TEXT_DECRYPTION_FAILED'
       );
     }
   }

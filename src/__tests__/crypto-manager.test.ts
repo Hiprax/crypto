@@ -1861,10 +1861,13 @@ describe('CryptoManager', () => {
   describe('encryptText - error handling', () => {
     it('should wrap non-CryptoError exceptions', async () => {
       const mockCrypto = new CryptoManager();
-      jest.spyOn(mockCrypto, 'generateSecureRandom').mockImplementation(() => {
-        throw new Error('Random generation hardware failure');
-      });
+      // encryptText is re-expressed on encryptBytes; a non-CryptoError that
+      // escapes encryptBytes is wrapped as TEXT_ENCRYPTION_FAILED.
+      jest
+        .spyOn(mockCrypto, 'encryptBytes')
+        .mockRejectedValue(new Error('Random generation hardware failure'));
 
+      expect.assertions(2);
       try {
         await mockCrypto.encryptText(testText, testPassword);
       } catch (error) {
@@ -1877,8 +1880,10 @@ describe('CryptoManager', () => {
 
     it('should re-throw CryptoError from inside try block', async () => {
       const mockCrypto = new CryptoManager();
+      // A CryptoError from encryptBytes (e.g. a KDF failure) must be
+      // re-thrown unchanged rather than re-wrapped as TEXT_ENCRYPTION_FAILED.
       jest
-        .spyOn(mockCrypto, 'deriveKey')
+        .spyOn(mockCrypto, 'encryptBytes')
         .mockRejectedValue(
           new CryptoError(
             'Mock key derivation failure',
@@ -1887,6 +1892,7 @@ describe('CryptoManager', () => {
           )
         );
 
+      expect.assertions(2);
       try {
         await mockCrypto.encryptText(testText, testPassword);
       } catch (error) {
@@ -1939,14 +1945,16 @@ describe('CryptoManager', () => {
   describe('decryptText - non-CryptoError wrapping', () => {
     it('should wrap non-CryptoError exceptions', async () => {
       const mockCrypto = new CryptoManager();
-      // Encrypt first with real implementation
+      // Encrypt first with the real implementation to get a valid input.
       const encrypted = await mockCrypto.encryptText(testText, testPassword);
 
-      // Now mock deriveKey to throw generic error
+      // decryptText is re-expressed on decryptBytes; a non-CryptoError that
+      // escapes decryptBytes is wrapped as TEXT_DECRYPTION_FAILED.
       jest
-        .spyOn(mockCrypto, 'deriveKey')
+        .spyOn(mockCrypto, 'decryptBytes')
         .mockRejectedValue(new Error('Key derivation hardware failure'));
 
+      expect.assertions(2);
       try {
         await mockCrypto.decryptText(encrypted, testPassword);
       } catch (error) {
@@ -5181,10 +5189,16 @@ describe('CryptoManager', () => {
       const spy = jest.spyOn(cm, 'secureClear');
       const result = await cm.decryptText(encrypted, testPassword);
       expect(result).toBe(testText);
+      // decryptText scrubs the derived key (via decryptBytes), the recovered
+      // plaintext, and the decoded ciphertext buffer — at least 3 calls.
       expect(spy.mock.calls.length).toBeGreaterThanOrEqual(3);
+      // The async text path decodes base64url to an isomorphic Uint8Array (not
+      // a Node Buffer) before handing it to decryptBytes, so match on
+      // `instanceof Uint8Array` (a Buffer is also a Uint8Array, so this stays
+      // compatible with the pre-refactor Buffer case).
       const expectedCombinedLen = Buffer.from(encrypted, 'base64url').length;
       const sawCombined = spy.mock.calls.some(([buf]) => {
-        return Buffer.isBuffer(buf) && buf.length === expectedCombinedLen;
+        return buf instanceof Uint8Array && buf.length === expectedCombinedLen;
       });
       expect(sawCombined).toBe(true);
       spy.mockRestore();
@@ -7158,16 +7172,22 @@ describe('CryptoManager', () => {
       expect(keyCallFound).toBe(true);
     }
 
-    it('encryptText: scrubs key when encryptData throws post-derivation', async () => {
+    it('encryptText: scrubs key when the AEAD cipher throws post-derivation', async () => {
       const cm = new CryptoManager({
         memoryCost: 2 ** 12,
         timeCost: 1,
         parallelism: 1,
       });
       const clearSpy = jest.spyOn(cm, 'secureClear');
-      jest.spyOn(cm, 'encryptData').mockImplementationOnce(() => {
-        throw new Error('forced post-derivation failure');
-      });
+      // The async text path is re-expressed on encryptBytes, which encrypts
+      // via the engine's AES-256-GCM (node:crypto createCipheriv), not the
+      // subclass encryptData. Force that primitive to throw AFTER Argon2id key
+      // derivation to exercise the catch-path key scrub.
+      jest
+        .spyOn(nodeCrypto, 'createCipheriv')
+        .mockImplementation(((): never => {
+          throw new Error('forced post-derivation failure');
+        }) as unknown as typeof nodeCrypto.createCipheriv);
       await expect(cm.encryptText(testText, validPwd)).rejects.toThrow();
       assertKeyScrubbed(clearSpy);
     });
@@ -7510,7 +7530,7 @@ describe('CryptoManager', () => {
       jest.restoreAllMocks();
     });
 
-    it('encryptText: secureClear is called with the plaintext textBuffer when encryptData throws', async () => {
+    it('encryptText: secureClear is called with the plaintext bytes when the AEAD cipher throws', async () => {
       const cm = new CryptoManager({
         memoryCost: 2 ** 12,
         timeCost: 1,
@@ -7518,21 +7538,26 @@ describe('CryptoManager', () => {
       });
       const clearSpy = jest.spyOn(cm, 'secureClear');
 
-      // Inject a failure AFTER textBuffer is allocated but inside encryptData.
-      jest.spyOn(cm, 'encryptData').mockImplementation(() => {
-        throw new Error(
-          'injected encryptData failure after textBuffer allocation'
-        );
-      });
+      // The async text path allocates a transient UTF-8 byte copy of the
+      // plaintext (utf8Encode) before calling encryptBytes, which encrypts via
+      // the engine's AES-256-GCM. Force that primitive to throw so the catch
+      // path runs; the plaintext copy (a Uint8Array, not a Buffer, in the
+      // isomorphic core) must be scrubbed.
+      jest
+        .spyOn(nodeCrypto, 'createCipheriv')
+        .mockImplementation(((): never => {
+          throw new Error('injected AEAD failure after plaintext allocation');
+        }) as unknown as typeof nodeCrypto.createCipheriv);
 
       await expect(cm.encryptText(SCRUB_TEXT, testPassword)).rejects.toThrow();
 
-      // Without the fix, textBuffer was const inside the try and invisible
-      // to the catch — secureClear was never called with it on error.
-      // With the fix, the catch block calls secureClear(textBuffer).
+      // The plaintext byte copy is a Uint8Array in the isomorphic core (a
+      // Buffer is also a Uint8Array, so this stays compatible with the
+      // pre-refactor Buffer case). SCRUB_TEXT's 17-byte length is distinct
+      // from key/salt/iv/tag so the match is unambiguous.
       const expectedLen = Buffer.from(SCRUB_TEXT, 'utf8').length;
       const scrubCall = clearSpy.mock.calls.find(
-        ([buf]) => buf instanceof Buffer && buf.length === expectedLen
+        ([buf]) => buf instanceof Uint8Array && buf.length === expectedLen
       );
       expect(scrubCall).toBeDefined();
     });

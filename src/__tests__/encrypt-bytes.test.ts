@@ -231,6 +231,87 @@ describe('encryptBytes / decryptBytes (isomorphic in-memory API)', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Phase 4 — encryptText/decryptText re-expressed as base64url⇄bytes wrappers
+  // over encryptBytes/decryptBytes. The single-input interop checks above are
+  // widened here into a matrix (empty string, block-boundary, multi-byte UTF-8,
+  // long buffer) in BOTH directions so the text API and the bytes API can never
+  // drift, plus the text-specific input rules now owned by the isomorphic core
+  // (INVALID_TEXT, INVALID_ENCRYPTED_TEXT, empty-string acceptance).
+  // ---------------------------------------------------------------------------
+  describe('text API re-expressed on the bytes API (Phase 4)', () => {
+    // '' is a first-class plaintext; the rest cover ascii, a length straddling
+    // the AES block boundary, multi-byte UTF-8, and a long buffer.
+    const texts = [
+      '',
+      'a',
+      'exactly-sixteen!',
+      'café — 世界 — 🔐 — Ω≈ç√∫ — Здравствуй',
+      'x'.repeat(5000),
+    ];
+
+    it.each(texts)(
+      'decryptText(bytesToBase64url(encryptBytes(utf8(t)))) === t  [case %#]',
+      async text => {
+        const ciphertextBytes = await cm.encryptBytes(
+          utf8Encode(text),
+          PASSWORD
+        );
+        const asText = bytesToBase64url(ciphertextBytes);
+        expect(await cm.decryptText(asText, PASSWORD)).toBe(text);
+      }
+    );
+
+    it.each(texts)(
+      'decryptBytes(base64urlToBytes(encryptText(t))) === utf8(t)  [case %#]',
+      async text => {
+        const encryptedText = await cm.encryptText(text, PASSWORD);
+        const back = await cm.decryptBytes(
+          base64urlToBytes(encryptedText),
+          PASSWORD
+        );
+        expect(bytesEqual(back, utf8Encode(text))).toBe(true);
+      }
+    );
+
+    it.each(texts)(
+      'encryptText → decryptText round-trips t  [case %#]',
+      async text => {
+        const enc = await cm.encryptText(text, PASSWORD);
+        expect(await cm.decryptText(enc, PASSWORD)).toBe(text);
+      }
+    );
+
+    it('encryptText accepts the empty string and emits a v1 (HPCR) ciphertext', async () => {
+      const enc = await cm.encryptText('', PASSWORD);
+      expect(cm.inspectHeader(enc)).not.toBeNull();
+      expect(await cm.decryptText(enc, PASSWORD)).toBe('');
+    });
+
+    it.each([null, undefined, 123, {}])(
+      'encryptText rejects non-string (%p) with INVALID_TEXT',
+      async bad => {
+        try {
+          await cm.encryptText(bad as unknown as string, PASSWORD);
+          throw new Error('expected encryptText to throw');
+        } catch (err) {
+          expect(err).toBeInstanceOf(CryptoError);
+          expect((err as CryptoError).code).toBe('INVALID_TEXT');
+        }
+      }
+    );
+
+    it('decryptText rejects the empty string with INVALID_ENCRYPTED_TEXT', async () => {
+      try {
+        await cm.decryptText('', PASSWORD);
+        throw new Error('expected decryptText to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        expect((err as CryptoError).code).toBe('INVALID_ENCRYPTED_TEXT');
+      }
+    });
+  });
+
   describe('default passphrase', () => {
     it('uses the configured defaultPassphrase when no password is passed', async () => {
       const withDefault = new CryptoManager({

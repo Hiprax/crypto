@@ -11,9 +11,16 @@
  * deterministic salt + IV mocks, so any byte-level drift fails loud.
  *
  * Determinism strategy:
- *   - Spy on {@link CryptoManager.generateSecureRandom} with `jest.spyOn`
- *     so EVERY call returns a fixed-pattern Buffer of the requested
- *     length (salt = 32 bytes of 0xAA; IV = 12 bytes of 0xBB).
+ *   - Spy on the RNG seam so EVERY salt/IV call returns a fixed-pattern
+ *     Buffer of the requested length (salt = 32 bytes of 0xAA; IV = 12 bytes
+ *     of 0xBB). The sync (PBKDF2) path draws salt/IV from
+ *     {@link CryptoManager.generateSecureRandom} (spied via
+ *     `installFixedRandomSpy`); the async (Argon2id) path is re-expressed on
+ *     the isomorphic `encryptBytes`, which draws them from the injected
+ *     engine's `randomBytes` (spied via `installFixedEngineRandomSpy`). Both
+ *     seams get the identical fixed bytes, so the checked-in wire-format
+ *     snapshot is unchanged by the refactor — which is exactly the proof that
+ *     the byte layout did not drift.
  *   - Mock the `argon2` native module via `jest.unstable_mockModule` so
  *     the async path's KDF returns a fixed 32-byte buffer regardless of
  *     password + salt input. This frees the snapshot from depending on
@@ -118,6 +125,43 @@ function installFixedRandomSpy(
   return () => spy.mockRestore();
 }
 
+/**
+ * Install a `jest.spyOn` on the injected engine's `randomBytes` — the RNG
+ * seam the isomorphic `encryptBytes`/async `encryptText` path uses — that
+ * returns deterministic bytes for the documented salt (32) + IV (12) calls,
+ * mirroring {@link installFixedRandomSpy}. Since the async ciphertext draws
+ * its salt/IV from `engine.randomBytes` rather than `generateSecureRandom`,
+ * the async snapshot pins THIS seam; the fixed bytes are identical, so the
+ * checked-in `.snap` is unchanged.
+ *
+ * IMPORTANT: pass the `nodeEngine` imported from the SAME
+ * post-`resetModules` registry as the `CryptoManager` under test, so the
+ * spied object is the exact one the manager was constructed with.
+ *
+ * @param engine - the Node engine the manager was constructed with.
+ * @returns a teardown function that restores the original method.
+ */
+function installFixedEngineRandomSpy(engine: {
+  randomBytes: (length: number) => Uint8Array;
+}): () => void {
+  const spy = jest.spyOn(engine, 'randomBytes');
+  spy.mockImplementation((length: number) => {
+    if (length === 32) {
+      return Buffer.alloc(32, FIXED_SALT_BYTE);
+    }
+    if (length === 12) {
+      return Buffer.alloc(12, FIXED_IV_BYTE);
+    }
+    throw new Error(
+      `Unexpected engine.randomBytes length=${length} in snapshot test ` +
+        `(only 32-byte salt and 12-byte IV are expected). If a code change ` +
+        `introduces a new fixed-randomness source, update this mock; ` +
+        `otherwise this is a real surprise worth investigating.`
+    );
+  });
+  return () => spy.mockRestore();
+}
+
 // ============================================================================
 
 describe('v1 ciphertext format snapshot tests (Task 13)', () => {
@@ -178,9 +222,15 @@ describe('v1 ciphertext format snapshot tests (Task 13)', () => {
       // the mocked module on first call.
       const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
         await import('../crypto-manager');
+      // Import the engine from the SAME (post-resetModules) registry the
+      // dynamically-imported CryptoManager uses, so the randomBytes spy lands
+      // on the exact object the manager was constructed with. The async text
+      // path is re-expressed on encryptBytes, which draws salt/IV from
+      // engine.randomBytes (not generateSecureRandom).
+      const { nodeEngine } = await import('../engine.node');
       __resetArgon2ModuleCacheForTesting();
 
-      const restoreRandom = installFixedRandomSpy(CryptoManager);
+      const restoreRandom = installFixedEngineRandomSpy(nodeEngine);
       try {
         const cm = new CryptoManager(TEST_ARGON2_OPTS);
         const ciphertextB64 = await cm.encryptText(

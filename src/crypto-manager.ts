@@ -50,6 +50,18 @@ import {
   MAX_PBKDF2_ITERATIONS,
 } from './format.js';
 import { isValidBase64Url } from './utils.js';
+import { loadArgon2, ARGON2_ID } from './engine.node.js';
+import type { Argon2Hasher, Argon2Provider } from './engine.node.js';
+
+// The Argon2 lazy-load implementation (native `argon2` → pure-WASM `hash-wasm`
+// fallback) lives in `engine.node.ts` as of the engine refactor. Re-export the
+// internal test-only cache hooks and the provider/hasher types here so existing
+// imports from `./crypto-manager` continue to resolve unchanged.
+export {
+  __resetArgon2ModuleCacheForTesting,
+  __peekArgon2ProviderForTesting,
+} from './engine.node.js';
+export type { Argon2Hasher, Argon2Provider };
 
 /**
  * Argon2id parameter thresholds that classify a {@link CryptoManager} into
@@ -103,16 +115,6 @@ const PBKDF2_DEFAULT_ITERATIONS = 600000;
  * carry the iteration count in their header and ignore this constant.
  */
 const PBKDF2_LEGACY_ITERATIONS = 100000;
-
-/**
- * Numeric identifier for the Argon2id variant in the `argon2` native module
- * (which exports `argon2id` as the literal number `2`). We hardcode the
- * value rather than importing it eagerly so that consumers who only use the
- * sync (PBKDF2) paths never trigger the native-module load and never hit a
- * `MODULE_NOT_FOUND` at import time when `argon2` is missing or fails to
- * build.
- */
-const ARGON2_ID = 2;
 
 /**
  * Minimum length that allows a password to bypass character-category
@@ -187,97 +189,6 @@ export function isValidPassword(password: string): boolean {
 }
 
 /**
- * Minimal subset of the `argon2` module surface we actually use. Declared
- * locally so we never have to import the package's types eagerly — the
- * package ships its own `.d.cts` declarations but importing them at the top
- * level pulls the whole module in for type-resolution purposes.
- */
-type Argon2Module = {
-  hash: (
-    password: string,
-    options: {
-      type: number;
-      memoryCost: number;
-      timeCost: number;
-      parallelism: number;
-      hashLength: number;
-      salt: Buffer;
-      raw: true;
-    }
-  ) => Promise<Buffer>;
-};
-
-/**
- * Minimal subset of the `hash-wasm` module surface we actually use. Declared
- * locally for the same reason as {@link Argon2Module} — type-resolution
- * isolation and to keep the import lazy.
- *
- * Parameter mapping (`argon2` ↔ `hash-wasm`):
- *
- *   - `memoryCost` (KiB)  ↔ `memorySize` (KiB)
- *   - `timeCost`          ↔ `iterations`
- *   - `parallelism`       ↔ `parallelism`
- *   - `hashLength`        ↔ `hashLength`
- *
- * Both libraries implement the RFC 9106 Argon2id reference, so the raw
- * 32-byte derived keys are bit-identical for the same `(password, salt,
- * memoryCost, timeCost, parallelism, hashLength)` tuple. This is verified
- * with a known-vector parity test in `argon2-lazy-load.test.ts` — drift
- * would mean a v1 ciphertext produced under one runtime cannot be decrypted
- * under the other, so the test pins the round-trip explicitly.
- */
-type HashWasmModule = {
-  argon2id: (options: {
-    password: string;
-    salt: Buffer;
-    iterations: number;
-    parallelism: number;
-    memorySize: number;
-    hashLength: number;
-    outputType: 'binary';
-  }) => Promise<Uint8Array>;
-};
-
-/**
- * Provider tag for the loaded Argon2 implementation. Used in the friendly
- * error message and exposed via the test-only inspection helper so tests can
- * assert which fallback path was hit. Internal — do NOT import from outside
- * the test suite.
- *
- * @internal
- */
-export type Argon2Provider = 'native' | 'wasm';
-
-/**
- * Unified hasher interface that both the native `argon2` module and the
- * `hash-wasm` fallback are normalised to. Encapsulating the differences
- * here keeps `deriveKey` provider-agnostic — it always sees the same
- * `(password, options) => Promise<Buffer>` shape regardless of which
- * provider produced the bytes.
- *
- * @internal
- */
-export type Argon2Hasher = {
-  /** Which underlying implementation produced this hasher. */
-  provider: Argon2Provider;
-  /**
-   * Compute a raw `hashLength`-byte Argon2id key for the given password and
-   * parameters. Both providers MUST produce bit-identical output for
-   * identical inputs (verified by the parity test).
-   */
-  hash: (
-    password: string,
-    options: {
-      memoryCost: number;
-      timeCost: number;
-      parallelism: number;
-      hashLength: number;
-      salt: Buffer;
-    }
-  ) => Promise<Buffer>;
-};
-
-/**
  * Symbol used to mark an error that was thrown by a user-supplied
  * {@link ProgressCallback}. The catch blocks in the file methods detect
  * this marker and re-throw the error as-is (preserving identity) instead of
@@ -339,260 +250,6 @@ function isProgressThrow(thrown: unknown): boolean {
     typeof thrown === 'object' &&
     (thrown as { [PROGRESS_THROW]?: true })[PROGRESS_THROW] === true
   );
-}
-
-/**
- * Module-level cache for the loaded Argon2 hasher (native or WASM-backed).
- * Three observable states, with the in-flight loading state expressed as
- * the unsettled promise itself:
- *
- *   - `null`                       — load not yet attempted, OR the
- *                                    previous load attempt rejected (so
- *                                    the next caller will retry).
- *   - `Promise<Argon2Hasher>`      — either the in-flight load promise
- *                                    (concurrent callers await it) or, on
- *                                    success, a permanently-resolved
- *                                    promise that future callers `await`
- *                                    cheaply.
- *
- * Keeping this at module scope (not on the class instance) means multiple
- * `CryptoManager` instances share one load attempt, which is the right
- * behaviour: native modules are process-global anyway, and we don't want
- * to pay the import cost N times.
- *
- * **Why a promise rather than the resolved module?** Two requirements
- * pull in opposite directions:
- *
- *   1. Concurrent first-callers should share one `await import('argon2')`
- *      — without coalescing, N parallel `encryptText` calls would each
- *      fire their own dynamic import.
- *   2. Transient load failures (e.g. a temporary FS permission glitch on
- *      Windows during a build-tool install) should not permanently
- *      disable async crypto for the lifetime of the process.
- *
- * Storing the in-flight promise satisfies (1) — concurrent callers see
- * the same promise and await it. Clearing the slot on rejection (see
- * `loadArgon2` below) satisfies (2) — the next caller after a failure
- * starts a fresh load. On success the promise stays cached forever, so
- * subsequent callers pay only an `await` of an already-settled promise
- * (no re-import).
- */
-let argon2ModuleCache: Promise<Argon2Hasher> | null = null;
-
-/**
- * Internal hook used exclusively by tests to reset the lazy-load cache so
- * that simulated load failures are observable on subsequent calls. Not part
- * of the public API; do NOT call this from application code.
- *
- * @internal
- */
-export function __resetArgon2ModuleCacheForTesting(): void {
-  argon2ModuleCache = null;
-}
-
-/**
- * Internal hook used exclusively by tests to inspect which Argon2 provider
- * is currently cached. Returns `null` if no provider is cached yet, or the
- * provider tag of the resolved hasher. Not part of the public API.
- *
- * @internal
- */
-export async function __peekArgon2ProviderForTesting(): Promise<Argon2Provider | null> {
-  if (argon2ModuleCache === null) {
-    return null;
-  }
-  try {
-    const hasher = await argon2ModuleCache;
-    return hasher.provider;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Perform the actual dynamic import of the `argon2` native module and
- * normalise the CJS/ESM interop, then adapt the result to the unified
- * {@link Argon2Hasher} interface.
- *
- * Returns a hasher tagged `provider: 'native'` on success; rejects with a
- * raw `Error` on import failure (the caller composes the friendly error
- * after deciding whether the WASM fallback also fails).
- */
-async function importNativeArgon2(): Promise<Argon2Hasher> {
-  // Dynamic ESM import. argon2 ships as CJS, so the imported namespace's
-  // `default` property is the actual module object (Node's CJS-ESM
-  // interop). Fall back to the namespace itself in case a future argon2
-  // release ships native ESM.
-  const mod = (await import('argon2')) as
-    | { default: Argon2Module }
-    | Argon2Module;
-  const resolved =
-    'default' in mod && (mod as { default: Argon2Module }).default
-      ? (mod as { default: Argon2Module }).default
-      : (mod as Argon2Module);
-  return {
-    provider: 'native',
-    hash: async (password, options): Promise<Buffer> => {
-      const out = await resolved.hash(password, {
-        type: ARGON2_ID,
-        memoryCost: options.memoryCost,
-        timeCost: options.timeCost,
-        parallelism: options.parallelism,
-        hashLength: options.hashLength,
-        salt: options.salt,
-        raw: true,
-      });
-      return Buffer.from(out);
-    },
-  };
-}
-
-/**
- * Perform the actual dynamic import of the `hash-wasm` module and adapt it
- * to the unified {@link Argon2Hasher} interface.
- *
- * Parameter mapping is the only twist: hash-wasm names `iterations` for
- * what the native argon2 package calls `timeCost`, and `memorySize` for
- * what native calls `memoryCost`. Output type `'binary'` returns a raw
- * `Uint8Array` of `hashLength` bytes (no encoded prefix), which we wrap in
- * a Buffer to match the native-provider return type.
- *
- * Returns a hasher tagged `provider: 'wasm'`; rejects with a raw `Error`
- * on import failure.
- */
-async function importHashWasmArgon2(): Promise<Argon2Hasher> {
-  const mod = (await import('hash-wasm')) as
-    | { default: HashWasmModule }
-    | HashWasmModule;
-  // hash-wasm ships ESM with `argon2id` as a named export. Some bundlers
-  // (and Jest's CJS-ESM interop) may surface it under `.default`; handle
-  // both shapes the same way as we do for native argon2.
-  const resolved =
-    'default' in mod &&
-    (mod as { default: HashWasmModule }).default &&
-    typeof (mod as { default: HashWasmModule }).default.argon2id === 'function'
-      ? (mod as { default: HashWasmModule }).default
-      : (mod as HashWasmModule);
-  return {
-    provider: 'wasm',
-    hash: async (password, options): Promise<Buffer> => {
-      const out = await resolved.argon2id({
-        password,
-        salt: options.salt,
-        iterations: options.timeCost,
-        parallelism: options.parallelism,
-        memorySize: options.memoryCost,
-        hashLength: options.hashLength,
-        outputType: 'binary',
-      });
-      return Buffer.from(out);
-    },
-  };
-}
-
-/**
- * Try the native `argon2` import first, then the `hash-wasm` import, and
- * if both fail throw a friendly {@link CryptoError} with a unified
- * `ARGON2_NOT_AVAILABLE` code.
- *
- * Both providers implement the RFC 9106 Argon2id reference and produce
- * bit-identical raw output for the same `(password, salt, memoryCost,
- * timeCost, parallelism, hashLength)` tuple. The fallback chain therefore
- * does NOT change ciphertext compatibility: a v1 ciphertext produced by a
- * native-backed manager round-trips through a WASM-backed manager and
- * vice versa.
- *
- * Extracted from {@link loadArgon2} so the in-flight promise stored in the
- * cache contains only the import + normalisation + fallback work (no extra
- * wrapping that would change the rejection shape callers see).
- */
-async function importArgon2Hasher(): Promise<Argon2Hasher> {
-  let nativeError: unknown;
-  try {
-    return await importNativeArgon2();
-  } catch (err) {
-    nativeError = err;
-  }
-  try {
-    return await importHashWasmArgon2();
-  } catch (wasmError) {
-    // Both providers failed — surface a friendly error that points users at
-    // both fix paths (install build tools for native, or install hash-wasm
-    // for the pure-JS WASM fallback) plus the synchronous PBKDF2 escape
-    // hatch that doesn't need either.
-    const nativeMsg =
-      nativeError instanceof Error ? nativeError.message : String(nativeError);
-    const wasmMsg =
-      wasmError instanceof Error ? wasmError.message : String(wasmError);
-    throw new CryptoError(
-      'argon2 native module unavailable. Install build tools (Python + node-gyp) ' +
-        'or install the optional `hash-wasm` package for a pure-WASM Argon2id ' +
-        'fallback (slower than native but works everywhere). Alternatively, use ' +
-        '*Sync methods (PBKDF2). ' +
-        `Native error: ${nativeMsg}. WASM error: ${wasmMsg}.`,
-      CryptoErrorType.MEMORY_ERROR,
-      'ARGON2_NOT_AVAILABLE'
-    );
-  }
-}
-
-/**
- * Lazily load an Argon2id hasher (native preferred, hash-wasm fallback)
- * using an in-flight-promise pattern that coalesces concurrent
- * first-callers and lets transient failures recover on the next call.
- *
- * Behaviour:
- *
- *   - First call (cache empty): assigns the in-flight import promise to
- *     the cache slot and awaits it. On success the resolved promise stays
- *     cached forever — subsequent callers `await` an already-settled
- *     promise (no re-import). On rejection the cache slot is cleared back
- *     to `null` so the NEXT caller starts a fresh load.
- *   - Concurrent first-callers: read the same in-flight promise from the
- *     cache, await it, and either all resolve to the same module or all
- *     reject with the same error. No duplicate `await import`.
- *   - Caller after a previous failure: cache is `null`, so this call
- *     behaves exactly like a first-time call. Transient failures (e.g.
- *     temporary FS permission errors during a parallel build-tool install)
- *     can recover on the next attempt rather than being stuck for the
- *     process lifetime.
- *
- * The cache-clear step uses a "compare-and-swap" pattern: only clear if
- * the slot still holds *our* failing promise. This guards against a race
- * where a concurrent caller resets the cache (via the test-only hook) or
- * a successful retry has already populated the slot.
- *
- * Why a function instead of inline in `deriveKey`: extracting it makes the
- * caching logic testable and keeps `deriveKey` readable.
- */
-async function loadArgon2(): Promise<Argon2Hasher> {
-  // Fast path: someone already started (or finished) the load. Reuse it.
-  if (argon2ModuleCache !== null) {
-    return argon2ModuleCache;
-  }
-
-  // Slow path: start a load. Assign the promise to the cache slot BEFORE
-  // awaiting so concurrent callers landing here observe the in-flight
-  // promise rather than starting their own. We capture the promise in a
-  // local `inFlight` so the post-await CAS check is correct even if a
-  // concurrent caller (or the test-only reset hook) replaces the cache
-  // slot mid-flight.
-  const inFlight = importArgon2Hasher();
-  argon2ModuleCache = inFlight;
-
-  try {
-    return await inFlight;
-  } catch (err) {
-    // Clear the cache slot — but ONLY if it still holds OUR failing
-    // promise. If a concurrent caller already started a fresh attempt
-    // (which they couldn't have, given JS single-threaded semantics —
-    // but a synchronous test-only reset between assignment and await is
-    // possible) or the test reset hook emptied it, we don't overwrite.
-    if (argon2ModuleCache === inFlight) {
-      argon2ModuleCache = null;
-    }
-    throw err;
-  }
 }
 
 /**
@@ -973,7 +630,7 @@ export class CryptoManager {
     // We do NOT wrap this in the try/catch below because we want the
     // load failure to bubble up with its own specific error code, not
     // get rewritten as `KEY_DERIVATION_FAILED`.
-    const hasher = await loadArgon2();
+    const hasher: Argon2Hasher = await loadArgon2();
 
     try {
       const memoryCost = overrides?.memoryCost ?? this.argon2Options.memoryCost;

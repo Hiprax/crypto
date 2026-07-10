@@ -34,6 +34,10 @@ export default [
         Buffer: 'readonly',
         __dirname: 'readonly',
         __filename: 'readonly',
+        // Universal encoding globals available in both Node (>=22) and the
+        // browser; used by the isomorphic `codec.ts` for UTF-8 transcoding.
+        TextEncoder: 'readonly',
+        TextDecoder: 'readonly',
       },
     },
     plugins: {

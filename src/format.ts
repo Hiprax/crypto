@@ -1,147 +1,62 @@
 /**
- * Versioned ciphertext format utilities for @hiprax/crypto.
+ * Node `Buffer` wrapper around the pure {@link ./format-core.js} format layer.
  *
- * Layout (v1):
- *   [magic:    4 bytes — ASCII "HPCR"]
- *   [version:  1 byte  — 0x01]
- *   [kdfId:    1 byte  — 0 = Argon2id, 1 = PBKDF2-SHA256]
- *   [params:  16 bytes — KDF-specific parameters (see below)]
- *   [salt:    saltLength bytes]
- *   [iv:      ivLength bytes]
- *   ... text body (tag + ciphertext) or file body (ciphertext + tag)
+ * The real header logic — every constant, type, byte layout, and error code —
+ * lives in `./format-core.js`, which depends only on `Uint8Array`/`DataView`
+ * and runs unchanged in Node and the browser. This module preserves the
+ * long-standing, `Buffer`-typed public API that `crypto-manager.ts` and the
+ * test suite consume, so the split is fully backward-compatible:
  *
- * KDF parameter blocks (16 bytes, big-endian):
+ *   - Constants and types are re-exported verbatim from `format-core.js`.
+ *   - `MAGIC_BYTES` is exposed as a `Buffer` (a copy of the core bytes).
+ *   - `packHeader`/`parseHeader`/`hasMagic` keep their exact `Buffer`-typed
+ *     signatures; `packHeader` returns a `Buffer` (copy of the core bytes).
  *
- *   Argon2id (kdfId = 0)
- *     [memoryCost:  4 bytes BE u32]
- *     [timeCost:    4 bytes BE u32]
- *     [parallelism: 2 bytes BE u16]
- *     [reserved:    6 bytes — zero-filled]
- *
- *   PBKDF2-SHA256 (kdfId = 1)
- *     [iterations: 4 bytes BE u32]
- *     [reserved:  12 bytes — zero-filled]
- *
- * Legacy v0 ciphertexts (no header) are still accepted in `'auto'` legacy mode.
+ * See `./format-core.js` for the full v1 layout documentation.
  */
 
+import {
+  MAGIC_BYTES as CORE_MAGIC_BYTES,
+  hasMagic as coreHasMagic,
+  packHeader as corePackHeader,
+  parseHeader as coreParseHeader,
+} from './format-core.js';
+import type { KdfHeaderParams, KdfId, ParsedHeader } from './format-core.js';
 import { CryptoError, CryptoErrorType } from './types.js';
 
-/** ASCII "HPCR" — magic bytes that identify v1 ciphertext. */
-export const MAGIC_BYTES: Buffer = Buffer.from('HPCR', 'ascii');
+// Re-export all constants unchanged (identical values and types).
+export {
+  MAGIC_LENGTH,
+  VERSION_LENGTH,
+  KDF_ID_LENGTH,
+  KDF_PARAMS_LENGTH,
+  HEADER_LENGTH,
+  FORMAT_VERSION,
+  KDF_ID_ARGON2ID,
+  KDF_ID_PBKDF2_SHA256,
+  MAX_ARGON2_MEMORY_COST,
+  MAX_ARGON2_TIME_COST,
+  MAX_ARGON2_PARALLELISM,
+  MAX_PBKDF2_ITERATIONS,
+} from './format-core.js';
 
-/** Length of magic bytes (4). */
-export const MAGIC_LENGTH = 4;
-
-/** Length of the version byte (1). */
-export const VERSION_LENGTH = 1;
-
-/** Length of the KDF identifier byte (1). */
-export const KDF_ID_LENGTH = 1;
-
-/** Length of the KDF parameter block (16 bytes — symmetrical regardless of KDF). */
-export const KDF_PARAMS_LENGTH = 16;
-
-/** Total v1 header size in bytes (6 fixed + 16 params = 22). */
-export const HEADER_LENGTH =
-  MAGIC_LENGTH + VERSION_LENGTH + KDF_ID_LENGTH + KDF_PARAMS_LENGTH;
-
-/** Currently supported ciphertext format version. */
-export const FORMAT_VERSION = 0x01;
-
-/** Identifier for the Argon2id KDF in the on-disk format. */
-export const KDF_ID_ARGON2ID = 0x00;
-
-/** Identifier for the PBKDF2-SHA256 KDF in the on-disk format. */
-export const KDF_ID_PBKDF2_SHA256 = 0x01;
-
-/** Inclusive upper bound for u32 fields (memoryCost, timeCost, iterations). */
-const U32_MAX = 0xffffffff;
-
-/** Inclusive upper bound for u16 fields (parallelism). */
-const U16_MAX = 0xffff;
+// Re-export all types unchanged.
+export type {
+  KdfId,
+  Argon2idHeaderParams,
+  Pbkdf2HeaderParams,
+  KdfHeaderParams,
+  ParsedHeader,
+} from './format-core.js';
 
 /**
- * Upper bound on the Argon2id `memoryCost` parameter accepted by
- * {@link parseHeader}. 2^22 KiB == 4 GiB — well above any legitimate
- * configuration's needs (the library default is 128 MiB, the documented
- * `ULTRA` tier is 512 MiB) and small enough that a single decrypt call
- * cannot blow past process memory limits trying to honour an
- * attacker-supplied header.
+ * ASCII "HPCR" — magic bytes that identify v1 ciphertext.
  *
- * Caps are enforced at parse time so that **all** consumers (including the
- * tooling-facing {@link inspectHeader} method) see the same bounded value.
- * This means `inspectHeader` cannot be tricked into returning an absurd
- * `memoryCost` while the decrypt path catches the same input later.
+ * A `Buffer` copy of the core magic bytes, preserved for backward
+ * compatibility with callers that use `Buffer` methods (`.copy`,
+ * `.toString('ascii')`, `.equals`, byte indexing).
  */
-export const MAX_ARGON2_MEMORY_COST = 2 ** 22;
-
-/**
- * Upper bound on the Argon2id `timeCost` parameter accepted by
- * {@link parseHeader}. 100 iterations is well above OWASP's high-security
- * recommendation (3 iterations for 128 MiB memoryCost) and trivially
- * exceeds any realistic configuration.
- */
-export const MAX_ARGON2_TIME_COST = 100;
-
-/**
- * Upper bound on the Argon2id `parallelism` parameter accepted by
- * {@link parseHeader}. 64 lanes is far above any sensible value (most
- * Argon2id deployments use 1-4 lanes); larger values give an attacker a
- * lever to amplify memory cost across worker threads.
- */
-export const MAX_ARGON2_PARALLELISM = 64;
-
-/**
- * Upper bound on the PBKDF2 `iterations` parameter accepted by
- * {@link parseHeader}. 10 million is roughly 16x the OWASP 2023+
- * recommendation (600 000 for PBKDF2-HMAC-SHA256). Anything beyond this is
- * almost certainly malicious — `crypto.pbkdf2Sync` runs on the main thread
- * and 100M iterations blocks the event loop indefinitely.
- */
-export const MAX_PBKDF2_ITERATIONS = 10_000_000;
-
-/**
- * KDF identifier as it appears in the v1 header.
- */
-export type KdfId = typeof KDF_ID_ARGON2ID | typeof KDF_ID_PBKDF2_SHA256;
-
-/**
- * Parsed Argon2id parameters from a v1 header.
- */
-export interface Argon2idHeaderParams {
-  kind: 'argon2id';
-  memoryCost: number;
-  timeCost: number;
-  parallelism: number;
-}
-
-/**
- * Parsed PBKDF2-SHA256 parameters from a v1 header.
- */
-export interface Pbkdf2HeaderParams {
-  kind: 'pbkdf2-sha256';
-  iterations: number;
-}
-
-/**
- * Decoded KDF parameter block. Discriminate by `kind`.
- */
-export type KdfHeaderParams = Argon2idHeaderParams | Pbkdf2HeaderParams;
-
-/**
- * Result of parsing a v1 header.
- */
-export interface ParsedHeader {
-  /** Format version (currently always 0x01). */
-  version: number;
-  /** KDF identifier. */
-  kdfId: KdfId;
-  /** Decoded KDF parameters. */
-  params: KdfHeaderParams;
-  /** Total bytes consumed by the header (always HEADER_LENGTH for v1). */
-  headerLen: number;
-}
+export const MAGIC_BYTES: Buffer = Buffer.from(CORE_MAGIC_BYTES);
 
 /**
  * Detect whether a buffer begins with the v1 magic bytes ("HPCR").
@@ -153,37 +68,14 @@ export interface ParsedHeader {
  * @returns true if `buf` starts with the v1 magic, false otherwise
  */
 export function hasMagic(buf: Buffer): boolean {
-  if (!Buffer.isBuffer(buf) || buf.length < MAGIC_LENGTH) {
+  // Preserve the original public contract: only a real Node Buffer is
+  // accepted. (`format-core.hasMagic` intentionally accepts any Uint8Array
+  // for its isomorphic consumers, but this Node wrapper must behave exactly
+  // as it always has.)
+  if (!Buffer.isBuffer(buf)) {
     return false;
   }
-  for (let i = 0; i < MAGIC_LENGTH; i++) {
-    if (buf[i] !== MAGIC_BYTES[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function validateU32(value: number, field: string): number {
-  if (!Number.isInteger(value) || value < 0 || value > U32_MAX) {
-    throw new CryptoError(
-      `Invalid ${field}: must be an unsigned 32-bit integer (0..${U32_MAX})`,
-      CryptoErrorType.INVALID_INPUT,
-      'INVALID_HEADER_PARAM'
-    );
-  }
-  return value;
-}
-
-function validateU16(value: number, field: string): number {
-  if (!Number.isInteger(value) || value < 0 || value > U16_MAX) {
-    throw new CryptoError(
-      `Invalid ${field}: must be an unsigned 16-bit integer (0..${U16_MAX})`,
-      CryptoErrorType.INVALID_INPUT,
-      'INVALID_HEADER_PARAM'
-    );
-  }
-  return value;
+  return coreHasMagic(buf);
 }
 
 /**
@@ -199,92 +91,23 @@ function validateU16(value: number, field: string): number {
  * @throws CryptoError if `kdfId` is unknown or params are out of range
  */
 export function packHeader(kdfId: KdfId, params: KdfHeaderParams): Buffer {
-  const buf = Buffer.alloc(HEADER_LENGTH);
-  MAGIC_BYTES.copy(buf, 0);
-  buf.writeUInt8(FORMAT_VERSION, MAGIC_LENGTH);
-  buf.writeUInt8(kdfId, MAGIC_LENGTH + VERSION_LENGTH);
-
-  const paramsOffset = MAGIC_LENGTH + VERSION_LENGTH + KDF_ID_LENGTH;
-
-  if (kdfId === KDF_ID_ARGON2ID) {
-    if (params.kind !== 'argon2id') {
-      throw new CryptoError(
-        `Header KDF mismatch: kdfId=${kdfId} but params.kind=${params.kind}`,
-        CryptoErrorType.INVALID_INPUT,
-        'HEADER_KDF_MISMATCH'
-      );
-    }
-    buf.writeUInt32BE(
-      validateU32(params.memoryCost, 'memoryCost'),
-      paramsOffset
-    );
-    buf.writeUInt32BE(
-      validateU32(params.timeCost, 'timeCost'),
-      paramsOffset + 4
-    );
-    buf.writeUInt16BE(
-      validateU16(params.parallelism, 'parallelism'),
-      paramsOffset + 8
-    );
-    // Remaining 6 bytes are already zero from Buffer.alloc.
-  } else if (kdfId === KDF_ID_PBKDF2_SHA256) {
-    if (params.kind !== 'pbkdf2-sha256') {
-      throw new CryptoError(
-        `Header KDF mismatch: kdfId=${kdfId} but params.kind=${params.kind}`,
-        CryptoErrorType.INVALID_INPUT,
-        'HEADER_KDF_MISMATCH'
-      );
-    }
-    buf.writeUInt32BE(
-      validateU32(params.iterations, 'iterations'),
-      paramsOffset
-    );
-    // Remaining 12 bytes are already zero from Buffer.alloc.
-  } else {
-    throw new CryptoError(
-      `Unknown KDF identifier: ${kdfId as number}`,
-      CryptoErrorType.INVALID_INPUT,
-      'UNSUPPORTED_KDF'
-    );
-  }
-
-  return buf;
+  return Buffer.from(corePackHeader(kdfId, params));
 }
 
 /**
  * Parse a v1 header from the start of a buffer.
  *
- * The buffer is read with bounds-checked methods (`readUInt8`,
- * `readUInt32BE`, `readUInt16BE`) so any truncated input fails fast with a
- * CryptoError rather than producing garbage.
+ * The buffer is read with bounds-checked methods so any truncated input
+ * fails fast with a CryptoError rather than producing garbage.
  *
- * **DoS-bound enforcement.** Parameters are also capped against the upper
- * bounds in {@link MAX_ARGON2_MEMORY_COST}, {@link MAX_ARGON2_TIME_COST},
+ * **DoS-bound enforcement.** Parameters are capped against the upper bounds
+ * in {@link MAX_ARGON2_MEMORY_COST}, {@link MAX_ARGON2_TIME_COST},
  * {@link MAX_ARGON2_PARALLELISM}, and {@link MAX_PBKDF2_ITERATIONS}. A
- * malicious ciphertext that requests pathologically large KDF work (e.g.
- * memoryCost = 4 GiB or iterations = 100M) is rejected with
- * {@link CryptoErrorType.INVALID_INPUT} / `KDF_PARAMS_OUT_OF_BOUNDS` BEFORE
- * the parse returns, so the call site can never invoke `argon2.hash` /
- * `crypto.pbkdf2Sync` with the malicious values. This applies equally to
- * the decrypt path AND to {@link CryptoManager.inspectHeader} (which calls
- * `parseHeader`), so tooling cannot be tricked into reporting one set of
- * parameters while the actual decrypt path catches a different limit.
- *
- * Caps are deliberately conservative — well above any legitimate caller's
- * needs — and are NOT user-configurable for this reason: the goal is
- * "untrusted-input DoS protection", not "match the decrypt-time KDF cost".
+ * malicious ciphertext that requests pathologically large KDF work is
+ * rejected with `KDF_PARAMS_OUT_OF_BOUNDS` BEFORE the parse returns.
  *
  * **Argon2id cross-field floor.** For Argon2id headers, the parser also
  * enforces RFC 9106 §3.1's mandatory `memoryCost >= 8 * parallelism` floor.
- * The `CryptoManager` constructor enforces the same floor (code
- * `MEMORY_COST_TOO_SMALL`), so no legitimately-produced ciphertext can
- * carry sub-floor params. Without this check, a crafted header with e.g.
- * `memoryCost=8, parallelism=64` would pass all per-field guards, reach
- * `argon2.hash`, and surface as `ENCRYPTION_FAILED / KEY_DERIVATION_FAILED`
- * — an encryption-typed error on a decryption operation. The floor uses
- * `DECRYPTION_FAILED / INVALID_HEADER_PARAM` (same type/code as the
- * zero/negative-param check) so `legacyMode: 'auto'` falls through to the
- * v0 recovery path identically to other malformed-param cases.
  *
  * @param buf - buffer that begins with the v1 header (must contain the magic)
  * @returns parsed header (version, kdfId, params, total bytes consumed)
@@ -293,6 +116,10 @@ export function packHeader(kdfId: KdfId, params: KdfHeaderParams): Buffer {
  *   `memoryCost`/`parallelism` pair that violates the RFC 9106 §3.1 floor
  */
 export function parseHeader(buf: Buffer): ParsedHeader {
+  // Preserve the original public contract: reject a non-Buffer input up front
+  // with the same `INVALID_HEADER_INPUT` code/message as before.
+  // (`format-core.parseHeader` intentionally accepts any Uint8Array for its
+  // isomorphic consumers.)
   if (!Buffer.isBuffer(buf)) {
     throw new CryptoError(
       'parseHeader: input must be a Buffer',
@@ -300,128 +127,5 @@ export function parseHeader(buf: Buffer): ParsedHeader {
       'INVALID_HEADER_INPUT'
     );
   }
-  if (buf.length < HEADER_LENGTH) {
-    throw new CryptoError(
-      `Header too short: expected at least ${HEADER_LENGTH} bytes, got ${buf.length}`,
-      CryptoErrorType.INVALID_INPUT,
-      'TRUNCATED_HEADER'
-    );
-  }
-  if (!hasMagic(buf)) {
-    throw new CryptoError(
-      'Missing or invalid magic bytes (expected "HPCR")',
-      CryptoErrorType.DECRYPTION_FAILED,
-      'INVALID_MAGIC'
-    );
-  }
-
-  const version = buf.readUInt8(MAGIC_LENGTH);
-  if (version !== FORMAT_VERSION) {
-    throw new CryptoError(
-      `Unsupported ciphertext format version: 0x${version
-        .toString(16)
-        .padStart(2, '0')} (this build supports 0x01)`,
-      CryptoErrorType.DECRYPTION_FAILED,
-      'UNSUPPORTED_VERSION'
-    );
-  }
-
-  const kdfIdRaw = buf.readUInt8(MAGIC_LENGTH + VERSION_LENGTH);
-  const paramsOffset = MAGIC_LENGTH + VERSION_LENGTH + KDF_ID_LENGTH;
-
-  let params: KdfHeaderParams;
-  let kdfId: KdfId;
-  if (kdfIdRaw === KDF_ID_ARGON2ID) {
-    kdfId = KDF_ID_ARGON2ID;
-    const memoryCost = buf.readUInt32BE(paramsOffset);
-    const timeCost = buf.readUInt32BE(paramsOffset + 4);
-    const parallelism = buf.readUInt16BE(paramsOffset + 8);
-
-    if (memoryCost <= 0 || timeCost <= 0 || parallelism <= 0) {
-      throw new CryptoError(
-        'Argon2id header parameters must all be positive',
-        CryptoErrorType.DECRYPTION_FAILED,
-        'INVALID_HEADER_PARAM'
-      );
-    }
-    // Reject pathologically-large parameters that would let an attacker
-    // pin gigabytes of RAM or burn CPU for minutes per decrypt call.
-    // Bounds are conservative (well above the documented `ULTRA` tier);
-    // see MAX_ARGON2_* constants for rationale.
-    if (
-      memoryCost > MAX_ARGON2_MEMORY_COST ||
-      timeCost > MAX_ARGON2_TIME_COST ||
-      parallelism > MAX_ARGON2_PARALLELISM
-    ) {
-      throw new CryptoError(
-        `Argon2id header parameters exceed accepted bounds (memoryCost <= ${MAX_ARGON2_MEMORY_COST}, ` +
-          `timeCost <= ${MAX_ARGON2_TIME_COST}, parallelism <= ${MAX_ARGON2_PARALLELISM}). ` +
-          `Got memoryCost=${memoryCost}, timeCost=${timeCost}, parallelism=${parallelism}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'KDF_PARAMS_OUT_OF_BOUNDS'
-      );
-    }
-    // Argon2id RFC 9106 §3.1 cross-field constraint: memoryCost >= 8 * parallelism.
-    // The constructor enforces the same floor (MEMORY_COST_TOO_SMALL), so no
-    // legitimately-produced ciphertext can carry sub-floor params. Without this
-    // check, a crafted header (e.g. memoryCost=8, parallelism=64) passes all
-    // per-field guards, reaches argon2.hash, and surfaces as
-    // ENCRYPTION_FAILED / KEY_DERIVATION_FAILED — an encryption-typed error
-    // on a decryption operation. Using DECRYPTION_FAILED / INVALID_HEADER_PARAM
-    // (same type/code as the zero/negative-param check above) means
-    // legacyMode 'auto' falls through to the v0 recovery path, and
-    // strict/reject modes re-throw immediately — both without ENCRYPTION_FAILED.
-    const argon2MemFloor = 8 * parallelism;
-    if (memoryCost < argon2MemFloor) {
-      throw new CryptoError(
-        `Argon2id memoryCost (${memoryCost}) must be at least 8 * parallelism ` +
-          `(${argon2MemFloor} = 8 × ${parallelism})`,
-        CryptoErrorType.DECRYPTION_FAILED,
-        'INVALID_HEADER_PARAM'
-      );
-    }
-    params = {
-      kind: 'argon2id',
-      memoryCost,
-      timeCost,
-      parallelism,
-    };
-  } else if (kdfIdRaw === KDF_ID_PBKDF2_SHA256) {
-    kdfId = KDF_ID_PBKDF2_SHA256;
-    const iterations = buf.readUInt32BE(paramsOffset);
-    if (iterations <= 0) {
-      throw new CryptoError(
-        'PBKDF2 iterations must be positive',
-        CryptoErrorType.DECRYPTION_FAILED,
-        'INVALID_HEADER_PARAM'
-      );
-    }
-    if (iterations > MAX_PBKDF2_ITERATIONS) {
-      throw new CryptoError(
-        `PBKDF2 iterations exceeds accepted bound (iterations <= ${MAX_PBKDF2_ITERATIONS}). ` +
-          `Got iterations=${iterations}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'KDF_PARAMS_OUT_OF_BOUNDS'
-      );
-    }
-    params = {
-      kind: 'pbkdf2-sha256',
-      iterations,
-    };
-  } else {
-    throw new CryptoError(
-      `Unknown KDF identifier in header: 0x${kdfIdRaw
-        .toString(16)
-        .padStart(2, '0')}`,
-      CryptoErrorType.DECRYPTION_FAILED,
-      'UNSUPPORTED_KDF'
-    );
-  }
-
-  return {
-    version,
-    kdfId,
-    params,
-    headerLen: HEADER_LENGTH,
-  };
+  return coreParseHeader(buf);
 }

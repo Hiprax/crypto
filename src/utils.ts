@@ -3,6 +3,7 @@ import { access, constants, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ValidationResult, FileInfo, RetryConfig } from './types.js';
 import { CryptoError, CryptoErrorType } from './types.js';
+import { isValidBase64url } from './codec.js';
 
 /**
  * Validate if a file exists and is accessible (read).
@@ -595,17 +596,11 @@ export function isValidBase64(str: string): boolean {
  * @returns True if valid base64url
  */
 export function isValidBase64Url(str: string): boolean {
-  if (!str || typeof str !== 'string') {
-    return false;
-  }
-
-  try {
-    const decoded = Buffer.from(str, 'base64url');
-    const reEncoded = decoded.toString('base64url');
-    return str === reEncoded;
-  } catch {
-    return false;
-  }
+  // Delegates to the pure, isomorphic codec so the base64url round-trip
+  // validation has a single source of truth (see `./codec.ts`). Behaviour is
+  // unchanged: a canonical base64url string returns true, everything else
+  // returns false, and it never throws.
+  return isValidBase64url(str);
 }
 
 /**

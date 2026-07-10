@@ -24,33 +24,19 @@ import { pipeline } from 'node:stream/promises';
 import { dirname } from 'node:path';
 import type {
   CryptoManagerOptions,
-  Argon2Options,
-  EncryptionParameters,
   EncryptionResult,
-  LegacyMode,
   ProgressCallback,
 } from './types.js';
-import {
-  CryptoError,
-  CryptoErrorType,
-  SecurityLevel,
-  EncryptionAlgorithm,
-} from './types.js';
-import type { KdfHeaderParams, KdfId, ParsedHeader } from './format.js';
+import { CryptoError, CryptoErrorType } from './types.js';
 import {
   HEADER_LENGTH,
   KDF_ID_ARGON2ID,
   KDF_ID_PBKDF2_SHA256,
   hasMagic,
-  packHeader,
   parseHeader,
-  MAX_ARGON2_MEMORY_COST,
-  MAX_ARGON2_TIME_COST,
-  MAX_ARGON2_PARALLELISM,
-  MAX_PBKDF2_ITERATIONS,
 } from './format.js';
-import { isValidBase64Url } from './utils.js';
-import { loadArgon2, ARGON2_ID } from './engine.node.js';
+import { CryptoCore, SECURITY_THRESHOLDS, isValidPassword } from './core.js';
+import { loadArgon2, nodeEngine } from './engine.node.js';
 import type { Argon2Hasher, Argon2Provider } from './engine.node.js';
 
 // The Argon2 lazy-load implementation (native `argon2` → pure-WASM `hash-wasm`
@@ -63,130 +49,11 @@ export {
 } from './engine.node.js';
 export type { Argon2Hasher, Argon2Provider };
 
-/**
- * Argon2id parameter thresholds that classify a {@link CryptoManager} into
- * {@link SecurityLevel} buckets. Each tier is the **minimum** parameter set
- * for that label — see {@link CryptoManager.getSecurityLevel} for the exact
- * classification logic.
- *
- * Marked `as const` so consumers receive a deeply-readonly TYPE (so attempts
- * to mutate are caught by TypeScript), and additionally `Object.freeze`d at
- * runtime (recursively, on the outer object and each tier sub-object) so
- * even untyped consumers (or third-party code reaching in through
- * `(SECURITY_THRESHOLDS as any).HIGH.memoryCost = 1`) cannot weaken the
- * thresholds and trick the classifier into reporting a higher tier than
- * the configuration deserves.
- *
- * Tier rationale (OWASP 2026 guidance for Argon2id):
- *
- *  - **HIGH**   `memoryCost = 2 ** 17` (128 MiB), `timeCost = 3` — the
- *    "first choice" tier for high-security applications. This is the
- *    library default.
- *  - **ULTRA**  `memoryCost = 2 ** 19` (512 MiB), `timeCost = 4` — the
- *    "paranoid" tier; meaningful for offline/asymmetric workloads where the
- *    extra latency and memory pressure are tolerable.
- *  - **MEDIUM** `memoryCost = 2 ** 14` (16 MiB), `timeCost = 2` — minimum
- *    acceptable threshold; suitable only for resource-constrained devices.
- *
- * Anything below `MEDIUM` is reported as `LOW` with no fixed threshold of
- * its own.
- *
- * Re-exported from `index.ts` so downstream tooling can introspect the
- * thresholds (e.g. to assert at startup that a configured policy is at
- * least `HIGH`).
- */
-export const SECURITY_THRESHOLDS = Object.freeze({
-  ULTRA: Object.freeze({ memoryCost: 2 ** 19, timeCost: 4 }),
-  HIGH: Object.freeze({ memoryCost: 2 ** 17, timeCost: 3 }),
-  MEDIUM: Object.freeze({ memoryCost: 2 ** 14, timeCost: 2 }),
-} as const);
-
-/**
- * Default PBKDF2 iteration count for sync key derivation when producing new
- * v1 ciphertexts. Matches the OWASP 2023+ recommendation for
- * PBKDF2-HMAC-SHA256 (still current in 2026).
- */
-const PBKDF2_DEFAULT_ITERATIONS = 600000;
-
-/**
- * Iteration count assumed for legacy v0 sync ciphertexts (those produced by
- * versions of this library prior to 0.11.0, which used 100k iterations and
- * did not embed the iteration count in the ciphertext). v1 ciphertexts
- * carry the iteration count in their header and ignore this constant.
- */
-const PBKDF2_LEGACY_ITERATIONS = 100000;
-
-/**
- * Minimum length that allows a password to bypass character-category
- * requirements. Passwords meeting this length are accepted regardless of
- * character composition, which aligns with NIST SP 800-63B (which deprecates
- * composition rules in favour of length) and lets users rely on
- * XKCD-style passphrases (e.g. "correct horse battery staple longer") that
- * have very high entropy from word choice alone.
- */
-const PASSPHRASE_MIN_LENGTH = 20;
-
-/**
- * Minimum length when relying on the legacy character-category rule.
- */
-const PASSWORD_MIN_LENGTH = 8;
-
-/**
- * Pure (static) password-strength validator. Does NOT depend on any
- * `CryptoManager` instance state — it is a deterministic function of the
- * password string alone. Extracted to module scope so that the
- * `CryptoManager` constructor can validate `defaultPassphrase` BEFORE
- * `this` is fully initialised (the public `validatePassword` instance
- * method delegates here).
- *
- * Acceptance rules (a password is valid if EITHER condition holds):
- *
- *  1. **Passphrase rule (NIST SP 800-63B style):** at least
- *     {@link PASSPHRASE_MIN_LENGTH} (20) characters, regardless of
- *     character composition. This accepts XKCD-style multi-word
- *     passphrases that are well-known to have high entropy from word
- *     choice alone but lack uppercase / digit / special-char categories.
- *
- *  2. **Composition rule (legacy):** at least
- *     {@link PASSWORD_MIN_LENGTH} (8) characters, AND contains at least one
- *     uppercase letter, one lowercase letter, one digit, and one
- *     non-alphanumeric character (matched by `/[^A-Za-z0-9]/`, which is
- *     intentionally broader than the previous narrow allow-list of
- *     `[!@#$%^&*(),.?":{}|<>]`).
- *
- * Non-string input or `null`/`undefined` returns `false`.
- *
- * @param password - The password to validate.
- * @returns `true` iff the password meets either acceptance rule.
- */
-export function isValidPassword(password: string): boolean {
-  if (!password || typeof password !== 'string') {
-    return false;
-  }
-
-  // NIST passphrase style: long enough to skip character-category checks.
-  if (password.length >= PASSPHRASE_MIN_LENGTH) {
-    return true;
-  }
-
-  // Legacy composition rule: 8+ chars with all four categories. We
-  // deliberately use `[^A-Za-z0-9]` (any non-alphanumeric character)
-  // rather than the previous narrow allow-list `[!@#$%^&*(),.?":{}|<>]`
-  // so that common but previously-rejected specials like `_` `-` `+` `[` `]`
-  // and non-ASCII punctuation now count as "special".
-  const hasUpperCase = /[A-Z]/.test(password);
-  const hasLowerCase = /[a-z]/.test(password);
-  const hasNumbers = /\d/.test(password);
-  const hasSpecialChar = /[^A-Za-z0-9]/.test(password);
-
-  return (
-    password.length >= PASSWORD_MIN_LENGTH &&
-    hasUpperCase &&
-    hasLowerCase &&
-    hasNumbers &&
-    hasSpecialChar
-  );
-}
+// `SECURITY_THRESHOLDS` and `isValidPassword` now live in the isomorphic core
+// (`./core.js`) so the shared constructor validation and `getSecurityLevel`
+// classification can use them without a runtime dependency. Re-export them here
+// so existing imports from `./crypto-manager` (and `./index`) resolve unchanged.
+export { SECURITY_THRESHOLDS, isValidPassword };
 
 /**
  * Symbol used to mark an error that was thrown by a user-supplied
@@ -256,318 +123,21 @@ function isProgressThrow(thrown: unknown): boolean {
  * High-security encryption manager using AES-256-GCM and Argon2id
  * Implements industry-standard cryptographic practices with improved security
  */
-export class CryptoManager {
-  private readonly algorithm: string;
-  private readonly keyLength: number;
-  private readonly ivLength: number;
-  private readonly saltLength: number;
-  private readonly tagLength: number;
-  private readonly argon2Options: Argon2Options;
-  private readonly aad: Buffer;
+export class CryptoManager extends CryptoCore {
   /**
-   * Password retained by the manager when `defaultPassphrase` is set in
-   * the constructor. Stored as a plain V8 string — V8 strings are
-   * immutable and GC-managed, so the library cannot scrub this value with
-   * `secureClear` (which only zero-fills `Buffer`-backed allocations).
+   * Construct a Node `CryptoManager`. All option validation and the shared
+   * isomorphic API live in {@link CryptoCore}; this constructor only injects
+   * the Node {@link nodeEngine} and the Node default Argon2id profile (the
+   * HIGH tier at `p=1` — 128 MiB / t=3 / p=1).
    *
-   * **Lifetime:** the passphrase stays resident in process memory for the
-   * full lifetime of this `CryptoManager` instance, plus an unbounded GC
-   * tail for any internal V8 string copies created along the way (e.g.
-   * intern-table entries from comparisons). Long-lived managers therefore
-   * keep the passphrase resident for the whole process lifetime.
-   *
-   * **Recommendation:** for sensitive workloads, prefer passing the
-   * password explicitly to each encrypt/decrypt call rather than relying
-   * on `defaultPassphrase`. See SECURITY.md and the README "Default
-   * Passphrase" / "Threat Model" sections.
+   * @param options - see {@link CryptoManagerOptions}
    */
-  private readonly defaultPassphrase?: string;
-  private readonly legacyMode: LegacyMode;
-  private readonly pbkdf2Iterations: number;
-  private readonly legacyPbkdf2Iterations: number;
-  /**
-   * When true, AES-GCM AAD for v1 ciphertexts uses just `this.aad` (the
-   * v1.0.0 behaviour). Default false — the AAD includes the on-disk v1
-   * header bytes, so any tampering with the header (including the
-   * reserved-byte regions) flips the GCM tag and decryption fails.
-   */
-  private readonly legacyHeaderAad: boolean;
-
   constructor(options: CryptoManagerOptions = {}) {
-    this.algorithm = EncryptionAlgorithm.AES_256_GCM;
-    this.keyLength = 32; // 256 bits
-    this.ivLength = 12; // 96 bits for GCM
-    this.saltLength = 32; // 256 bits
-    this.tagLength = 16; // 128 bits for GCM
-
-    // Validate numeric options
-    if (
-      options.memoryCost !== undefined &&
-      (!Number.isInteger(options.memoryCost) || options.memoryCost <= 0)
-    ) {
-      throw new CryptoError(
-        'memoryCost must be a positive integer',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_MEMORY_COST'
-      );
-    }
-    if (
-      options.memoryCost !== undefined &&
-      options.memoryCost > MAX_ARGON2_MEMORY_COST
-    ) {
-      throw new CryptoError(
-        `memoryCost (${options.memoryCost}) exceeds the wire-format cap of ` +
-          `${MAX_ARGON2_MEMORY_COST} (2^22 KiB = 4 GiB). Values above this cap ` +
-          `produce ciphertext that cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
-          `Use a value between 1 and ${MAX_ARGON2_MEMORY_COST}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'MEMORY_COST_TOO_LARGE'
-      );
-    }
-    if (
-      options.timeCost !== undefined &&
-      (!Number.isInteger(options.timeCost) || options.timeCost <= 0)
-    ) {
-      throw new CryptoError(
-        'timeCost must be a positive integer',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_TIME_COST'
-      );
-    }
-    if (
-      options.timeCost !== undefined &&
-      options.timeCost > MAX_ARGON2_TIME_COST
-    ) {
-      throw new CryptoError(
-        `timeCost (${options.timeCost}) exceeds the wire-format cap of ` +
-          `${MAX_ARGON2_TIME_COST}. Values above this cap produce ciphertext that ` +
-          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
-          `Use a value between 1 and ${MAX_ARGON2_TIME_COST}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'TIME_COST_TOO_LARGE'
-      );
-    }
-    if (
-      options.parallelism !== undefined &&
-      (!Number.isInteger(options.parallelism) || options.parallelism <= 0)
-    ) {
-      throw new CryptoError(
-        'parallelism must be a positive integer',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_PARALLELISM'
-      );
-    }
-    if (
-      options.parallelism !== undefined &&
-      options.parallelism > MAX_ARGON2_PARALLELISM
-    ) {
-      throw new CryptoError(
-        `parallelism (${options.parallelism}) exceeds the wire-format cap of ` +
-          `${MAX_ARGON2_PARALLELISM}. Values above this cap produce ciphertext that ` +
-          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
-          `Use a value between 1 and ${MAX_ARGON2_PARALLELISM}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'PARALLELISM_TOO_LARGE'
-      );
-    }
-    if (
-      options.pbkdf2Iterations !== undefined &&
-      (!Number.isInteger(options.pbkdf2Iterations) ||
-        options.pbkdf2Iterations <= 0)
-    ) {
-      throw new CryptoError(
-        'pbkdf2Iterations must be a positive integer',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_PBKDF2_ITERATIONS'
-      );
-    }
-    if (
-      options.pbkdf2Iterations !== undefined &&
-      options.pbkdf2Iterations > MAX_PBKDF2_ITERATIONS
-    ) {
-      throw new CryptoError(
-        `pbkdf2Iterations (${options.pbkdf2Iterations}) exceeds the wire-format cap of ` +
-          `${MAX_PBKDF2_ITERATIONS}. Values above this cap produce ciphertext that ` +
-          `cannot be decrypted (KDF_PARAMS_OUT_OF_BOUNDS). ` +
-          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'PBKDF2_ITERATIONS_TOO_LARGE'
-      );
-    }
-    if (
-      options.legacyPbkdf2Iterations !== undefined &&
-      (!Number.isInteger(options.legacyPbkdf2Iterations) ||
-        options.legacyPbkdf2Iterations <= 0)
-    ) {
-      throw new CryptoError(
-        'legacyPbkdf2Iterations must be a positive integer',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_LEGACY_PBKDF2_ITERATIONS'
-      );
-    }
-    if (
-      options.legacyPbkdf2Iterations !== undefined &&
-      options.legacyPbkdf2Iterations > MAX_PBKDF2_ITERATIONS
-    ) {
-      throw new CryptoError(
-        `legacyPbkdf2Iterations (${options.legacyPbkdf2Iterations}) exceeds the cap of ` +
-          `${MAX_PBKDF2_ITERATIONS}. This value is fed directly to pbkdf2Sync; ` +
-          `values above this cap risk blocking the event loop indefinitely. ` +
-          `Use a value between 1 and ${MAX_PBKDF2_ITERATIONS}.`,
-        CryptoErrorType.INVALID_INPUT,
-        'LEGACY_PBKDF2_ITERATIONS_TOO_LARGE'
-      );
-    }
-
-    this.pbkdf2Iterations =
-      options.pbkdf2Iterations ?? PBKDF2_DEFAULT_ITERATIONS;
-    this.legacyPbkdf2Iterations =
-      options.legacyPbkdf2Iterations ?? PBKDF2_LEGACY_ITERATIONS;
-
-    // Validate legacyMode option
-    if (options.legacyMode !== undefined) {
-      if (
-        options.legacyMode !== 'auto' &&
-        options.legacyMode !== 'strict' &&
-        options.legacyMode !== 'reject'
-      ) {
-        throw new CryptoError(
-          "legacyMode must be one of: 'auto', 'strict', 'reject'",
-          CryptoErrorType.INVALID_INPUT,
-          'INVALID_LEGACY_MODE'
-        );
-      }
-    }
-    this.legacyMode = options.legacyMode ?? 'auto';
-
-    // Store default passphrase if provided and not empty.
-    //
-    // We validate `defaultPassphrase` strength **at construction time** so
-    // that misconfigured weak passphrases fail fast rather than at first
-    // encrypt/decrypt call (where the cause was previously much less
-    // obvious). The validation is delegated to the module-level
-    // `isValidPassword` helper so it does NOT depend on `this` being fully
-    // initialised — at this point in the constructor `this.algorithm`
-    // / `this.keyLength` etc. ARE set, but using a static helper keeps the
-    // password rule centralised and avoids any future reordering hazard.
-    //
-    // Callers who need to decrypt legacy data encrypted under a weak
-    // password can opt out via `skipPasswordValidation: true`. This flag
-    // does NOT bypass NFC normalisation in `deriveKey`/`deriveKeySync`.
-    if (
-      options.defaultPassphrase !== undefined &&
-      options.defaultPassphrase !== ''
-    ) {
-      if (
-        options.skipPasswordValidation !== true &&
-        !isValidPassword(options.defaultPassphrase)
-      ) {
-        throw new CryptoError(
-          'defaultPassphrase does not meet security requirements. ' +
-            'Use a passphrase of at least 20 characters, OR a password of ' +
-            '8+ characters containing uppercase, lowercase, digit, and ' +
-            'non-alphanumeric. To bypass this check (e.g. for legacy ' +
-            'data decryption), set `skipPasswordValidation: true`.',
-          CryptoErrorType.INVALID_PASSWORD,
-          'WEAK_PASSWORD'
-        );
-      }
-      this.defaultPassphrase = options.defaultPassphrase;
-    }
-
-    // Argon2id parameters (high security). `type` is hardcoded to the
-    // numeric Argon2id identifier (`2`) rather than read from the argon2
-    // module so that constructing a CryptoManager does NOT trigger loading
-    // the native module — consumers who only use the *Sync methods
-    // (PBKDF2) can run with argon2 absent.
-    //
-    // The default `memoryCost` of `2 ** 17` (128 MiB) follows the OWASP
-    // 2026 high-security recommendation for Argon2id (the previous default
-    // of 64 MiB matched the OWASP "minimum" tier; 128 MiB is the "first
-    // choice" tier for high-security applications). Resource-constrained
-    // callers (mobile, embedded, low-memory containers) can opt back into
-    // the lighter 64 MiB profile by passing `memoryCost: 2 ** 16` or any
-    // smaller positive integer. Existing v1 ciphertexts produced with the
-    // previous default continue to decrypt because each ciphertext header
-    // embeds the exact memoryCost / timeCost / parallelism that were used
-    // to derive its key, so the decoder applies the embedded values rather
-    // than this constructor default.
-    this.argon2Options = {
-      type: ARGON2_ID,
-      memoryCost: options.memoryCost ?? SECURITY_THRESHOLDS.HIGH.memoryCost, // 128 MiB
-      timeCost: options.timeCost ?? SECURITY_THRESHOLDS.HIGH.timeCost,
-      parallelism: options.parallelism ?? 1,
-      hashLength: this.keyLength,
-      saltLength: this.saltLength,
-    };
-
-    // Argon2id mandates memoryCost >= 8 * parallelism. Enforcing this on the
-    // resolved (post-defaulting) values at construction time means the first
-    // async encryptText call fails fast with a clear error rather than an
-    // opaque KEY_DERIVATION_FAILED from deep inside the KDF. The library
-    // already validates defaultPassphrase at construction for the same reason
-    // (fail-fast philosophy). The defaults (memoryCost=2^17, parallelism=1)
-    // trivially pass, as do all documented opt-down profiles (2^16, 2^14,
-    // 2^12 with p=1). The sync PBKDF2 path ignores memoryCost entirely, so
-    // this check is scoped strictly to the Argon2 options that drive async paths.
-    const argon2MemFloor = 8 * this.argon2Options.parallelism;
-    if (this.argon2Options.memoryCost < argon2MemFloor) {
-      throw new CryptoError(
-        `memoryCost (${this.argon2Options.memoryCost}) must be at least ` +
-          `8 * parallelism (${argon2MemFloor} = 8 × ${this.argon2Options.parallelism}) ` +
-          `for Argon2id. Use a memoryCost of at least ${argon2MemFloor} or reduce parallelism.`,
-        CryptoErrorType.INVALID_INPUT,
-        'MEMORY_COST_TOO_SMALL'
-      );
-    }
-
-    // Validate aad type before coercing it to a Buffer. Buffer.from coerces
-    // arrays silently (e.g. [72, 73] → the two bytes "HI") and throws a raw
-    // Node TypeError for numbers and plain objects — neither result is a
-    // CryptoError, violating the library's uniform "all errors are CryptoError"
-    // contract. Catching both cases here gives callers the same typed
-    // CryptoError shape as every other constructor option.
-    if (options.aad !== undefined && typeof options.aad !== 'string') {
-      throw new CryptoError(
-        'aad must be a string',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_AAD'
-      );
-    }
-
-    // Use custom AAD or default
-    const aadString = options.aad ?? 'secure-crypto-tool-v2';
-    this.aad = Buffer.from(aadString, 'utf8');
-
-    // Default to the integrity-binding AAD format introduced in v1.1.0.
-    // Callers needing to decrypt legacy v1.0.0 ciphertexts can opt back in
-    // to the bound-aad-only format via `legacyHeaderAad: true`. Note this
-    // affects v1 ciphertexts only — v0 ciphertexts always use `this.aad`
-    // alone (they have no header to bind, and changing v0 AAD would break
-    // every pre-existing v0 ciphertext in the wild).
-    this.legacyHeaderAad = options.legacyHeaderAad === true;
-  }
-
-  /**
-   * Compute the AAD that AES-GCM should bind to a v1 ciphertext.
-   *
-   * Includes the on-disk v1 header bytes verbatim after `this.aad`. Both
-   * encrypt and decrypt paths call this with the **exact same bytes** they
-   * have on disk (the encrypt path uses the buffer it just packed; the
-   * decrypt path uses the bytes it read out of the input file/string,
-   * NOT a re-serialised copy — so reserved-byte tampering remains visible).
-   *
-   * @param headerBytes - the 22-byte v1 header (including any reserved
-   *   bytes, exactly as it will be / was written to disk)
-   * @returns the AAD value to pass to `cipher.setAAD` / `decipher.setAAD`
-   */
-  private aadForV1(headerBytes: Buffer): Buffer {
-    if (this.legacyHeaderAad) {
-      // Backward-compat shim for v1.0.0 ciphertexts: AAD is just the
-      // configured context string, header bytes are NOT bound.
-      return this.aad;
-    }
-    return Buffer.concat([this.aad, headerBytes]);
+    super(options, nodeEngine, {
+      memoryCost: SECURITY_THRESHOLDS.HIGH.memoryCost, // 128 MiB
+      timeCost: SECURITY_THRESHOLDS.HIGH.timeCost,
+      parallelism: 1,
+    });
   }
 
   /**
@@ -732,48 +302,6 @@ export class CryptoManager {
         'SYNC_KEY_DERIVATION_FAILED'
       );
     }
-  }
-
-  /**
-   * Re-type a key-derivation failure that surfaced during a DECRYPT
-   * operation so it carries `DECRYPTION_FAILED` instead of the
-   * direction-neutral `ENCRYPTION_FAILED` produced by `deriveKey` /
-   * `deriveKeySync`.
-   *
-   * The KDF methods are public, direction-agnostic API: a direct
-   * `deriveKey`/`deriveKeySync` call is neither an encrypt nor a decrypt, so
-   * they keep their historical `ENCRYPTION_FAILED` typing. Only the four
-   * decrypt call sites re-map, at the call site, because that is where we
-   * actually know the operation is a decryption. Doing the re-map here rather
-   * than inside the KDF preserves the KDF methods' contract and their
-   * direct-call tests.
-   *
-   * Only the two derivation-failure shapes are re-typed:
-   * `ENCRYPTION_FAILED` + (`KEY_DERIVATION_FAILED` | `SYNC_KEY_DERIVATION_FAILED`).
-   * The `.code` is preserved so callers keying on `.code` are unaffected;
-   * only the `.type` category is corrected. Everything else passes through
-   * untouched — in particular `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`)
-   * and `INVALID_SALT` / `INVALID_PASSWORD` (type `INVALID_INPUT`), which are
-   * already correctly typed.
-   *
-   * @param error - The value thrown by a decrypt-path key derivation call.
-   * @returns The original error, or a re-typed `CryptoError` when it is a
-   *   derivation failure.
-   */
-  private remapKdfErrorForDecryption(error: unknown): unknown {
-    if (
-      error instanceof CryptoError &&
-      error.type === CryptoErrorType.ENCRYPTION_FAILED &&
-      (error.code === 'KEY_DERIVATION_FAILED' ||
-        error.code === 'SYNC_KEY_DERIVATION_FAILED')
-    ) {
-      return new CryptoError(
-        error.message,
-        CryptoErrorType.DECRYPTION_FAILED,
-        error.code
-      );
-    }
-    return error;
   }
 
   /**
@@ -992,66 +520,6 @@ export class CryptoManager {
   }
 
   /**
-   * Build the v1 header that should be prepended to every newly produced
-   * ciphertext, parameterised for the given KDF.
-   */
-  private buildHeader(kdfId: KdfId): Buffer {
-    if (kdfId === KDF_ID_ARGON2ID) {
-      const params: KdfHeaderParams = {
-        kind: 'argon2id',
-        memoryCost: this.argon2Options.memoryCost,
-        timeCost: this.argon2Options.timeCost,
-        parallelism: this.argon2Options.parallelism,
-      };
-      return packHeader(KDF_ID_ARGON2ID, params);
-    }
-    const params: KdfHeaderParams = {
-      kind: 'pbkdf2-sha256',
-      iterations: this.pbkdf2Iterations,
-    };
-    return packHeader(KDF_ID_PBKDF2_SHA256, params);
-  }
-
-  /**
-   * Apply the configured legacy-mode policy to a v0 ciphertext (one that does
-   * not start with the "HPCR" magic). Returns nothing on success and throws
-   * with the appropriate error code when v0 is not allowed.
-   */
-  private enforceLegacyMode(): void {
-    if (this.legacyMode === 'auto') {
-      return;
-    }
-    if (this.legacyMode === 'strict') {
-      throw new CryptoError(
-        'Legacy v0 ciphertext format is not accepted in strict legacy mode',
-        CryptoErrorType.DECRYPTION_FAILED,
-        'LEGACY_FORMAT_REJECTED'
-      );
-    }
-    // 'reject'
-    throw new CryptoError(
-      'Unsupported (legacy v0) ciphertext format',
-      CryptoErrorType.DECRYPTION_FAILED,
-      'UNSUPPORTED_FORMAT'
-    );
-  }
-
-  /**
-   * Validate that a parsed v1 header matches the KDF expected by the calling
-   * decryption path (async expects Argon2id, sync expects PBKDF2-SHA256).
-   */
-  private assertKdfMatches(parsed: ParsedHeader, expected: KdfId): void {
-    if (parsed.kdfId !== expected) {
-      throw new CryptoError(
-        `Ciphertext was produced with KDF id ${parsed.kdfId} but this decryption path expects ${expected}. ` +
-          'Use the matching encrypt/decrypt pair (async with async, sync with sync).',
-        CryptoErrorType.DECRYPTION_FAILED,
-        'KDF_MISMATCH'
-      );
-    }
-  }
-
-  /**
    * Build a sibling temp-file path for atomic file output. Writers stream to
    * this path and rename to the final `outputPath` only on success; readers
    * therefore never observe a half-written file at the canonical path.
@@ -1241,7 +709,9 @@ export class CryptoManager {
         textBuffer,
         key,
         iv,
-        this.aadForV1(header)
+        // `aadForV1` returns a `Uint8Array` (isomorphic core); `encryptData`
+        // keeps its public `Buffer.isBuffer(aadOverride)` guard, so wrap it.
+        Buffer.from(this.aadForV1(header))
       );
 
       // Combine: header + salt + iv + tag + encrypted data
@@ -1415,8 +885,12 @@ export class CryptoManager {
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
-      const aad =
-        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+      // `this.aad` / `aadForV1` return `Uint8Array` (isomorphic core);
+      // `decryptData` keeps its public `Buffer.isBuffer(aadOverride)` guard,
+      // so wrap the chosen AAD in a Buffer.
+      const aad = Buffer.from(
+        headerForAad === null ? this.aad : this.aadForV1(headerForAad)
+      );
       decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
@@ -1509,7 +983,9 @@ export class CryptoManager {
         textBuffer,
         key,
         iv,
-        this.aadForV1(header)
+        // `aadForV1` returns a `Uint8Array` (isomorphic core); `encryptData`
+        // keeps its public `Buffer.isBuffer(aadOverride)` guard, so wrap it.
+        Buffer.from(this.aadForV1(header))
       );
 
       // Combine: header + salt + iv + tag + encrypted data
@@ -1655,8 +1131,12 @@ export class CryptoManager {
 
       // Decrypt the data with the matching AAD (header-bound for v1,
       // `this.aad`-only for v0).
-      const aad =
-        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+      // `this.aad` / `aadForV1` return `Uint8Array` (isomorphic core);
+      // `decryptData` keeps its public `Buffer.isBuffer(aadOverride)` guard,
+      // so wrap the chosen AAD in a Buffer.
+      const aad = Buffer.from(
+        headerForAad === null ? this.aad : this.aadForV1(headerForAad)
+      );
       decrypted = this.decryptData(encrypted, key, iv, tag, aad);
       const result = decrypted.toString('utf8');
 
@@ -3130,188 +2610,10 @@ export class CryptoManager {
     }
   }
 
-  /**
-   * Inspect the format header on a v1 ciphertext (text or file) without
-   * decrypting. Returns `null` for legacy v0 ciphertexts that do not carry a
-   * header. Useful for tooling and tests.
-   *
-   * String inputs are validated as well-formed base64url BEFORE decoding —
-   * `Buffer.from(input, 'base64url')` silently coerces invalid characters to
-   * an empty buffer, which would make a malformed input look like a v0
-   * ciphertext (returning `null`) rather than surfacing the encoding error.
-   * Failing fast on malformed input matches the documented contract of this
-   * tooling-facing method.
-   *
-   * @param input - either a base64url string (text format) or a Buffer (file
-   *   contents). Strings are validated as base64url and decoded; Buffers are
-   *   read as-is.
-   * @returns the parsed header, or `null` when the input lacks the v1 magic
-   * @throws CryptoError (`INVALID_INPUT` / `INVALID_BASE64URL`) if the input
-   *   string is not well-formed base64url.
-   * @throws CryptoError if the input begins with the v1 magic but is otherwise
-   *   malformed (truncated, unsupported version, unknown KDF, etc.)
-   */
-  public inspectHeader(input: string | Buffer): ParsedHeader | null {
-    let buf: Buffer;
-    if (typeof input === 'string') {
-      if (input.length === 0) {
-        throw new CryptoError(
-          'inspectHeader: input string must be non-empty',
-          CryptoErrorType.INVALID_INPUT,
-          'INVALID_INPUT'
-        );
-      }
-      // Validate the encoding BEFORE Buffer.from, which silently drops
-      // invalid characters (e.g. '!!!!' decodes to an empty buffer rather
-      // than throwing). Without this check a caller that passed a
-      // malformed string would get `null` back (looks like a v0
-      // ciphertext) instead of an explicit "this isn't base64url" error.
-      if (!isValidBase64Url(input)) {
-        throw new CryptoError(
-          'inspectHeader: input string is not valid base64url',
-          CryptoErrorType.INVALID_INPUT,
-          'INVALID_BASE64URL'
-        );
-      }
-      buf = Buffer.from(input, 'base64url');
-    } else if (Buffer.isBuffer(input)) {
-      buf = input;
-    } else {
-      throw new CryptoError(
-        'inspectHeader: input must be a base64url string or Buffer',
-        CryptoErrorType.INVALID_INPUT,
-        'INVALID_INPUT'
-      );
-    }
-    if (!hasMagic(buf)) {
-      return null;
-    }
-    return parseHeader(buf);
-  }
-
-  /**
-   * Best-effort buffer clearing.
-   *
-   * **NOT guaranteed against V8 string copies, GC-managed allocations, or
-   * compiler reordering.** Useful only for explicit `Buffer` instances; will
-   * not scrub the original input string or any V8-internal copies of derived
-   * material.
-   *
-   * Specifically:
-   * - `Buffer.fill(0)` zeroes the underlying ArrayBuffer slab that V8 uses
-   *   to back the Buffer object — this is sufficient hygiene for raw
-   *   key/IV/tag/salt material that was allocated as a Buffer.
-   * - Plaintext strings (e.g. the password parameter passed in by the
-   *   caller, or the UTF-8-decoded plaintext returned by `decryptText`)
-   *   live on V8's GC-managed heap. They cannot be scrubbed from
-   *   JavaScript code; this method does **not** attempt to do so.
-   * - V8 may copy buffers during garbage collection or as a side effect of
-   *   passing data across the JS/native boundary; those copies are not
-   *   reachable to clear and will linger on the heap until GC compaction.
-   * - Compiler optimizations may eliminate "dead" stores. Node.js does not
-   *   currently apply such optimizations to `Buffer.fill`, but this is not
-   *   guaranteed by the language semantics.
-   *
-   * Use this method as defense in depth, not as a guarantee that secret
-   * material has been forensically scrubbed from the process. For
-   * forensic-grade scrubbing, isolate sensitive operations in a short-lived
-   * subprocess and let process termination reclaim the pages.
-   *
-   * @param buffer - Buffer to clear
-   */
-  public secureClear(buffer: Buffer): void {
-    if (buffer && Buffer.isBuffer(buffer)) {
-      buffer.fill(0);
-    }
-  }
-
-  /**
-   * Validate password strength.
-   *
-   * A password is accepted if EITHER:
-   *
-   *  - it is at least 20 characters long (NIST SP 800-63B passphrase
-   *    style — length alone provides sufficient entropy), OR
-   *  - it is at least 8 characters long AND contains at least one
-   *    uppercase letter, one lowercase letter, one digit, and one
-   *    non-alphanumeric character (any character outside `[A-Za-z0-9]`,
-   *    so e.g. `_`, `-`, `+`, `[`, `]`, and non-ASCII punctuation all
-   *    count as "special").
-   *
-   * Implementation delegates to the module-level {@link isValidPassword}
-   * helper so the constructor can validate `defaultPassphrase` before
-   * `this` is fully initialised.
-   *
-   * @param password - Password to validate
-   * @returns True if password meets either acceptance rule
-   */
-  public validatePassword(password: string): boolean {
-    return isValidPassword(password);
-  }
-
-  /**
-   * Get encryption parameters for debugging/info
-   * @returns Current encryption parameters
-   */
-  public getParameters(): EncryptionParameters {
-    return {
-      algorithm: this.algorithm,
-      keyLength: this.keyLength,
-      ivLength: this.ivLength,
-      saltLength: this.saltLength,
-      tagLength: this.tagLength,
-      argon2Options: { ...this.argon2Options },
-    };
-  }
-
-  /**
-   * Get security level based on current configuration. Each tier is decided
-   * by both `memoryCost` AND `timeCost` clearing the matching minimum
-   * threshold in {@link SECURITY_THRESHOLDS}; if either parameter is below
-   * its threshold, classification falls through to the next-lower tier.
-   *
-   * @returns Security level (`LOW` / `MEDIUM` / `HIGH` / `ULTRA`).
-   */
-  public getSecurityLevel(): SecurityLevel {
-    const { memoryCost, timeCost } = this.argon2Options;
-
-    if (
-      memoryCost >= SECURITY_THRESHOLDS.ULTRA.memoryCost &&
-      timeCost >= SECURITY_THRESHOLDS.ULTRA.timeCost
-    ) {
-      return SecurityLevel.ULTRA;
-    } else if (
-      memoryCost >= SECURITY_THRESHOLDS.HIGH.memoryCost &&
-      timeCost >= SECURITY_THRESHOLDS.HIGH.timeCost
-    ) {
-      return SecurityLevel.HIGH;
-    } else if (
-      memoryCost >= SECURITY_THRESHOLDS.MEDIUM.memoryCost &&
-      timeCost >= SECURITY_THRESHOLDS.MEDIUM.timeCost
-    ) {
-      return SecurityLevel.MEDIUM;
-    } else {
-      return SecurityLevel.LOW;
-    }
-  }
-
-  /**
-   * Check if a default passphrase is set
-   * @returns True if default passphrase is configured
-   */
-  public hasDefaultPassphrase(): boolean {
-    return (
-      this.defaultPassphrase !== undefined && this.defaultPassphrase !== ''
-    );
-  }
-
-  /**
-   * Get the configured legacy-format handling mode.
-   * @returns one of `'auto'`, `'strict'`, or `'reject'`
-   */
-  public getLegacyMode(): LegacyMode {
-    return this.legacyMode;
-  }
+  // Isomorphic surface — `inspectHeader`, `secureClear`, `validatePassword`,
+  // `getParameters`, `getSecurityLevel`, `hasDefaultPassphrase`,
+  // `getLegacyMode`, plus the in-memory `encryptBytes`/`decryptBytes` API —
+  // is inherited unchanged from `CryptoCore`.
 }
 
 // Re-export the format-related constants for downstream consumers/tests.

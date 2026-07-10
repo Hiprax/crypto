@@ -113,4 +113,46 @@ export default [
     ...eslintPluginPrettierRecommended,
     files: ['src/**/*.ts'],
   },
+  // Isomorphic-file isolation gate. These modules must run byte-for-byte
+  // identically in Node and the browser, so they may reference NO Node global
+  // (`Buffer`, `process`) and import NO `node:*` builtin — otherwise the
+  // browser bundle would `ReferenceError` on a bare `Buffer` or fail to
+  // resolve a `node:crypto`. The esbuild `platform:'browser'` gate (Phase 7)
+  // catches `node:` SPECIFIERS but NOT a bare `Buffer`/`process` GLOBAL, so
+  // this static ESLint gate covers that gap. The glob is extended in later
+  // phases to the Web engine and browser entry files.
+  {
+    files: [
+      'src/core.ts',
+      'src/codec.ts',
+      'src/format-core.ts',
+      'src/engine.ts',
+    ],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'Buffer',
+          message:
+            'Isomorphic modules must not use the Node `Buffer` global; use `Uint8Array` and the `./codec.js` helpers instead.',
+        },
+        {
+          name: 'process',
+          message: 'Isomorphic modules must not use the Node `process` global.',
+        },
+      ],
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'node:*/*'],
+              message:
+                'Isomorphic modules must not import Node builtins; keep them free of `node:*` so the browser build can include them.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 ];

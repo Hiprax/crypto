@@ -136,6 +136,17 @@ beforeAll(async () => {
     webEngineReady = true;
   } catch (err) {
     if (isArgon2Unavailable(err)) {
+      // In CI the optional hash-wasm dependency MUST be installed so the
+      // browser-engine container assertions cannot silently no-op. Graceful
+      // [skip] is reserved for genuinely-unsupported local dev hosts.
+      if (process.env.CI) {
+        throw new Error(
+          `hash-wasm Argon2id failed to load in CI; the browser-engine ` +
+            `container assertions cannot be silently skipped. Ensure the ` +
+            `optional hash-wasm dependency is installed.`,
+          { cause: err }
+        );
+      }
       webEngineReady = false;
       // eslint-disable-next-line no-console
       console.warn(
@@ -362,6 +373,36 @@ describe('v2 container — metadata is confidential', () => {
     expect(bytesContains(container, utf8Encode(filename))).toBe(false);
     expect(bytesContains(container, utf8Encode(mime))).toBe(false);
     expect(bytesContains(container, utf8Encode(payload))).toBe(false);
+  });
+});
+
+// ===========================================================================
+// 4b. `aad` cross-application domain separation (containers honour the
+//     configured context string exactly like the v1 path).
+// ===========================================================================
+describe('v2 container — the `aad` option provides cross-application domain separation', () => {
+  it('a container sealed under one `aad` cannot be opened by a manager with a different `aad` (same password + params)', async () => {
+    const appA = new NodeCryptoManager({ ...LOW_COST, aad: 'application-A' });
+    const appB = new NodeCryptoManager({ ...LOW_COST, aad: 'application-B' });
+    const container = await appA.encryptContainer(fillerBytes(48), PASSWORD, {
+      filename: 'secret.dat',
+    });
+    // Same password AND identical Argon2id params (⇒ byte-identical header), so
+    // the ONLY thing separating the two apps is the bound `aad` context string.
+    // The DEK-unwrap GCM tag must reject the foreign `aad`.
+    await expect(appB.decryptContainer(container, PASSWORD)).rejects.toThrow(
+      CryptoError
+    );
+    // Sanity: the originating app still opens its own container.
+    const { data } = await appA.decryptContainer(container, PASSWORD);
+    expect(data.length).toBe(48);
+  });
+
+  it('the default `aad` round-trips (no custom aad required for the common case)', async () => {
+    const cm = new NodeCryptoManager(LOW_COST);
+    const container = await cm.encryptContainer(fillerBytes(32), PASSWORD);
+    const { data } = await cm.decryptContainer(container, PASSWORD);
+    expect(data.length).toBe(32);
   });
 });
 

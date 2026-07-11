@@ -43,6 +43,12 @@ const LOW_COST = { memoryCost: 2 ** 14, timeCost: 1, parallelism: 1 } as const;
 // property well under its timeout on both engines while still sampling widely.
 const FC_CONFIG: fc.Parameters = { numRuns: 20, endOnFailure: true };
 
+// The tamper property flips bytes anywhere in the ciphertext — including the v1
+// header's KDF-param bytes. A fixed seed makes the (deliberately bounded, see
+// the memoryCost-window skip in the tamper test) input space reproducible and
+// vettable across runs rather than drawing a fresh random sample each time.
+const FC_TAMPER_CONFIG: fc.Parameters = { ...FC_CONFIG, seed: 0x1505 };
+
 /** True when an error is the documented "Argon2id unavailable" graceful state. */
 function isArgon2Unavailable(err: unknown): boolean {
   return (
@@ -135,6 +141,17 @@ describe('property-based encryptBytes/decryptBytes (both engines)', () => {
       webEngineReady = true;
     } catch (err) {
       if (isArgon2Unavailable(err)) {
+        // In CI the optional hash-wasm dependency MUST be installed so the
+        // Web-engine property battery cannot silently no-op. Graceful [skip]
+        // is reserved for genuinely-unsupported local dev hosts.
+        if (process.env.CI) {
+          throw new Error(
+            `hash-wasm Argon2id failed to load in CI; the Web-engine property ` +
+              `tests cannot be silently skipped. Ensure the optional hash-wasm ` +
+              `dependency is installed.`,
+            { cause: err }
+          );
+        }
         webEngineReady = false;
         // eslint-disable-next-line no-console
         console.warn(
@@ -182,13 +199,23 @@ describe('property-based encryptBytes/decryptBytes (both engines)', () => {
               // ct.length is >= 82 (header+salt+iv+tag) even for empty
               // plaintext, so a valid index always exists.
               if (byteIdx >= ct.length) return;
+              // Skip the v1 header memoryCost field (u32BE at offsets 6..9): a
+              // single-bit flip there can encode a valid-but-multi-GiB Argon2id
+              // memory cost (<= the 2^22 KiB wire cap) that decryptBytes
+              // attempts to derive BEFORE the GCM auth check, which can OOM or
+              // time out a constrained runner. The test's assertion would still
+              // pass (a CryptoError is thrown either way), so this is purely a
+              // resource-hygiene guard — single-byte header tamper is already
+              // covered deterministically in encrypt-bytes.test.ts, so no
+              // tamper-evidence coverage is lost.
+              if (byteIdx >= 6 && byteIdx <= 9) return;
               const tampered = flipBit(ct, byteIdx, bitIdx);
               await expect(cm.decryptBytes(tampered, pwd)).rejects.toThrow(
                 CryptoError
               );
             }
           ),
-          FC_CONFIG
+          FC_TAMPER_CONFIG
         );
       });
 

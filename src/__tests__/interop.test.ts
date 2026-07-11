@@ -147,6 +147,18 @@ describe('cross-runtime interop — one wire format round-trips Node <-> browser
       webEngineReady = true;
     } catch (err) {
       if (isArgon2Unavailable(err)) {
+        // In CI the optional hash-wasm dependency MUST be installed: the
+        // cross-runtime interop guarantee is the crown jewel of this release
+        // and may never be silently skipped on a release/CI leg. A graceful
+        // [skip] is reserved for genuinely-unsupported local dev hosts.
+        if (process.env.CI) {
+          throw new Error(
+            `hash-wasm Argon2id failed to load in CI; the Node<->browser ` +
+              `interop crown-jewel cannot be silently skipped. Ensure the ` +
+              `optional hash-wasm dependency is installed.`,
+            { cause: err }
+          );
+        }
         webEngineReady = false;
         // eslint-disable-next-line no-console
         console.warn(

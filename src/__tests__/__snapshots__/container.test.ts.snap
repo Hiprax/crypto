@@ -1,10 +1,10 @@
 // Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
-exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 container full hex dump 1`] = `"48504352020000004000000000010001000000000000a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a2a2a2a2a2a2a2a2a2a2a2a20618c620d186bc2842b81261109d679189d2dd2a7d892395cc1322b287484655b25e06686b87e695e6c1adb03a7417e6a3a3a3a3a3a3a3a3a3a3a3a30000003bdd53d6f78a516cb2ff7736ed38f9993b8887dbe3fd5a7da53daf15226f5190995e766c9fcca317f589dcd20a6434b50c105a34daf381d74e6f204ab39cdedea38765bd5b287835bbe77d38a4a4a4a4a4a4a4a4a4a4a4a403850551d03b54908c35d5054fa301e3df0801c9f0d0f5270b04f67287ecd49f762fbe05069530ef465d"`;
+exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 container full hex dump 1`] = `"48504352020000004000000000010001000000000000a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a2a2a2a2a2a2a2a2a2a2a2a20618c620d186bc2842b81261109d679189d2dd2a7d892395cc1322b287484655204f76504f01c75356565a65bcd1cd69a3a3a3a3a3a3a3a3a3a3a3a30000003bdd53d6f78a516cb2ff7736ed38f9993b8887dbe3fd5a7da53daf15226f5190995e766c9fcca317f589dcd20a6434b50c105a34daf381d74e6f204a65142e5cca24f4d0541e22290f0bc980a4a4a4a4a4a4a4a4a4a4a4a403850551d03b54908c35d5054fa301e3df0801c9f0d0f5270b0437f75287bc5ad77b58ccb3011326900a"`;
 
 exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 dataIv (12 bytes) 1`] = `"a4a4a4a4a4a4a4a4a4a4a4a4"`;
 
-exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 dataTag (16 bytes) 1`] = `"f67287ecd49f762fbe05069530ef465d"`;
+exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 dataTag (16 bytes) 1`] = `"37f75287bc5ad77b58ccb3011326900a"`;
 
 exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 encData body 1`] = `"03850551d03b54908c35d5054fa301e3df0801c9f0d0f5270b04"`;
 
@@ -16,11 +16,11 @@ exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for 
 
 exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 kekIv (12 bytes) 1`] = `"a2a2a2a2a2a2a2a2a2a2a2a2"`;
 
-exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 kekTag (16 bytes) 1`] = `"b25e06686b87e695e6c1adb03a7417e6"`;
+exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 kekTag (16 bytes) 1`] = `"204f76504f01c75356565a65bcd1cd69"`;
 
 exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 metaIv (12 bytes) 1`] = `"a3a3a3a3a3a3a3a3a3a3a3a3"`;
 
-exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 metaTag (16 bytes) 1`] = `"b39cdedea38765bd5b287835bbe77d38"`;
+exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 metaTag (16 bytes) 1`] = `"65142e5cca24f4d0541e22290f0bc980"`;
 
 exports[`v2 container byte-layout snapshot produces a stable v2 byte layout for fixed input + KDF + CSPRNG: v2 salt (32 bytes) 1`] = `"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"`;
 

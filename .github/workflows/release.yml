@@ -80,6 +80,15 @@ jobs:
       - name: Test
         run: npm test
 
+      # Note: the real-browser interop suite (`npm run test:browser`, Vitest +
+      # headless Chromium) is deliberately NOT run here. Downloading a browser
+      # would slow every publish and add a flaky failure mode to the release
+      # path. The Node<->browser wire-format guarantee is instead gated BEFORE
+      # the tag exists: the `browser-tests` job in ci.yml runs it on every push
+      # and PR to the default branch, and releases are cut from green default-
+      # branch commits. The static browser-isolation gate (`check:browser`) and
+      # the exports check DO run at publish, via `prepublishOnly`.
+
       - name: Verify tag matches package.json version
         # Run on both tag pushes AND manual dispatches. The shell guard below
         # validates that `git push origin v1.3.2` only ever publishes the

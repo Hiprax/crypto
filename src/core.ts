@@ -214,7 +214,10 @@ export function isValidPassword(password: string): boolean {
 // key-encryption-key wraps a random data-encryption-key), encrypts a
 // confidential metadata block (filename/mime/size + the plaintext SHA-256)
 // under the DEK, and re-verifies that SHA-256 on decrypt. All three GCM
-// segments are bound to the verbatim header AAD.
+// segments are bound to the same AAD: the configured context string
+// (`this.aad`) concatenated with the verbatim 22-byte header, so the `aad`
+// option gives containers the same cross-application domain separation it
+// gives v1 ciphertexts.
 //
 // Layout (offsets assume the fixed AES-256-GCM sizes below):
 //   [magic "HPCR":4][ver 0x02:1][kdfId 0x00:1][argon2 params:16]  # 22B header
@@ -480,7 +483,7 @@ export function parseV2Meta(meta: Uint8Array): ParsedV2Meta {
 
 /** Byte-range views over a structurally-valid v2 container (pre-auth parse). */
 export interface ParsedV2Container {
-  /** The 22-byte header, verbatim — bound into every segment's AAD. */
+  /** The 22-byte header, verbatim — bound (after `this.aad`) into every segment's AAD. */
   header: Uint8Array;
   /** Argon2id salt for the KEK derivation. */
   salt: Uint8Array;
@@ -1876,7 +1879,14 @@ export abstract class CryptoCore {
         timeCost: this.argon2Options.timeCost,
         parallelism: this.argon2Options.parallelism,
       });
-      const aad = header;
+      // Bind BOTH the configured context string (`this.aad`) and the verbatim
+      // 22-byte header into every segment's AAD — matching the v1 path
+      // (`aadForV1`) so the `aad` option provides the same cross-application
+      // domain separation for containers as it does for v1 ciphertexts. The
+      // v1.0.0 `legacyHeaderAad` shim is intentionally NOT consulted here: it
+      // exists only to decrypt pre-header v1.0.0 blobs and there is no v1.0.0
+      // container, so v2 always binds the full context string + header.
+      const aad = concatBytes(this.aad, header);
 
       // 1) Wrap the DEK under the KEK.
       const kekIv = this.engine.randomBytes(CONTAINER_IV_LENGTH);
@@ -1891,6 +1901,9 @@ export abstract class CryptoCore {
         filename: filenameBytes,
         mime: mimeBytes,
       });
+      // The digest bytes are now copied into `metaPlain`; scrub the standalone
+      // copy for parity with the kek/dek/metaPlain scrub discipline.
+      this.secureClear(sha256);
       const metaIv = this.engine.randomBytes(CONTAINER_IV_LENGTH);
       const encMeta = await this.engine.aeadEncrypt(
         dek,
@@ -1955,8 +1968,9 @@ export abstract class CryptoCore {
    * {@link parseV2Container}) → derive the Argon2id KEK → unwrap the DEK →
    * decrypt the metadata block → decrypt the payload → recompute
    * SHA-256(payload) and compare it (in constant time) to the embedded digest.
-   * Every segment is GCM-authenticated against the verbatim header AAD, so a
-   * wrong password, any single-bit tamper, or a swapped segment surfaces as a
+   * Every segment is GCM-authenticated against the configured context string
+   * (`aad`) bound to the verbatim header, so a wrong password, a mismatched
+   * `aad`, any single-bit tamper, or a swapped segment surfaces as a
    * generic `DECRYPTION_FAILED`; a payload whose recomputed hash (or length)
    * does not match the sealed-in values throws
    * `CryptoError(DECRYPTION_FAILED, 'CONTAINER_INTEGRITY_FAILED')`.
@@ -2000,7 +2014,11 @@ export abstract class CryptoCore {
     // rejects any v0/v1 blob) BEFORE any Argon2id work — so a malformed or
     // foreign-version input can never trigger a KDF computation.
     const parsed = parseV2Container(container);
-    const aad = parsed.header;
+    // Must reproduce the exact AAD the producer bound: context string + header
+    // (see encryptContainer). A container sealed under a different `aad` value
+    // therefore fails the DEK-unwrap GCM tag, giving the configured
+    // cross-application domain separation.
+    const aad = concatBytes(this.aad, parsed.header);
 
     let kek: Uint8Array | null = null;
     let dek: Uint8Array | null = null;
@@ -2053,10 +2071,13 @@ export abstract class CryptoCore {
       // Integrity: the recomputed plaintext SHA-256 (and the embedded size)
       // must match what the producer sealed in. Constant-time digest compare.
       const actualSha = await this.engine.sha256(dataPlain);
-      if (
-        !constantTimeEqualBytes(actualSha, meta.sha256) ||
-        meta.size !== dataPlain.length
-      ) {
+      const integrityOk =
+        constantTimeEqualBytes(actualSha, meta.sha256) &&
+        meta.size === dataPlain.length;
+      // Scrub the recomputed digest once the comparison is done (matches the
+      // kek/dek/metaPlain scrub discipline).
+      this.secureClear(actualSha);
+      if (!integrityOk) {
         throw new CryptoError(
           'Container integrity check failed: the decrypted payload does not match its embedded SHA-256 digest.',
           CryptoErrorType.DECRYPTION_FAILED,

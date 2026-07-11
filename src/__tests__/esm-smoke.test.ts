@@ -10,7 +10,8 @@
  * exports-map mistakes that real Node would catch.
  *
  * Since the isomorphic (Node + browser) work, the root `.` export is
- * CONDITIONAL (`types` → `browser` → `node` → `default`), so this suite also
+ * CONDITIONAL (`browser` → `node` → `default`, each nesting `types` +
+ * `default`), so this suite also
  * asserts that condition set + order and loads the built browser entry
  * (`dist/index.browser.js`) under Node to prove it exposes `CryptoManager`
  * while its Node-only methods throw `UNSUPPORTED_IN_BROWSER`.
@@ -103,32 +104,66 @@ describe('ESM smoke (Task 31)', () => {
 
     // The root `.` export is CONDITIONAL: it routes bundlers (which set the
     // `browser` condition) to the browser build and Node (which sets `node`)
-    // to the Node build, over ONE ESM format. Assert the exact condition set
-    // AND order — `types` first (TypeScript reads the exports map with the
-    // same first-match rule as Node) and `default` last (the catch-all) — plus
-    // the correct target for each condition.
+    // to the Node build, over ONE ESM format. Each condition NESTS its own
+    // `types` (first) + `default` — a browser consumer resolves the browser
+    // declarations (`index.browser.d.ts`), never the Node-only, `Buffer`-typed
+    // ones. Assert the exact condition set AND order (`browser` → `node` →
+    // `default` last, the catch-all), each with `types` first.
     const rootEntry = exportsMap['.'];
     expect(typeof rootEntry).toBe('object');
-    const root = rootEntry as {
+    type CondBranch = {
       types?: string;
-      browser?: string;
-      node?: string;
       default?: string;
       import?: string;
       require?: string;
+      browser?: string;
     };
-    expect(Object.keys(root)).toEqual(['types', 'browser', 'node', 'default']);
-    expect(root.types).toMatch(/index\.d\.ts$/);
-    // Bundlers → browser build; Node + the fallback → Node build.
-    expect(root.browser).toMatch(/index\.browser\.js$/);
-    expect(root.node).toMatch(/index\.js$/);
-    expect(root.node).not.toMatch(/index\.browser\.js$/);
-    expect(root.default).toMatch(/index\.js$/);
-    expect(root.default).not.toMatch(/index\.browser\.js$/);
-    // ESM-only: no `require` condition, and no bare `import` on the root (the
-    // `node`/`default` conditions already cover Node's ESM import).
+    const root = rootEntry as {
+      browser?: CondBranch;
+      node?: CondBranch;
+      default?: CondBranch;
+      types?: string;
+      import?: string;
+      require?: string;
+    };
+    expect(Object.keys(root)).toEqual(['browser', 'node', 'default']);
+    // No hoisted top-level `types`/`require`/`import` on the root — the per-
+    // condition branches carry them.
+    expect(root.types).toBeUndefined();
     expect(root.require).toBeUndefined();
     expect(root.import).toBeUndefined();
+    // Each branch is an object with `types` FIRST, then `default`, and no
+    // `require`. The browser branch resolves the browser build + its own
+    // declarations; `node`/`default` resolve the Node build + Node declarations.
+    const branches: Array<[keyof typeof root, RegExp]> = [
+      ['browser', /index\.browser\.js$/],
+      ['node', /index\.js$/],
+      ['default', /index\.js$/],
+    ];
+    for (const [cond, targetRe] of branches) {
+      const branch = root[cond] as CondBranch;
+      expect(typeof branch).toBe('object');
+      expect(Object.keys(branch)).toEqual(['types', 'default']);
+      expect(branch.require).toBeUndefined();
+      expect(branch.default).toMatch(targetRe);
+    }
+    // The browser branch's declarations must be the browser `.d.ts`; the Node
+    // branches must be the Node `.d.ts` (NOT the browser one).
+    expect((root.browser as CondBranch).types).toMatch(
+      /index\.browser\.d\.ts$/
+    );
+    expect((root.browser as CondBranch).default).toMatch(/index\.browser\.js$/);
+    expect((root.node as CondBranch).types).toMatch(/index\.d\.ts$/);
+    expect((root.node as CondBranch).types).not.toMatch(
+      /index\.browser\.d\.ts$/
+    );
+    expect((root.node as CondBranch).default).not.toMatch(
+      /index\.browser\.js$/
+    );
+    expect((root.default as CondBranch).types).toMatch(/index\.d\.ts$/);
+    expect((root.default as CondBranch).default).not.toMatch(
+      /index\.browser\.js$/
+    );
 
     // The Node-only subpath exports keep the simple `{ types, import }` shape
     // — no `browser` condition (they are documented Node-only) and never a

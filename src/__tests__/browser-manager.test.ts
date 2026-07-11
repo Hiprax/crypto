@@ -52,6 +52,29 @@ function isArgon2Unavailable(err: unknown): boolean {
   );
 }
 
+/**
+ * Handle an Argon2id-unavailable error at a test's catch site. Any OTHER error
+ * propagates. In CI the optional `hash-wasm` dependency MUST be installed (the
+ * browser build's Argon2id has no native fallback), so a missing provider is a
+ * hard failure rather than a silent skip; on a genuinely-unsupported local dev
+ * host we log a graceful skip and the caller `return`s. Mirrors the CI guard in
+ * interop/property-bytes/container/engine-web.
+ */
+function skipOrThrowArgon2Unavailable(err: unknown, context: string): void {
+  if (!isArgon2Unavailable(err)) throw err;
+  if (process.env.CI) {
+    throw new Error(
+      `hash-wasm Argon2id failed to load in CI; ${context} cannot be silently ` +
+        `skipped. Ensure the optional hash-wasm dependency is installed.`,
+      { cause: err }
+    );
+  }
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[skip] hash-wasm Argon2id unavailable; ${context} skipped: ${String(err)}`
+  );
+}
+
 /** Deterministic-but-varied filler bytes for a given length. */
 function fillerBytes(length: number): Uint8Array {
   const out = new Uint8Array(length);
@@ -117,14 +140,8 @@ describe('browser CryptoManager — isomorphic round-trip (Web engine)', () => {
         expect(bytesToHex(back)).toBe(bytesToHex(data));
       }
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping browser byte round-trip: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'browser byte round-trip');
+      return;
     }
   }, 30000);
 
@@ -138,14 +155,8 @@ describe('browser CryptoManager — isomorphic round-trip (Web engine)', () => {
         expect(back).toBe(text);
       }
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping browser text round-trip: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'browser text round-trip');
+      return;
     }
   }, 30000);
 
@@ -166,14 +177,8 @@ describe('browser CryptoManager — isomorphic round-trip (Web engine)', () => {
         expect(parsed.params.parallelism).toBe(LOW_COST.parallelism);
       }
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping browser header shape: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'browser header shape');
+      return;
     }
   }, 30000);
 
@@ -182,14 +187,8 @@ describe('browser CryptoManager — isomorphic round-trip (Web engine)', () => {
     try {
       ciphertext = await cm.encryptText('secret', PASSWORD);
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping browser wrong-password: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'browser wrong-password');
+      return;
     }
     await expect(cm.decryptText(ciphertext, WRONG_PASSWORD)).rejects.toThrow(
       CryptoError

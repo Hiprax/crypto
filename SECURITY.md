@@ -239,8 +239,13 @@ reports and audits can reference them:
    "Content-Security-Policy (WASM)" subsection for the exact header.
 4. **No `node:` in the browser graph.** The browser entry
    (`dist/index.browser.js`) imports zero `node:` builtins and references no
-   `Buffer`/`process` global; this isolation is enforced continuously in CI by
-   an esbuild `platform:'browser'` bundle gate (`npm run check:browser`), so
+   `Buffer`/`process` global; this isolation is enforced continuously (in CI
+   and at publish) by two complementary static gates: an esbuild
+   `platform:'browser'` bundle gate (`npm run check:browser`) that fails on any
+   `node:` specifier reaching the browser graph, and an ESLint
+   `no-restricted-globals` (`Buffer`/`process`) + `no-restricted-imports`
+   (`node:*`) override on the isomorphic source files that catches a bare
+   `Buffer`/`process` global esbuild cannot see. So
    `node:crypto`/`node:fs`/`node:stream` can never enter a consumer's bundle.
 5. **Node-only methods are unavailable, not silently degraded.** The
    synchronous (PBKDF2), streaming-file, and `Buffer`-typed low-level methods

@@ -69,6 +69,29 @@ function isArgon2Unavailable(err: unknown): boolean {
   );
 }
 
+/**
+ * Handle an Argon2id-unavailable error at a test's catch site. Any OTHER error
+ * propagates. In CI the optional `hash-wasm` dependency MUST be installed — the
+ * cross-engine parity in this file is the primitive-level crown jewel of the
+ * isomorphic release and may never be silently skipped — so we hard-fail;
+ * on a genuinely-unsupported local dev host we log a graceful skip and the
+ * caller `return`s. Mirrors the CI guard in interop/property-bytes/container.
+ */
+function skipOrThrowArgon2Unavailable(err: unknown, context: string): void {
+  if (!isArgon2Unavailable(err)) throw err;
+  if (process.env.CI) {
+    throw new Error(
+      `hash-wasm Argon2id failed to load in CI; ${context} cannot be silently ` +
+        `skipped. Ensure the optional hash-wasm dependency is installed.`,
+      { cause: err }
+    );
+  }
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[skip] hash-wasm Argon2id unavailable; ${context} skipped: ${String(err)}`
+  );
+}
+
 describe('webEngine.deriveArgon2id (real hash-wasm)', () => {
   it('reproduces the pinned RFC 9106 Argon2id KAT vector', async () => {
     // Probe IS the call: run the real derivation. If hash-wasm cannot load,
@@ -83,14 +106,8 @@ describe('webEngine.deriveArgon2id (real hash-wasm)', () => {
       expect(key.length).toBe(32);
       derivedHex = bytesToHex(key);
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping web engine KAT: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'web engine KAT');
+      return;
     }
     expect(derivedHex).toBe(KAT_HEX);
   });
@@ -110,14 +127,8 @@ describe('webEngine.deriveArgon2id (real hash-wasm)', () => {
       nodeHex = bytesToHex(nodeKey);
       webHex = bytesToHex(webKey);
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping cross-engine KDF parity: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'cross-engine KDF parity');
+      return;
     }
     expect(webHex).toBe(KAT_HEX);
     expect(nodeHex).toBe(KAT_HEX);
@@ -142,14 +153,8 @@ describe('webEngine.deriveArgon2id (real hash-wasm)', () => {
       viewHex = bytesToHex(viewKey);
       copyHex = bytesToHex(copyKey);
     } catch (err) {
-      if (isArgon2Unavailable(err)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[skip] Argon2id unavailable, skipping view-salt parity: ${String(err)}`
-        );
-        return;
-      }
-      throw err;
+      skipOrThrowArgon2Unavailable(err, 'view-salt parity');
+      return;
     }
     expect(viewHex).toBe(copyHex);
     expect(viewHex).toBe(KAT_HEX);

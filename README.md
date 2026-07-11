@@ -50,7 +50,9 @@ The async key-derivation paths (`encryptText`, `decryptText`, `encryptFile`, `de
 
 Both packages are declared as **optional dependencies**. The library tries native first (highest performance) and transparently falls back to WASM if native is unavailable. If BOTH are unavailable, async encryption throws `CryptoError(MEMORY_ERROR, 'ARGON2_NOT_AVAILABLE')` with the message:
 
-> `argon2 native module unavailable. Install build tools (Python + node-gyp) or install the optional 'hash-wasm' package for a pure-WASM Argon2id fallback (slower than native but works everywhere). Alternatively, use *Sync methods (PBKDF2).`
+> `argon2 native module unavailable. Install build tools (Python + node-gyp) or install the optional 'hash-wasm' package for a pure-WASM Argon2id fallback (slower than native but works everywhere). Alternatively, use *Sync methods (PBKDF2). Native error: <msg>. WASM error: <msg>.`
+
+(the trailing `Native error: … WASM error: …` carries the concrete failure reason from each provider.)
 
 To recover from a "both unavailable" error, do any of:
 
@@ -62,7 +64,7 @@ Note: a successful first load is cached for the lifetime of the process (subsequ
 
 ### Browser build
 
-`@hiprax/crypto` is **isomorphic**: the `.` entry is a conditional export, so a browser bundler (webpack 5, Vite/Rollup, esbuild, Next.js) automatically resolves the separate browser build (`dist/index.browser.js`) while Node resolves the Node build (`dist/index.js`). The browser build's import graph contains **zero `node:` builtins** and references no `Buffer`/`process` global — enforced continuously in CI by an esbuild `platform:'browser'` bundle gate (`npm run check:browser`) — so nothing like `node:crypto`/`node:fs`/`node:stream` is ever dragged into your bundle.
+`@hiprax/crypto` is **isomorphic**: the `.` entry is a conditional export, so a browser bundler (webpack 5, Vite/Rollup, esbuild, Next.js) automatically resolves the separate browser build (`dist/index.browser.js`) while Node resolves the Node build (`dist/index.js`). The browser build's import graph contains **zero `node:` builtins** and references no `Buffer`/`process` global, so nothing like `node:crypto`/`node:fs`/`node:stream` is ever dragged into your bundle. Two complementary static gates enforce this continuously (in CI and at publish): an esbuild `platform:'browser'` bundle gate (`npm run check:browser`) fails on any `node:` specifier reaching the browser graph, and an ESLint `no-restricted-globals` (`Buffer`/`process`) + `no-restricted-imports` (`node:*`) override on the isomorphic source files catches a bare `Buffer`/`process` global that esbuild cannot see.
 
 ```bash
 # The browser build needs the WASM Argon2id provider (Web Crypto has no Argon2id):
@@ -82,7 +84,7 @@ Requirements and behavioral differences from Node — the **32 MiB browser Argon
 
 ### CommonJS interop
 
-`@hiprax/crypto` is ESM-only. The `package.json` `exports` map has no `require` entry in any condition — the `.` entry resolves in JSON source order `types → browser → node → default`, and none of those branches is a `require` target. The supported and portable interop for CommonJS callers is a dynamic `import()` from an `async` function — it is the only pattern the test suite verifies:
+`@hiprax/crypto` is ESM-only. The `package.json` `exports` map has no `require` entry in any condition — the `.` entry resolves in JSON source order `browser → node → default`, and each of those branches nests its own `types` + `default` (so a browser bundler resolves `dist/index.browser.js` with the matching `dist/index.browser.d.ts`, while Node resolves `dist/index.js` with `dist/index.d.ts`); none of the branches is a `require` target. The supported and portable interop for CommonJS callers is a dynamic `import()` from an `async` function — it is the only pattern the test suite verifies:
 
 ```js
 // my-cjs-file.cjs
@@ -832,7 +834,7 @@ Container mode is an **optional, additive** wire format (magic `HPCR`, version `
 2. **Confidential metadata.** The optional `filename` / `mime` (plus the derived `size` and the plaintext SHA-256) are packed into a metadata block that is itself encrypted under the DEK — none of it appears in cleartext anywhere in the output.
 3. **End-to-end integrity.** The SHA-256 of the plaintext is embedded and re-verified on decrypt (`CONTAINER_INTEGRITY_FAILED` on mismatch), on top of the per-segment GCM authentication.
 
-The 22-byte header is bound verbatim into the AES-GCM AAD of all three segments (DEK-wrap, metadata, payload), so tampering with the version, KDF parameters, or any reserved byte flips every tag.
+The AES-GCM AAD of all three segments (DEK-wrap, metadata, payload) is the configured context string (`aad`) bound to the verbatim 22-byte header, so tampering with the version, KDF parameters, or any reserved byte flips every tag — and, exactly like the v1 path, a custom `aad` provides cross-application domain separation: a container sealed by a manager configured with `aad: 'app-A'` cannot be opened by one configured with `aad: 'app-B'`, even with the same password and parameters.
 
 ### Usage
 

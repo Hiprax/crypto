@@ -15,8 +15,11 @@
  *
  * base64url uses the URL-safe alphabet (`-`/`_` instead of `+`/`/`) and emits
  * NO padding, exactly matching the canonical form the equivalent Node encoder
- * produces. Decoding accepts optional trailing `=` padding and reproduces the
- * canonical round-trip behaviour used by {@link isValidBase64url}.
+ * produces. Decoding is byte-for-byte compatible with Node's lenient
+ * `Buffer.from(s, 'base64url')`: it terminates at `=`, skips whitespace / line
+ * wrapping / stray non-alphabet characters, and accepts the standard `+`/`/`
+ * alphabet as well (see {@link base64urlToBytes}). {@link isValidBase64url}
+ * remains a strict canonical check via decode-then-re-encode equality.
  */
 
 /** URL-safe base64 alphabet; index 0..63 maps to the sextet value. */
@@ -24,14 +27,23 @@ const B64URL_CHARS =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
 /**
- * Reverse lookup: ASCII code point (0..127) -> 6-bit sextet value, or -1 for
- * any code point that is not a base64url alphabet character. Code points >=
- * 128 index out of range and read back as `undefined` (handled by callers).
+ * Reverse lookup indexed by a BYTE value (0..255) -> 6-bit sextet value, or -1
+ * for any byte that is not a base64 alphabet character. {@link base64urlToBytes}
+ * indexes this with `codeUnit & 0xFF`, mirroring Node's base64 decoder, which
+ * truncates each UTF-16 code unit to its low 8 bits before classifying it. A
+ * full 256-entry table means every low byte is a valid index (no `undefined`).
  */
-const B64URL_REV: number[] = new Array<number>(128).fill(-1);
+const B64URL_REV: number[] = new Array<number>(256).fill(-1);
 for (let index = 0; index < B64URL_CHARS.length; index += 1) {
   B64URL_REV[B64URL_CHARS.charCodeAt(index)] = index;
 }
+// Node's `Buffer.from(s, 'base64url')` decoder ALSO accepts the STANDARD
+// base64 alphabet (`+` and `/`) as aliases for the URL-safe `-` and `_`. Map
+// them to the same sextet values so {@link base64urlToBytes} stays
+// byte-for-byte compatible with Node for standard-alphabet input too (e.g. a
+// ciphertext normalised from base64url to standard base64 in transit).
+B64URL_REV[0x2b] = 62; // '+' decodes as '-'
+B64URL_REV[0x2f] = 63; // '/' decodes as '_'
 
 const utf8Encoder = new TextEncoder();
 // `ignoreBOM: true` KEEPS a leading U+FEFF byte-order mark as a real code point
@@ -68,31 +80,57 @@ export function bytesToBase64url(bytes: Uint8Array): string {
 }
 
 /**
- * Decode a base64url string to bytes.
+ * Decode a base64url string to bytes, byte-for-byte compatible with Node's
+ * `Buffer.from(s, 'base64url')` for EVERY input (pinned by the fast-check
+ * parity property in `codec.test.ts`, which fuzzes the full UTF-16 code-unit
+ * range incl. surrogate pairs). The decoder reproduces Node's lenient decoder
+ * exactly:
  *
- * A trailing run of `=` padding is accepted and ignored. Scanning stops at
- * the first character outside the base64url alphabet (that character and any
- * bytes after it are dropped), and any trailing sextet that does not complete
- * a whole byte is discarded — together these reproduce the canonical
- * round-trip semantics of the equivalent Node base64url decode, so a string
- * survives {@link isValidBase64url} only when it is already canonical.
+ *   - Each UTF-16 code unit is truncated to its low 8 bits (`codeUnit & 0xFF`)
+ *     BEFORE classification — so a character >= 256 whose low byte aliases a
+ *     base64 char or `=` behaves like that byte (e.g. U+0141 `Ł` (low byte
+ *     0x41) decodes as `A`, and a code unit whose low byte is 0x3D terminates).
+ *   - A `=` padding byte terminates decoding (Node stops at the first `=`);
+ *     everything after it is ignored.
+ *   - Any byte outside the base64 alphabet — ASCII whitespace (spaces, tabs,
+ *     and the CR/LF injected by MIME / PEM / 76-column / YAML-folded transport)
+ *     or stray punctuation — is SKIPPED and decoding continues, rather than
+ *     ending the scan.
+ *   - Both the URL-safe (`-`/`_`) and the standard (`+`/`/`) base64 alphabets
+ *     are accepted (see the reverse-map aliases above).
+ *   - A trailing sextet that does not complete a whole byte is discarded.
  *
- * @param s - base64url-encoded string
+ * This leniency is what lets `decryptText` accept a ciphertext that was
+ * line-wrapped or normalised to standard base64 in transit — the same inputs
+ * the pre-isomorphic Node path (which decoded via `Buffer.from`) tolerated.
+ * {@link isValidBase64url} still returns `true` ONLY for a canonical,
+ * unpadded, URL-safe string, because a non-canonical input re-encodes to a
+ * different (canonical) string and fails the round-trip equality.
+ *
+ * @param s - base64url-encoded string (canonical or leniently-encoded)
  * @returns decoded bytes
  */
 export function base64urlToBytes(s: string): Uint8Array {
-  // Strip a trailing run of '=' padding (0x3d).
-  let end = s.length;
-  while (end > 0 && s.charCodeAt(end - 1) === 0x3d) {
-    end -= 1;
-  }
-
-  // Collect the 6-bit value of each leading base64url character.
+  // Collect the 6-bit value of each base64 alphabet character, matching Node's
+  // decoder exactly: truncate every code unit to its low 8 bits, stop at `=`,
+  // skip any non-alphabet byte (whitespace / line wrapping / stray
+  // punctuation), and accept both base64 alphabets.
   const sextets: number[] = [];
-  for (let i = 0; i < end; i += 1) {
-    const value = B64URL_REV[s.charCodeAt(i)];
-    if (value === undefined || value < 0) {
+  for (let i = 0; i < s.length; i += 1) {
+    // Node classifies each UTF-16 code unit by its low 8 bits (so e.g. a
+    // surrogate half 0xD83D, low byte 0x3D, terminates just like '=').
+    const byte = s.charCodeAt(i) & 0xff;
+    if (byte === 0x3d) {
+      // '=' padding marks the end of the encoded data.
       break;
+    }
+    // `byte` is always 0..255 and the table is fully populated, so the lookup
+    // never yields `undefined` at runtime; `?? -1` satisfies
+    // `noUncheckedIndexedAccess` without a runtime branch.
+    const value = B64URL_REV[byte] ?? -1;
+    if (value < 0) {
+      // Whitespace or any non-alphabet byte: skip it and keep scanning.
+      continue;
     }
     sextets.push(value);
   }

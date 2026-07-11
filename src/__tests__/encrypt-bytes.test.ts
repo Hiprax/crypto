@@ -312,6 +312,59 @@ describe('encryptBytes / decryptBytes (isomorphic in-memory API)', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Reliability regression (issue: async text path lost lenient base64url).
+  //
+  // The pre-isomorphic Node `decryptText` decoded via `Buffer.from(ct,
+  // 'base64url')`, which is lenient — it skips whitespace / line wrapping and
+  // accepts the standard `+`/`/` alphabet. When `decryptText` was re-expressed
+  // on `decryptBytes(base64urlToBytes(ct))`, that leniency MUST be preserved
+  // (the codec now matches Node), otherwise a ciphertext that was line-wrapped
+  // (MIME/PEM/YAML transport) or normalised to standard base64 in transit would
+  // become undecryptable — violating "no correctly-encrypted input ever becomes
+  // undecryptable". These pin that leniency, and that the async and sync text
+  // paths agree on it.
+  // ---------------------------------------------------------------------------
+  describe('decryptText tolerates non-canonical base64url (reliability)', () => {
+    it('decrypts a line-wrapped ciphertext (interior newlines)', async () => {
+      const text = 'reliability: a line-wrapped ciphertext must still decrypt';
+      const ct = await cm.encryptText(text, PASSWORD);
+      const wrapped = ct.replace(/(.{40})/g, '$1\n'); // 40-col wrap
+      expect(wrapped).not.toBe(ct); // sanity: wrapping actually changed it
+      expect(await cm.decryptText(wrapped, PASSWORD)).toBe(text);
+    });
+
+    it('decrypts a ciphertext normalised to the standard base64 alphabet (+//)', async () => {
+      const text = 'url-safe or standard alphabet — both must decode';
+      // Ensure the ciphertext actually contains a url-safe `-`/`_` so the
+      // standard-alphabet swap is a meaningful transformation (fresh salt/IV
+      // per encrypt; `-`/`_` occur in ~1/16 of chars, so the first attempt
+      // virtually always qualifies — the bounded loop removes any flakiness).
+      let ct = await cm.encryptText(text, PASSWORD);
+      for (let i = 0; i < 10 && !/[-_]/.test(ct); i += 1) {
+        ct = await cm.encryptText(text, PASSWORD);
+      }
+      const standard = ct.replace(/-/g, '+').replace(/_/g, '/');
+      expect(standard).not.toBe(ct); // the swap actually changed the string
+      expect(await cm.decryptText(standard, PASSWORD)).toBe(text);
+    });
+
+    it('decrypts a ciphertext with surrounding whitespace', async () => {
+      const text = 'whitespace around the ciphertext is ignored';
+      const ct = await cm.encryptText(text, PASSWORD);
+      expect(await cm.decryptText(` \t\n${ct}\r\n `, PASSWORD)).toBe(text);
+    });
+
+    it('async and sync text paths agree on line-wrapped leniency', async () => {
+      const text = 'async and sync must both tolerate line wrapping';
+      const asyncCt = await cm.encryptText(text, PASSWORD);
+      const syncCt = cm.encryptTextSync(text, PASSWORD);
+      const wrap = (s: string): string => s.replace(/(.{40})/g, '$1\n');
+      expect(await cm.decryptText(wrap(asyncCt), PASSWORD)).toBe(text);
+      expect(cm.decryptTextSync(wrap(syncCt), PASSWORD)).toBe(text);
+    });
+  });
+
   describe('default passphrase', () => {
     it('uses the configured defaultPassphrase when no password is passed', async () => {
       const withDefault = new CryptoManager({

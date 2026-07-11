@@ -41,7 +41,6 @@ Isomorphic (Node + browser) support. The library now encrypts and decrypts in **
 - `.npmignore` — excludes `vitest.config.ts` and the browser test suite from the published tarball.
 - `README.md` — new "Isomorphic API & Browser Support" and "Container Mode (v2 envelope)" sections; browser build/install notes; `encryptBytes`/`decryptBytes`/`encryptContainer`/`decryptContainer` method docs; "Container Format (v2)" byte layout; conditional-exports and error-code updates; Post-Quantum section kept in sync (browser uses the same primitives).
 - `SECURITY.md` — new "Browser build (threat-model notes)" section (memory hygiene, secure context, CSP, `node:`-free graph, `UNSUPPORTED_IN_BROWSER`); browser Argon2id default and v2 container added to the configuration-defaults and format/parser scope; post-quantum posture kept in sync.
-- `CLAUDE.md` — architecture/source-files, exports map, scripts, and the post-quantum sync note updated to cover the engine layer, `codec.ts`/`format-core.ts`, the browser build, and container mode.
 - `CHANGELOG.md` — this entry.
 
 ---

@@ -16,8 +16,10 @@
 
 - 🔐 **AES-256-GCM** authenticated encryption
 - 🔑 **Argon2id** memory-hard key derivation
+- 🌐 **Isomorphic (Node + browser)** — the same `encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` run in Node and the browser over **one** wire format, so a ciphertext produced in one runtime decrypts in the other ([details](#-isomorphic-api--browser-support))
 - 🔮 **Post-quantum resistant by design** — symmetric-only cryptography, nothing for Shor's algorithm to break ([proofs](#-post-quantum-security))
 - 📁 **Streaming file encryption AND decryption** (bounded memory regardless of file size) with atomic temp-file output
+- 📦 **Container mode** — an optional authenticated v2 envelope with confidential metadata (filename/mime) and an embedded, re-verified plaintext hash ([details](#-container-mode-v2-envelope))
 - 🛡️ **Memory-safe** operations with secure clearing
 - ✅ **Strong password** validation with detailed feedback
 - 🔄 **Cross-platform** compatibility
@@ -35,7 +37,9 @@ npm install @hiprax/crypto
 
 ### Module system
 
-This package is **ESM-only** (`"type": "module"`). It is not shipped with a CommonJS build because Node.js 18+ ESM consumers can use it directly via `import`, and CJS consumers can still load it via dynamic `import()`. See the [CommonJS interop](#commonjs-interop) section below.
+This package is **ESM-only** (`"type": "module"`). It is not shipped with a CommonJS build because Node.js ESM consumers (the package minimum is Node 22) can use it directly via `import`, and CJS consumers can still load it via dynamic `import()`. See the [CommonJS interop](#commonjs-interop) section below.
+
+The main entry (`.`) is an **[isomorphic](#-isomorphic-api--browser-support)** conditional export: Node resolves the Node build (`dist/index.js`) and browser bundlers resolve a separate, `node:`-free browser build (`dist/index.browser.js`). The `browser` build ships the same in-memory async API over Web Crypto + WebAssembly Argon2id — see [Browser build](#browser-build) and [Isomorphic API & Browser Support](#-isomorphic-api--browser-support).
 
 ### Argon2 native dependency (optional, with WASM fallback)
 
@@ -56,9 +60,29 @@ To recover from a "both unavailable" error, do any of:
 
 Note: a successful first load is cached for the lifetime of the process (subsequent async calls reuse the same provider). A failed first load is NOT cached — the next caller retries from scratch, so transient failures (e.g. a temporary FS permission glitch on Windows during a build-tool install) can recover within the same process.
 
+### Browser build
+
+`@hiprax/crypto` is **isomorphic**: the `.` entry is a conditional export, so a browser bundler (webpack 5, Vite/Rollup, esbuild, Next.js) automatically resolves the separate browser build (`dist/index.browser.js`) while Node resolves the Node build (`dist/index.js`). The browser build's import graph contains **zero `node:` builtins** and references no `Buffer`/`process` global — enforced continuously in CI by an esbuild `platform:'browser'` bundle gate (`npm run check:browser`) — so nothing like `node:crypto`/`node:fs`/`node:stream` is ever dragged into your bundle.
+
+```bash
+# The browser build needs the WASM Argon2id provider (Web Crypto has no Argon2id):
+npm install @hiprax/crypto hash-wasm
+```
+
+```ts
+// In a browser (or any bundler that sets the "browser" condition):
+import { CryptoManager } from '@hiprax/crypto';
+
+const cm = new CryptoManager(); // Web Crypto + hash-wasm Argon2id, 32 MiB default
+const ct = await cm.encryptText('secret', 'MySecureP@ssw0rd123!');
+const back = await cm.decryptText(ct, 'MySecureP@ssw0rd123!');
+```
+
+Requirements and behavioral differences from Node — the **32 MiB browser Argon2id default**, the **secure-context** requirement, the **CSP `'wasm-unsafe-eval'`** one-liner, the browser **memory-hygiene** caveats, and the Node-only methods that **throw `UNSUPPORTED_IN_BROWSER`** — are all covered under [Isomorphic API & Browser Support](#-isomorphic-api--browser-support). The `./crypto-manager` and `./utils` subpath exports remain **Node-only** (they pull in `node:fs`/`node:path`); import from the package root (`@hiprax/crypto`) in browser code.
+
 ### CommonJS interop
 
-`@hiprax/crypto` is ESM-only. The `package.json` `exports` map has no `require` entry. The supported and portable interop for CommonJS callers is a dynamic `import()` from an `async` function — it is the only pattern the test suite verifies:
+`@hiprax/crypto` is ESM-only. The `package.json` `exports` map has no `require` entry in any condition — the `.` entry resolves in JSON source order `types → browser → node → default`, and none of those branches is a `require` target. The supported and portable interop for CommonJS callers is a dynamic `import()` from an `async` function — it is the only pattern the test suite verifies:
 
 ```js
 // my-cjs-file.cjs
@@ -292,6 +316,25 @@ const crypto = new CryptoManager({ defaultPassphrase: 'MySecureP@ssw0rd123!' });
 const decrypted = await crypto.decryptText(encrypted);
 ```
 
+##### `encryptBytes(data: Uint8Array, password?: string): Promise<Uint8Array>`
+
+**Isomorphic** in-memory encryption — the same method (and the same output bytes) runs in Node and the browser. Encrypts raw bytes with Argon2id key derivation, producing a v1 ciphertext in the text byte layout `[header:22][salt:32][iv:12][tag:16][ciphertext]`. `encryptText` is a thin base64url wrapper over this method, so there is exactly one wire format. The empty `Uint8Array` is accepted and produces a valid authenticated ciphertext; the caller's `data` buffer is never mutated or scrubbed. See [Isomorphic API & Browser Support](#-isomorphic-api--browser-support).
+
+```typescript
+const bytes = new TextEncoder().encode('Hello World');
+const ct = await crypto.encryptBytes(bytes, 'MySecureP@ssw0rd123!');
+// Returns: Uint8Array (v1 ciphertext, HPCR magic)
+```
+
+##### `decryptBytes(data: Uint8Array, password?: string): Promise<Uint8Array>`
+
+**Isomorphic** counterpart of `encryptBytes`. Decrypts v1 (Argon2id) or legacy v0 ciphertext bytes, mirroring `decryptText`'s byte path exactly (header parse, embedded-parameter override, header-bound AAD, and the `legacyMode` v0 fallback). Every confidentiality-relevant failure (wrong password, tampering) surfaces as the generic `DECRYPTION_FAILED`.
+
+```typescript
+const back = await crypto.decryptBytes(ct, 'MySecureP@ssw0rd123!');
+console.log(new TextDecoder().decode(back)); // 'Hello World'
+```
+
 ##### `encryptTextSync(text: string, password?: string): string`
 
 Synchronous version of text encryption. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation.
@@ -401,6 +444,32 @@ crypto.decryptFileSync(
 );
 ```
 
+##### `encryptContainer(data: Uint8Array, password?: string, meta?: ContainerMetadataInput): Promise<Uint8Array>`
+
+**Isomorphic** (Node + browser). Encrypts `data` into a self-describing, authenticated **v2 container** — an additive envelope format (magic `HPCR`, version `0x02`) that is separate from the v1 text/file ciphertext. It wraps a random per-message data-encryption key under an Argon2id key-encryption key, stores optional `filename`/`mime` metadata **confidentially** (encrypted, never in cleartext), and embeds the plaintext SHA-256 for an end-to-end integrity check. See [Container Mode](#-container-mode-v2-envelope).
+
+```typescript
+const data = new TextEncoder().encode('report contents');
+const container = await crypto.encryptContainer(data, 'MySecureP@ssw0rd123!', {
+  filename: 'report.txt',
+  mime: 'text/plain',
+});
+// Returns: Uint8Array (v2 container). In Node: writeFileSync('report.hpcr', container).
+```
+
+##### `decryptContainer(container: Uint8Array, password?: string): Promise<DecryptedContainer>`
+
+**Isomorphic** counterpart of `encryptContainer`. Returns `{ data, meta }` where `meta` is the authenticated `{ filename?, mime?, size }`. The embedded SHA-256 is re-verified before returning; a mismatch throws `CryptoError` with code `CONTAINER_INTEGRITY_FAILED`. A v0/v1 blob (no `HPCR` magic, or a version byte other than `0x02`) is rejected before any key derivation runs, so `decryptContainer` never accepts a non-container.
+
+```typescript
+const { data, meta } = await crypto.decryptContainer(
+  container,
+  'MySecureP@ssw0rd123!'
+);
+console.log(meta); // { filename: 'report.txt', mime: 'text/plain', size: 15 }
+console.log(new TextDecoder().decode(data)); // 'report contents'
+```
+
 ##### `validatePassword(password: string): boolean`
 
 Validates password strength.
@@ -465,9 +534,9 @@ The caller must supply the exact `(key, iv, tag)` that were produced by `encrypt
 const decrypted = crypto.decryptData(encrypted, key, iv, tag);
 ```
 
-##### `secureClear(buffer: Buffer): void`
+##### `secureClear(buffer: Uint8Array): void`
 
-Securely zeroes a buffer to remove sensitive data from memory.
+Securely zeroes a buffer to remove sensitive data from memory. The parameter is `Uint8Array` (every Node `Buffer` is a `Uint8Array`, so existing `Buffer` call sites are unaffected); a plain `Uint8Array` — e.g. browser key material — is actually scrubbed rather than silently skipped. Best-effort only: it cannot reach immutable V8 strings or GC-managed copies (see [Threat Model](#-threat-model)).
 
 ```typescript
 crypto.secureClear(key);
@@ -509,9 +578,9 @@ const mode = crypto.getLegacyMode();
 // Returns: 'auto' | 'strict' | 'reject'
 ```
 
-##### `inspectHeader(input: string | Buffer): ParsedHeader | null`
+##### `inspectHeader(input: string | Uint8Array): ParsedHeader | null`
 
-Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Buffer` (file contents). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; Buffers are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_VERSION`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
+Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Uint8Array` (file contents — a Node `Buffer` is a `Uint8Array`, so `Buffer` inputs keep working). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; byte inputs are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_VERSION`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
 
 ### Types and Enums
 
@@ -533,6 +602,10 @@ import {
   type FileInfo,
   type RetryConfig,
   type ProgressCallback,
+  // Container mode (v2 envelope)
+  type ContainerMetadataInput,
+  type ContainerMetadata,
+  type DecryptedContainer,
 } from '@hiprax/crypto';
 ```
 
@@ -658,6 +731,158 @@ console.log('Is Text:', fileInfo.isTextFile);
 ```
 
 > **Sizing random secrets for a post-quantum margin.** `generateRandomString` and `generateRandomHex` draw from the OS CSPRNG, so their strength is purely a function of length. Grover's algorithm halves the effective entropy of a random secret against a quantum adversary, so to preserve a 128-bit post-quantum margin, size bearer secrets (API keys, session tokens, capability URLs) at **256 bits**: `generateRandomHex(64)` (64 hex chars) or `generateRandomString(44)` (≈262 bits). The defaults (32 chars) are ample for identifiers and classical threat models. `generateUUID` output carries 122 random bits and is designed as a collision-resistant *identifier* — do not use it as an unguessable bearer token where post-quantum unpredictability matters. See [Post-Quantum Security](#-post-quantum-security).
+
+## 🌐 Isomorphic API & Browser Support
+
+`@hiprax/crypto` runs the **same code, over the same wire format, in Node and the browser.** The in-memory async API — `encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` / `encryptContainer` / `decryptContainer` / `inspectHeader` / `validatePassword` / `getParameters` / `getSecurityLevel` — lives in a runtime-agnostic core and is available in both builds. The runtime-specific primitives (CSPRNG, Argon2id, AES-256-GCM, SHA-256) are the only thing that differs: Node uses `node:crypto` + native/WASM Argon2id, the browser uses Web Crypto (SubtleCrypto) + WebAssembly Argon2id (`hash-wasm`). There is **exactly one ciphertext format** — a blob produced in one runtime decrypts in the other.
+
+### Isomorphic in-memory API
+
+`encryptBytes(data, password?)` / `decryptBytes(data, password?)` are the foundation: they take and return `Uint8Array`, and `encryptText` / `decryptText` are thin base64url wrappers over them (one wire format, one code path).
+
+```ts
+import { CryptoManager } from '@hiprax/crypto';
+
+const cm = new CryptoManager();
+const bytes = new TextEncoder().encode('Hello World'); // any Uint8Array, incl. binary
+const ct = await cm.encryptBytes(bytes, 'MySecureP@ssw0rd123!'); // Uint8Array
+const back = await cm.decryptBytes(ct, 'MySecureP@ssw0rd123!'); // byte-identical
+```
+
+The empty `Uint8Array` is accepted and produces a valid authenticated ciphertext. The caller's `data` buffer is never mutated or scrubbed (it belongs to the caller).
+
+### Cross-runtime interop
+
+Because both runtimes share one format and one KDF (Argon2id, whose native/WASM outputs are bit-identical for the same parameters), a ciphertext crosses the boundary transparently:
+
+```ts
+// In the browser (32 MiB Argon2id default):
+const ct = await cm.encryptText('secret', 'MySecureP@ssw0rd123!');
+// ...transmit `ct` (a base64url string) to a Node service...
+
+// In Node:
+const plaintext = await new CryptoManager().decryptText(ct, 'MySecureP@ssw0rd123!');
+// -> 'secret'   (Node reads the KDF params embedded in the ciphertext header)
+```
+
+The reverse direction (Node → browser) works identically, subject to the memory caveat below.
+
+### Browser usage (and `Blob` output)
+
+Install the WASM Argon2id provider alongside the package (Web Crypto has no Argon2id), import from the package root, and — for large payloads — hand the ciphertext bytes to a `Blob`:
+
+```bash
+npm install @hiprax/crypto hash-wasm
+```
+
+```ts
+import { CryptoManager } from '@hiprax/crypto';
+
+const cm = new CryptoManager();
+
+// Encrypt a File/Blob the user selected, entirely client-side:
+async function encryptFileInBrowser(file: File, password: string): Promise<Blob> {
+  const plaintext = new Uint8Array(await file.arrayBuffer());
+  const ct = await cm.encryptBytes(plaintext, password); // Uint8Array
+  return new Blob([ct], { type: 'application/octet-stream' });
+}
+
+// Decrypt back to a Blob for download:
+async function decryptToBlob(ciphertext: Uint8Array, password: string): Promise<Blob> {
+  const plaintext = await cm.decryptBytes(ciphertext, password);
+  return new Blob([plaintext]);
+}
+```
+
+Browser large-file handling is **in-memory** (read the file, `encryptBytes`/`decryptBytes`, hand back a `Blob`): there is no browser streaming, because Web Crypto AES-GCM is one-shot. Peak memory is proportional to the payload size — a documented limit, not a bug.
+
+### Browser Argon2id profile (32 MiB default) and the 128 MiB-decrypt caveat
+
+The Node default is 128 MiB Argon2id (`memoryCost = 2 ** 17`, classified `HIGH`). The **browser default is a lighter 32 MiB** profile (`memoryCost = 2 ** 15`, `timeCost = 3`, `parallelism = 1`) — still ≈1.68× the OWASP 2025/2026 Argon2id memory minimum (19 MiB), but classified `MEDIUM` by `getSecurityLevel()` because 32 MiB is below the `HIGH` threshold. This is a runtime-specific **default**, not a format change; you can pass an explicit `memoryCost`, and every ciphertext carries its own KDF parameters on the wire.
+
+> **⚠️ Decrypt-side memory caveat.** Because each ciphertext header embeds the *exact* `memoryCost` used to derive its key, decrypting a ciphertext produced at 128 MiB requires allocating 128 MiB — which can OOM a memory-constrained mobile browser tab (iOS Safari WASM ceilings are as low as ~64–120 MB). **Data intended to be decrypted in browsers should be encrypted at ≤ the browser memory profile** (e.g. the 32 MiB browser default). The wire format is identical across runtimes; only the affordable KDF cost differs. Node → browser interop is only reliable when the Node side encrypts within the browser's memory budget.
+
+### Content-Security-Policy (WASM)
+
+The browser Argon2id path compiles WebAssembly (`hash-wasm`). Under a strict CSP that sets `script-src` (or `default-src`) without `'unsafe-eval'`, WebAssembly compilation is blocked and throws a `CompileError`. Allow it with the strictly-narrower `'wasm-unsafe-eval'` (WASM only — not JS `eval`):
+
+```http
+Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'
+```
+
+`hash-wasm` instantiates from **inline bytes** (the WASM is embedded as base64), so **no `connect-src` entry and no network fetch** are needed. Pages with no CSP run WASM fine. Supported: Chrome/Edge 97+, Firefox 102+, Safari 16+.
+
+### Browser memory-hygiene caveats
+
+The browser build is honest about weaker memory hygiene than Node:
+
+- **Opaque `CryptoKey`.** Web Crypto `importKey` copies the raw key bytes into a `CryptoKey` object the library can no longer reach — so `secureClear` cannot scrub it. The engine zeroes the transient raw-key copy it owns immediately after import, but the `CryptoKey` itself lives until GC.
+- **Immutable V8 strings.** As in Node, passwords and decrypted text are JavaScript strings; they are GC-managed and cannot be zeroed (see [Threat Model](#-threat-model)).
+- **Secure context required.** `crypto.subtle` is only available in a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (HTTPS or `localhost`). On an insecure origin, `globalThis.crypto.subtle` is `undefined` and the engine throws.
+
+### Node-only methods throw in the browser
+
+The synchronous (PBKDF2) paths, the streaming file paths, and the `Buffer`-typed low-level primitives cannot be expressed with one-shot, async Web Crypto, so in the browser build they are present as throwing stubs that raise `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')`: `encryptTextSync`, `decryptTextSync`, `encryptFile`, `decryptFile`, `encryptFileSync`, `decryptFileSync`, `encryptData`, `decryptData`, `deriveKey`, `deriveKeySync`, and `generateSecureRandom`. Use the in-memory async API (`encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` / `encryptContainer` / `decryptContainer`) instead. The `./utils` file helpers are Node-only and are not exported from the browser build.
+
+## 📦 Container Mode (v2 envelope)
+
+Container mode is an **optional, additive** wire format (magic `HPCR`, version `0x02`) for sealing a payload **together with confidential metadata and an end-to-end integrity check**. It is separate from the v1 text/file ciphertext — it does not touch `encryptBytes`/`decryptBytes` — and, like the rest of the in-memory API, it is **isomorphic** (available in Node and the browser). It differs from `encryptBytes` in three ways:
+
+1. **Two-layer keying (KEK/DEK).** An Argon2id key-encryption key (KEK), derived from the password, AES-256-GCM-wraps a fresh random 32-byte data-encryption key (DEK); the DEK encrypts the metadata and the payload.
+2. **Confidential metadata.** The optional `filename` / `mime` (plus the derived `size` and the plaintext SHA-256) are packed into a metadata block that is itself encrypted under the DEK — none of it appears in cleartext anywhere in the output.
+3. **End-to-end integrity.** The SHA-256 of the plaintext is embedded and re-verified on decrypt (`CONTAINER_INTEGRITY_FAILED` on mismatch), on top of the per-segment GCM authentication.
+
+The 22-byte header is bound verbatim into the AES-GCM AAD of all three segments (DEK-wrap, metadata, payload), so tampering with the version, KDF parameters, or any reserved byte flips every tag.
+
+### Usage
+
+```ts
+import { CryptoManager } from '@hiprax/crypto';
+
+const cm = new CryptoManager();
+const data = new TextEncoder().encode('report contents');
+
+const container = await cm.encryptContainer(data, 'MySecureP@ssw0rd123!', {
+  filename: 'report.txt',
+  mime: 'text/plain',
+});
+
+const { data: back, meta } = await cm.decryptContainer(
+  container,
+  'MySecureP@ssw0rd123!'
+);
+console.log(meta); // { filename: 'report.txt', mime: 'text/plain', size: 15 }
+```
+
+Container mode is an **in-memory** format (no streaming). Persist or transmit the bytes with the idioms natural to each runtime:
+
+```ts
+// Node — a file container:
+import { readFileSync, writeFileSync } from 'node:fs';
+writeFileSync(
+  'report.hpcr',
+  await cm.encryptContainer(readFileSync('report.txt'), pw, {
+    filename: 'report.txt',
+    mime: 'text/plain',
+  })
+);
+
+// Browser — download as a Blob:
+const blob = new Blob([await cm.encryptContainer(bytes, pw, { filename })]);
+```
+
+> The container is memory-bounded (the whole payload is held in memory to hash and encrypt it); it is intended for small-to-medium payloads. For arbitrarily large files in Node, prefer the streaming `encryptFile` / `decryptFile` (v1) methods.
+
+### Version isolation
+
+Container mode and the v1 ciphertext path reject each other's blobs:
+
+- Feeding a v2 container to `decryptBytes` / `decryptText` throws `CryptoError` (in the default `legacyMode: 'auto'` the v1 header parser rejects the `0x02` version and the v0 fallback cannot rescue it, surfacing as `DECRYPTION_FAILED`; `strict` / `reject` surface `UNSUPPORTED_VERSION`).
+- Feeding a v0/v1 blob to `decryptContainer` is rejected by a pure, DoS-bounded header parse **before any key derivation runs** (no `HPCR` magic → `CONTAINER_INVALID_MAGIC`; wrong version → `CONTAINER_UNSUPPORTED_VERSION`).
+
+### Container error codes
+
+`CONTAINER_INTEGRITY_FAILED` (decrypted payload does not match its embedded SHA-256), `CONTAINER_METADATA_MALFORMED`, `CONTAINER_METADATA_TOO_LARGE` / `CONTAINER_DATA_TOO_LARGE` (field/payload exceeds its wire cap), `INVALID_CONTAINER_META` (non-string `filename`/`mime`), plus the pre-authentication parser codes `TRUNCATED_CONTAINER`, `CONTAINER_INVALID_MAGIC`, `CONTAINER_UNSUPPORTED_VERSION`, `CONTAINER_UNSUPPORTED_KDF`, `CONTAINER_INVALID_HEADER_PARAM`, and `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`. The byte layout is documented under [Container Format (v2)](#container-format-v2).
 
 ## 🔧 Configuration
 
@@ -928,6 +1153,20 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 - `TRUNCATED_HEADER`, `INVALID_HEADER_PARAM`: defensive parser errors for malformed v1 input.
 - `LEGACY_FORMAT_REJECTED` / `UNSUPPORTED_FORMAT`: emitted in `'strict'`/`'reject'` modes when a v0 ciphertext is presented.
 
+### Container Format (v2)
+
+[Container mode](#-container-mode-v2-envelope) is an **additive, separate** wire format — it reuses the 22-byte header shape but stamps version `0x02` and does **not** touch the v0/v1 text/file paths. It seals a payload under a two-layer key hierarchy (an Argon2id key-encryption key wraps a random data-encryption key), encrypts a confidential metadata block, and embeds the plaintext SHA-256 for an end-to-end integrity check. All three GCM segments are bound to the verbatim header AAD.
+
+```text
+[magic "HPCR": 4][version 0x02: 1][kdf-id 0x00 (Argon2id): 1][kdf-params: 16]   # 22-byte header (AAD)
+[salt: 32]
+[kekIv: 12][wrappedDek: 32][kekTag: 16]                        # random 32-byte DEK, AES-256-GCM-wrapped under the Argon2id KEK
+[metaIv: 12][metaLen: 4 BE u32][encMeta: metaLen][metaTag: 16] # confidential metadata, encrypted under the DEK
+[dataIv: 12][encData: variable][dataTag: 16]                   # payload, encrypted under the DEK
+```
+
+The `kdf-params` block is the same Argon2id layout as v1 (`[memoryCost u32BE][timeCost u32BE][parallelism u16BE][reserved 6×0x00]`); containers are always Argon2id. The `encMeta` segment decrypts (under the DEK) to a canonical serialization of `{ flags, size, sha256, filename?, mime? }` — the filename/mime bytes are present **only** inside this encrypted block and never in cleartext. After the payload decrypts, its SHA-256 (and length) are re-checked against the sealed-in values; a mismatch throws `CONTAINER_INTEGRITY_FAILED`. See [Container Mode](#-container-mode-v2-envelope) for the API and error codes.
+
 ## 🛡️ Security Features
 
 ### Cryptographic Security
@@ -972,6 +1211,8 @@ Quantum computers threaten cryptography through two very different algorithms:
 
 The NIST post-quantum standards (FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA) replace **public-key** primitives only; NIST states explicitly that its symmetric standards are **not** part of the PQC transition. A symmetric-only library therefore needs **no post-quantum migration** — no algorithm swap, no format change, and nothing for consumers to update, ever, for quantum reasons.
 
+This posture is **identical in the browser build.** The [isomorphic browser build](#-isomorphic-api--browser-support) uses the same symmetric primitives (AES-256-GCM, Argon2id, SHA-256) over the same wire format — Web Crypto and WebAssembly Argon2id are different *implementations* of the same algorithms, not different algorithms. The only cross-runtime difference is the Argon2id default *memory cost* (32 MiB in the browser vs 128 MiB in Node), which changes brute-force cost, not the post-quantum standing of any primitive.
+
 ### Primitive-by-primitive
 
 | Primitive                          | Role                     | Post-quantum status                                                                                                                                                                                                              |
@@ -1000,7 +1241,7 @@ These are not marketing claims — each one traces to an official standards-body
 A quantum computer will not break AES-256 — it will try to guess your password. Grover's algorithm halves the effective entropy of a password search, so the _password_, not the cipher, is the residual quantum attack surface. Three design properties blunt that attack:
 
 - Every ciphertext uses a fresh **32-byte random salt**, so an attacker cannot amortize one search across many ciphertexts — precomputation and batch attacks are dead on arrival.
-- On the async path, every single guess must pay the full **Argon2id memory-hard evaluation** (128 MiB at the default profile) — which on quantum hardware must be built as a reversible circuit holding the entire memory array in logical qubits, an astronomical overhead (proofs 6-7 above).
+- On the async path, every single guess must pay the full **Argon2id memory-hard evaluation** (128 MiB at the Node default profile; 32 MiB at the browser default) — which on quantum hardware must be built as a reversible circuit holding the entire memory array in logical qubits, an astronomical overhead (proofs 6-7 above).
 - The sync PBKDF2 path is equally quantum-resistant at the primitive level, but it is not memory-hard — prefer the async (Argon2id) methods for long-lived, high-value data.
 
 **Recommendation for "harvest now, decrypt later" threat models:** use the async (Argon2id) methods with a high-entropy passphrase — for example **8-10 randomly generated diceware words (≈103-129 bits of entropy)**. Even against an idealized Grover attacker that leaves ≈52-65 bits of _quantum-effective_ entropy where every guess costs a full memory-hard KDF evaluation — comfortably out of reach.
@@ -1034,6 +1275,15 @@ Run tests in watch mode:
 ```bash
 npm run test:watch
 ```
+
+The Node suite runs under Jest (`npm test`, aliased as `npm run test:node`). The **real-browser** suite runs under [Vitest Browser Mode](https://vitest.dev/guide/browser/) in headless Chromium — it imports the built browser entry and proves cross-runtime interop (a Node-produced ciphertext decrypts in a real browser):
+
+```bash
+npm run build          # the browser suite imports dist/index.browser.js
+npm run test:browser   # headless Chromium via Playwright
+```
+
+Two static isolation gates back the browser build and run in CI on every push: `npm run check:browser` (an esbuild `platform:'browser'` bundle that fails on any `node:` specifier reaching the browser graph) and `npm run check:exports` (`publint` + `@arethetypeswrong/cli`).
 
 ## ⚡ Benchmarks
 
@@ -1081,6 +1331,8 @@ try {
 - `FILE_ERROR`: File system errors
 - `MEMORY_ERROR`: Memory-related errors
 - `VALIDATION_ERROR`: Validation failures
+
+`CryptoError.type` is one of the categories above; the more specific `CryptoError.code` string distinguishes individual failures. Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (install `hash-wasm` or, in Node, native build tools); and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
 
 ## 📦 Development
 

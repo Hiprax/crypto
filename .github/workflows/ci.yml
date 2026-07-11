@@ -65,6 +65,23 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Browser-graph isolation gate. Bundles the browser entry with esbuild
+      # (platform=browser) and fails if any `node:` builtin is reachable, so
+      # node:crypto/fs/stream can never leak into the browser build. Enforced
+      # on every push/PR here (not just at release via prepublishOnly). The
+      # check uses esbuild's JS API (in-memory, write:false), so it is
+      # cross-platform and runs on the Windows leg too.
+      - name: Check browser isolation (no Node builtins in browser graph)
+        run: npm run check:browser
+
+      # Package-exports + published-types gate. publint validates the exports
+      # map; attw verifies the shipped .d.ts resolve for ESM and bundler
+      # consumers. CJS/node10 resolutions are intentionally ESM-only, so attw
+      # runs under `--profile esm-only`. Guards the conditional `.` export and
+      # the subpath exports against silent regressions.
+      - name: Check package exports and types
+        run: npm run check:exports
+
       # Collect coverage on the Ubuntu / Node 22 leg only — uploading from
       # every (os, node) cell would clutter the Codecov UI and double-count
       # lines that are identical across runners. Other matrix legs still
@@ -105,3 +122,55 @@ jobs:
       # moderate+low are tracked but non-blocking.
       - name: Audit dependencies (high+critical only)
         run: npm audit --audit-level=high
+
+  # Real-browser test suite (Vitest Browser Mode, Playwright/Chromium). Proves
+  # the crown-jewel guarantee — one wire format that round-trips Node <-> browser
+  # — inside an ACTUAL browser engine (SubtleCrypto + hash-wasm WASM Argon2id),
+  # decrypting the committed Node-produced golden vectors. Kept as a separate job
+  # (not folded into the matrix `test` job) because it needs a downloaded browser
+  # and only makes sense on one OS.
+  browser-tests:
+    name: Browser tests (real Chromium)
+    # A single Ubuntu leg is sufficient: the interop guarantee is engine-, not
+    # OS-, specific, and the Playwright cache path below is POSIX-specific.
+    runs-on: ubuntu-latest
+    # Cap the runtime so a hung browser download can't burn the 6-hour budget.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Cache the downloaded Playwright browser binaries, keyed on the lockfile so
+      # a Playwright version bump invalidates the cache. On a hit the install step
+      # below still runs (idempotent + fast) to pull any missing OS system
+      # dependencies via `--with-deps`.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright Chromium (+ system deps)
+        run: npx playwright install --with-deps chromium
+
+      # The browser specs import the BUILT browser entry (dist/index.browser.js),
+      # so the build must precede the suite.
+      - name: Build
+        run: npm run build
+
+      - name: Test (real headless Chromium via Vitest Browser Mode)
+        run: npm run test:browser

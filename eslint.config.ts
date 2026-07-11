@@ -34,6 +34,17 @@ export default [
         Buffer: 'readonly',
         __dirname: 'readonly',
         __filename: 'readonly',
+        // Universal encoding globals available in both Node (>=22) and the
+        // browser; used by the isomorphic `codec.ts` for UTF-8 transcoding.
+        TextEncoder: 'readonly',
+        TextDecoder: 'readonly',
+        // Universal Web Crypto globals available in both Node (>=22) and the
+        // browser (secure context); used by the isomorphic `engine.web.ts`
+        // (`globalThis.crypto` + the `CryptoKey` type).
+        crypto: 'readonly',
+        Crypto: 'readonly',
+        CryptoKey: 'readonly',
+        SubtleCrypto: 'readonly',
       },
     },
     plugins: {
@@ -108,5 +119,69 @@ export default [
   {
     ...eslintPluginPrettierRecommended,
     files: ['src/**/*.ts'],
+  },
+  // Isomorphic-file isolation gate. These modules must run byte-for-byte
+  // identically in Node and the browser, so they may reference NO Node global
+  // (`Buffer`, `process`) and import NO `node:*` builtin — otherwise the
+  // browser bundle would `ReferenceError` on a bare `Buffer` or fail to
+  // resolve a `node:crypto`. The esbuild `platform:'browser'` gate (Phase 7)
+  // catches `node:` SPECIFIERS but NOT a bare `Buffer`/`process` GLOBAL, so
+  // this static ESLint gate covers that gap. The glob is extended in later
+  // phases to the remaining browser entry files.
+  {
+    files: [
+      'src/core.ts',
+      'src/codec.ts',
+      'src/format-core.ts',
+      'src/engine.ts',
+      // Phase 5: the Web engine (SubtleCrypto + hash-wasm) is in the browser
+      // graph — it may reference no Node global and import no `node:*`.
+      'src/engine.web.ts',
+      // Phase 6: the browser CryptoManager and the browser entry point round out
+      // the browser import graph — same isolation rule (no `Buffer`/`process`,
+      // no `node:*`) applies so a bundler can include them.
+      'src/crypto-manager.browser.ts',
+      'src/index.browser.ts',
+    ],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'Buffer',
+          message:
+            'Isomorphic modules must not use the Node `Buffer` global; use `Uint8Array` and the `./codec.js` helpers instead.',
+        },
+        {
+          name: 'process',
+          message: 'Isomorphic modules must not use the Node `process` global.',
+        },
+      ],
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'node:*/*'],
+              message:
+                'Isomorphic modules must not import Node builtins; keep them free of `node:*` so the browser build can include them.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  // The browser `CryptoManager`'s Node-only methods are intentional throwing
+  // stubs: they declare the Node API shape but ignore every argument (each just
+  // raises `UNSUPPORTED_IN_BROWSER`). Permit the `_`-prefixed unused parameters
+  // in that one file while keeping unused-variable checking fully strict
+  // everywhere else (and everywhere in this file for non-underscore names).
+  {
+    files: ['src/crypto-manager.browser.ts'],
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_' },
+      ],
+    },
   },
 ];

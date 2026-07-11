@@ -95,9 +95,10 @@ treated as security incidents:
   section).
 - **Authenticity bypass.** Any path that lets ciphertext be modified without
   the GCM auth tag flagging it, including header tampering on v1 ciphertexts.
-- **Format / parser issues.** Bugs in the v1 ciphertext header parser
-  (`format.ts`) that allow malformed input to cause crashes, infinite loops,
-  out-of-bounds reads, or the wrong KDF / parameters being applied.
+- **Format / parser issues.** Bugs in the ciphertext header parsers — the v1
+  header parser (`format.ts` / the pure `format-core.ts`) and the v2 container
+  parser (`core.ts`) — that allow malformed input to cause crashes, infinite
+  loops, out-of-bounds reads, or the wrong KDF / parameters being applied.
 - **Path traversal in the file APIs.** Any path that lets an attacker-supplied
   string write outside the intended directory tree, beyond the documented
   syntactic guarantees of `validatePath`.
@@ -157,7 +158,12 @@ reports and audits can reference it directly.
    symmetric keys for long-term protection, which is what the library uses.
    Grover's algorithm yields only a quadratic speedup that parallelizes
    poorly and is gate-depth limited — NIST's own FAQ states it will provide
-   "little or no advantage in attacking AES".
+   "little or no advantage in attacking AES". The browser build introduces
+   **no new primitive**: it uses the same AES-256-GCM, Argon2id, and SHA-256
+   (via Web Crypto and WebAssembly `hash-wasm`) over the same wire format, so
+   this posture applies unchanged across runtimes. The only cross-runtime
+   difference is the Argon2id default memory cost (32 MiB in the browser vs
+   128 MiB in Node), which affects brute-force cost, not post-quantum standing.
 3. **The residual quantum-relevant risk is password entropy, not the
    cryptography.** Grover halves the effective entropy of an offline
    password search. Mitigations in the design: per-message 32-byte random
@@ -200,21 +206,73 @@ Reports claiming quantum vulnerability are in scope **only** if they
 present a concrete attack that invalidates one of the five points above
 under a realistic (classical-query, Q1) threat model.
 
+## Browser build (threat-model notes)
+
+As of v1.5.0 the library is isomorphic: the same in-memory async API
+(`encryptBytes`/`decryptBytes`/`encryptText`/`decryptText`/
+`encryptContainer`/`decryptContainer`) runs in Node and in the browser over
+**one** wire format. The browser build uses Web Crypto (SubtleCrypto) for
+AES-256-GCM/SHA-256/CSPRNG and WebAssembly `hash-wasm` for Argon2id — the
+same primitives as Node, so the cryptographic guarantees above are unchanged.
+The differences that are relevant to a threat model are documented here so
+reports and audits can reference them:
+
+1. **Weaker memory hygiene than Node.** Web Crypto `importKey` copies the raw
+   AES key bytes into an opaque `CryptoKey` object that JavaScript cannot
+   reach or zero — so `secureClear` cannot scrub it (the engine does zero the
+   transient raw-key copy it owns immediately after import). Combined with the
+   immutable, GC-managed nature of V8 strings (passwords, decrypted text), the
+   browser cannot forensically wipe key/plaintext material. Treat in-browser
+   secret residency as bounded by GC, not by `secureClear`. This is a stronger
+   form of the "String-copy memory leaks via V8" caveat below and is **out of
+   scope** as a reportable vulnerability, the same as the Node V8 caveat.
+2. **Secure-context requirement.** `crypto.subtle` is only exposed in a
+   [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)
+   (HTTPS or `localhost`). On an insecure origin the engine cannot run and
+   throws; serving the app over plain HTTP is a deployment error, not a
+   library bug.
+3. **Content-Security-Policy.** The browser Argon2id path compiles
+   WebAssembly, which a strict CSP blocks unless `script-src` includes
+   `'wasm-unsafe-eval'` (strictly narrower than `'unsafe-eval'` — WASM only).
+   `hash-wasm` instantiates from inline bytes, so no `connect-src` entry and
+   no network fetch are involved; nothing leaves the browser. See the README
+   "Content-Security-Policy (WASM)" subsection for the exact header.
+4. **No `node:` in the browser graph.** The browser entry
+   (`dist/index.browser.js`) imports zero `node:` builtins and references no
+   `Buffer`/`process` global; this isolation is enforced continuously in CI by
+   an esbuild `platform:'browser'` bundle gate (`npm run check:browser`), so
+   `node:crypto`/`node:fs`/`node:stream` can never enter a consumer's bundle.
+5. **Node-only methods are unavailable, not silently degraded.** The
+   synchronous (PBKDF2), streaming-file, and `Buffer`-typed low-level methods
+   throw `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')` in the browser
+   build rather than falling back to a weaker construction — there is no
+   silent security downgrade.
+
 ## Security-relevant configuration defaults
 
 For reference, the library currently ships with the following security
 defaults. If a reported issue is mitigated by changing one of these,
 please call that out explicitly in the report.
 
-- **Default Argon2id parameters** (async paths): `memoryCost = 2 ** 17`
+- **Default Argon2id parameters** (async paths, Node build): `memoryCost = 2 ** 17`
   (128 MiB), `timeCost = 3`, `parallelism = 1`. Matches the OWASP 2026
   first-choice tier for Argon2id.
-- **Default PBKDF2 iterations** (sync paths): `600000`. Matches the
+- **Default Argon2id parameters** (browser build): `memoryCost = 2 ** 15`
+  (32 MiB), `timeCost = 3`, `parallelism = 1` — a lighter default to avoid
+  OOM on memory-constrained mobile browsers, still ≈1.68× the OWASP 2025/2026
+  Argon2id memory minimum (19 MiB). This is a runtime-specific default, not a
+  format change; each ciphertext embeds the exact KDF parameters used, so a
+  ciphertext decrypts anywhere that can afford its embedded `memoryCost`.
+- **Default PBKDF2 iterations** (sync paths, Node only): `600000`. Matches the
   OWASP 2023+ recommendation for PBKDF2-HMAC-SHA256, still current in 2026.
 - **Ciphertext format**: v1 (22-byte versioned header with embedded KDF
   parameters). Legacy v0 ciphertexts are accepted under
   `legacyMode: 'auto'` (the default) and rejected under `'strict'` /
-  `'reject'`.
+  `'reject'`. The optional v2 **container** format (magic `HPCR`, version
+  `0x02`) is a separate, additive envelope — a two-layer KEK/DEK hierarchy,
+  confidential encrypted metadata, and an embedded plaintext SHA-256 that is
+  re-verified on decrypt (`CONTAINER_INTEGRITY_FAILED` on mismatch). It does
+  not touch the v0/v1 paths and each format rejects the other's blobs.
 - **AAD**: `"secure-crypto-tool-v2"` by default, configurable per instance.
 
 See the [README](README.md) for the full parameter reference.

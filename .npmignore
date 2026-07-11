@@ -10,8 +10,14 @@ bench/
 # Development and build configuration
 tsconfig.json
 jest.config.js
+vitest.config.ts
 eslint.config.ts
 .prettierrc
+
+# Browser (Vitest Browser Mode) test suite. The specs live under src/ (already
+# excluded above); this entry documents that the real-browser suite and its
+# config never ship in the tarball.
+src/__tests__/browser/
 .eslintrc*
 .prettierrc*
 

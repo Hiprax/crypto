@@ -7,6 +7,7 @@ export {
 export * from './utils.js';
 export * from './types.js';
 export * from './format.js';
+export * from './codec.js';
 
 // Default export
 import { CryptoManager } from './crypto-manager.js';

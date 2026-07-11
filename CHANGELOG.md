@@ -31,9 +31,11 @@ Isomorphic (Node + browser) support. The library now encrypts and decrypts in **
 - `src/types.ts` — new `ContainerMetadataInput`, `ContainerMetadata`, `DecryptedContainer` interfaces.
 - `src/index.ts` — additionally re-exports `./codec.js`.
 - `src/utils.ts` — `isValidBase64Url` delegates to `codec.isValidBase64url` (single source; public name/behavior unchanged).
-- `src/__tests__/` — new `codec.test.ts`, `format-core.test.ts`, `engine-node.test.ts`, `engine-web.test.ts`, `engine-web-unavailable.test.ts`, `encrypt-bytes.test.ts`, `browser-manager.test.ts`, `interop.test.ts`, `property-bytes.test.ts`, `container.test.ts`, `browser/interop.browser.test.ts`, and `fixtures/node-vectors.json`; `esm-smoke.test.ts` updated for the conditional `.` exports and a browser-entry Node probe.
+- `src/__tests__/` — new `codec.test.ts`, `format-core.test.ts`, `engine-node.test.ts`, `engine-web.test.ts`, `engine-web-unavailable.test.ts`, `encrypt-bytes.test.ts`, `browser-manager.test.ts`, `interop.test.ts`, `property-bytes.test.ts`, `container.test.ts` (with the checked-in `__snapshots__/container.test.ts.snap` v2 byte-layout snapshot), `browser/interop.browser.test.ts`, and `fixtures/node-vectors.json`; `esm-smoke.test.ts` updated for the conditional `.` exports and a browser-entry Node probe; `crypto-manager.test.ts` and `format-snapshot.test.ts` updated for the engine-injection refactor (they now drive the low-level AES-GCM path and the deterministic byte-layout snapshot through the injected `nodeEngine`).
 - `scripts/check-browser.mjs` — new cross-platform esbuild browser-isolation gate.
+- `scripts/gen-node-vectors.mjs` — new Node-vector generator (`npm run build && node scripts/gen-node-vectors.mjs`) that regenerates the committed `fixtures/node-vectors.json` cross-runtime interop goldens.
 - `vitest.config.ts` — new Vitest Browser Mode config (headless Chromium/Playwright).
+- `jest.config.js` — `testPathIgnorePatterns` extended with `/src/__tests__/browser/` so the real-browser Vitest specs are executed only by `npm run test:browser`, never collected by the Jest run.
 - `package.json` — conditional `.` exports (`types`/`browser`/`node`/`default`), `"sideEffects": false`, new scripts and browser devDependencies, `prepublishOnly` extended with `check:browser`/`check:exports`; `version` bumped `1.4.5` → `1.5.0`.
 - `package-lock.json` — browser toolchain devDependencies added; `version` synced to `1.5.0`.
 - `eslint.config.ts` — `no-restricted-globals`/`no-restricted-imports` override scoped to the isomorphic browser-graph files.

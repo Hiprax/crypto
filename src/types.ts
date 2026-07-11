@@ -222,6 +222,49 @@ export interface FileInfo {
 }
 
 /**
+ * Optional metadata a caller may attach to a v2 encryption container
+ * (`encryptContainer`). Both fields are optional and, when present, are
+ * encrypted alongside the payload — they never appear in cleartext anywhere
+ * in the container bytes. `size` is NOT accepted here: it is derived from the
+ * data length at encryption time and returned in {@link ContainerMetadata}.
+ */
+export interface ContainerMetadataInput {
+  /** Original filename, if any (stored confidentially, UTF-8, ≤ 65535 bytes). */
+  filename?: string;
+  /** MIME type, if any (stored confidentially, UTF-8, ≤ 65535 bytes). */
+  mime?: string;
+}
+
+/**
+ * Metadata recovered from a v2 container by `decryptContainer`. Mirrors the
+ * {@link ContainerMetadataInput} the producer supplied, plus the authenticated
+ * `size` (the original plaintext byte length embedded in the container and
+ * cross-checked against the decrypted payload during the integrity verify).
+ */
+export interface ContainerMetadata {
+  /** Original filename, if the producer supplied one. */
+  filename?: string;
+  /** MIME type, if the producer supplied one. */
+  mime?: string;
+  /** Original plaintext length in bytes (authenticated; equals `data.length`). */
+  size: number;
+}
+
+/**
+ * Result of decrypting a v2 container (`decryptContainer`): the recovered
+ * plaintext bytes plus the authenticated {@link ContainerMetadata}. The
+ * embedded SHA-256 of the plaintext is verified before this is returned, so a
+ * successful return guarantees the payload matches the producer's original
+ * bytes (a mismatch throws `CryptoError` / `CONTAINER_INTEGRITY_FAILED`).
+ */
+export interface DecryptedContainer {
+  /** The recovered plaintext bytes (caller owns the buffer). */
+  data: Uint8Array;
+  /** The authenticated metadata recovered from the container. */
+  meta: ContainerMetadata;
+}
+
+/**
  * Security level enumeration
  */
 export enum SecurityLevel {

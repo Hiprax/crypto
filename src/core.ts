@@ -30,6 +30,9 @@ import type {
   Argon2Options,
   EncryptionParameters,
   LegacyMode,
+  ContainerMetadataInput,
+  ContainerMetadata,
+  DecryptedContainer,
 } from './types.js';
 import {
   CryptoError,
@@ -39,6 +42,11 @@ import {
 } from './types.js';
 import type { KdfHeaderParams, KdfId, ParsedHeader } from './format-core.js';
 import {
+  MAGIC_BYTES,
+  MAGIC_LENGTH,
+  VERSION_LENGTH,
+  KDF_ID_LENGTH,
+  HEADER_LENGTH,
   KDF_ID_ARGON2ID,
   KDF_ID_PBKDF2_SHA256,
   hasMagic,
@@ -194,6 +202,454 @@ export function isValidPassword(password: string): boolean {
     hasNumbers &&
     hasSpecialChar
   );
+}
+
+// ===========================================================================
+// v2 container mode (additive envelope format).
+//
+// The container is a SEPARATE wire format from the v1 text/file ciphertext: it
+// reuses the 22-byte "HPCR" header SHAPE but stamps version 0x02, and it does
+// NOT touch the v0/v1 encrypt/decrypt paths (`encryptBytes`/`decryptBytes`).
+// It seals a payload under a two-layer key hierarchy (an Argon2id
+// key-encryption-key wraps a random data-encryption-key), encrypts a
+// confidential metadata block (filename/mime/size + the plaintext SHA-256)
+// under the DEK, and re-verifies that SHA-256 on decrypt. All three GCM
+// segments are bound to the verbatim header AAD.
+//
+// Layout (offsets assume the fixed AES-256-GCM sizes below):
+//   [magic "HPCR":4][ver 0x02:1][kdfId 0x00:1][argon2 params:16]  # 22B header
+//   [salt:32]
+//   [kekIv:12][wrappedDek:32][kekTag:16]                          # DEK wrap
+//   [metaIv:12][metaLen:u32BE 4][encMeta:metaLen][metaTag:16]     # metadata
+//   [dataIv:12][encData:variable][dataTag:16]                     # payload
+// ===========================================================================
+
+/**
+ * Container format version byte (v1 text/file ciphertext uses
+ * {@link FORMAT_VERSION} = 0x01). Feeding a v2 blob to the v1
+ * `decryptBytes`/`decryptText` path is rejected — in `auto` mode the v1
+ * `parseHeader` throws `UNSUPPORTED_VERSION`, which the v0 fallback cannot
+ * rescue, so a `CryptoError` is thrown either way — and {@link parseV2Container}
+ * rejects any blob whose version byte is not 0x02.
+ */
+export const CONTAINER_VERSION = 0x02;
+
+/**
+ * Length of the random data-encryption-key (a 32-byte AES-256 DEK, wrapped
+ * under the Argon2id-derived KEK). Its GCM-wrapped ciphertext is the same
+ * length (AES-GCM ciphertext length equals plaintext length).
+ */
+const CONTAINER_DEK_LENGTH = 32;
+
+/** Salt length for the container KEK derivation (matches the v1 salt length). */
+const CONTAINER_SALT_LENGTH = 32;
+
+/** GCM nonce length for every container segment (matches the v1 IV length). */
+const CONTAINER_IV_LENGTH = 12;
+
+/** GCM tag length for every container segment (matches the v1 tag length). */
+const CONTAINER_TAG_LENGTH = 16;
+
+/** Width of the big-endian u32 length prefix in front of the encrypted meta block. */
+const CONTAINER_META_LENGTH_FIELD_BYTES = 4;
+
+/**
+ * Fixed byte overhead of a v2 container — every segment EXCEPT the variable
+ * `encMeta` (whose length is the `metaLen` prefix) and the variable `encData`.
+ * Sum: header(22) + salt(32) + kekIv(12) + wrappedDek(32) + kekTag(16) +
+ * metaIv(12) + metaLen(4) + metaTag(16) + dataIv(12) + dataTag(16) = 174. The
+ * smallest possible container is exactly this many bytes (metaLen = 0, empty
+ * payload), so any shorter input cannot be a valid container.
+ */
+const CONTAINER_FIXED_OVERHEAD =
+  HEADER_LENGTH +
+  CONTAINER_SALT_LENGTH +
+  CONTAINER_IV_LENGTH + // kekIv
+  CONTAINER_DEK_LENGTH + // wrappedDek
+  CONTAINER_TAG_LENGTH + // kekTag
+  CONTAINER_IV_LENGTH + // metaIv
+  CONTAINER_META_LENGTH_FIELD_BYTES + // metaLen
+  CONTAINER_TAG_LENGTH + // metaTag
+  CONTAINER_IV_LENGTH + // dataIv
+  CONTAINER_TAG_LENGTH; // dataTag
+
+/** Meta flag bit: a filename field follows the fixed meta prefix. */
+const META_FLAG_FILENAME = 0x01;
+
+/** Meta flag bit: a mime field follows (after the filename field, if present). */
+const META_FLAG_MIME = 0x02;
+
+/** Every flag bit the current meta schema defines (for strict rejection of others). */
+const META_KNOWN_FLAGS = META_FLAG_FILENAME | META_FLAG_MIME;
+
+/**
+ * Fixed prefix of the plaintext meta block: `flags(1) + size(u32BE, 4) +
+ * sha256(32)` = 37 bytes. Optional filename/mime blocks (each a `u16BE`
+ * length prefix + UTF-8 bytes) follow only when their flag bit is set.
+ */
+const META_FIXED_PREFIX_BYTES = 1 + 4 + 32;
+
+/** u16 cap on a single meta string field (filename or mime), in UTF-8 bytes. */
+const MAX_META_STRING_BYTES = 0xffff;
+
+/** u32 cap on the container payload size field. */
+const MAX_CONTAINER_DATA_SIZE = 0xffffffff;
+
+/**
+ * Construct a big-endian {@link DataView} bound to exactly `bytes`' region
+ * (mirrors the `format-core.ts` helper). The explicit `byteOffset`/`byteLength`
+ * are required because a `Uint8Array` may be a subarray view into a larger
+ * backing store (e.g. a pooled Node byte buffer); a bare
+ * `new DataView(bytes.buffer)` would read from the pool start and silently
+ * corrupt every multi-byte read/write.
+ */
+function viewOf(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/**
+ * Constant-time equality for two byte arrays. Used to compare the recomputed
+ * plaintext SHA-256 against the container's embedded digest without leaking a
+ * timing signal on how many leading bytes matched. Length inequality
+ * short-circuits (both are the fixed 32-byte digest length, so the length is
+ * not secret).
+ */
+function constantTimeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+/**
+ * Pack the 22-byte v2 container header:
+ * `[magic "HPCR":4][version 0x02:1][kdfId 0x00:1][memoryCost u32BE:4]
+ * [timeCost u32BE:4][parallelism u16BE:2][reserved 6×0x00]` — the same byte
+ * shape as the v1 Argon2id header but with the version byte stamped
+ * {@link CONTAINER_VERSION}. Bound verbatim into the AAD of all three
+ * container GCM segments, so any header tamper (including a reserved byte)
+ * flips every tag. The parameters come from the instance's already-validated
+ * (DoS-capped) Argon2id options, so they always fit their u32/u16 fields.
+ */
+function packContainerHeader(params: {
+  memoryCost: number;
+  timeCost: number;
+  parallelism: number;
+}): Uint8Array {
+  const header = new Uint8Array(HEADER_LENGTH);
+  header.set(MAGIC_BYTES, 0);
+  const view = viewOf(header);
+  view.setUint8(MAGIC_LENGTH, CONTAINER_VERSION);
+  view.setUint8(MAGIC_LENGTH + VERSION_LENGTH, KDF_ID_ARGON2ID);
+  const paramsOffset = MAGIC_LENGTH + VERSION_LENGTH + KDF_ID_LENGTH; // 6
+  view.setUint32(paramsOffset, params.memoryCost, false);
+  view.setUint32(paramsOffset + 4, params.timeCost, false);
+  view.setUint16(paramsOffset + 8, params.parallelism, false);
+  // Remaining 6 reserved bytes stay zero (from `new Uint8Array`).
+  return header;
+}
+
+/**
+ * Serialize container metadata into the canonical plaintext meta block that is
+ * then encrypted under the DEK. Layout:
+ * `[flags u8][size u32BE][sha256 32]` then, only when the matching flag bit is
+ * set, `[filenameLen u16BE][filename UTF-8]` and `[mimeLen u16BE][mime UTF-8]`.
+ * `filename`/`mime` bytes must each be ≤ 65535 (validated by the caller).
+ */
+export function serializeV2Meta(input: {
+  size: number;
+  sha256: Uint8Array;
+  filename: Uint8Array | undefined;
+  mime: Uint8Array | undefined;
+}): Uint8Array {
+  const flags =
+    (input.filename !== undefined ? META_FLAG_FILENAME : 0) |
+    (input.mime !== undefined ? META_FLAG_MIME : 0);
+
+  const prefix = new Uint8Array(META_FIXED_PREFIX_BYTES);
+  const prefixView = viewOf(prefix);
+  prefixView.setUint8(0, flags);
+  prefixView.setUint32(1, input.size, false);
+  prefix.set(input.sha256, 5);
+
+  const parts: Uint8Array[] = [prefix];
+  if (input.filename !== undefined) {
+    const lenField = new Uint8Array(2);
+    viewOf(lenField).setUint16(0, input.filename.length, false);
+    parts.push(lenField, input.filename);
+  }
+  if (input.mime !== undefined) {
+    const lenField = new Uint8Array(2);
+    viewOf(lenField).setUint16(0, input.mime.length, false);
+    parts.push(lenField, input.mime);
+  }
+  return concatBytes(...parts);
+}
+
+/** Parsed container metadata (from a decrypted, authenticated meta block). */
+export interface ParsedV2Meta {
+  /** Original plaintext byte length embedded by the producer. */
+  size: number;
+  /** Embedded SHA-256 of the plaintext (a fresh 32-byte copy). */
+  sha256: Uint8Array;
+  /** Producer-supplied filename, if the filename flag was set. */
+  filename?: string;
+  /** Producer-supplied mime, if the mime flag was set. */
+  mime?: string;
+}
+
+/**
+ * Parse the decrypted plaintext meta block produced by {@link serializeV2Meta}.
+ * This runs ONLY on bytes that already passed GCM authentication under the DEK,
+ * so it is not a pre-authentication attack surface; its strict bounds/flag/
+ * trailing-byte checks are defence-in-depth against an internally-inconsistent
+ * container. The `sha256` is returned as a fresh copy so the caller can scrub
+ * the source block independently.
+ *
+ * @throws CryptoError(DECRYPTION_FAILED, 'CONTAINER_METADATA_MALFORMED') on a
+ *   short block, a length prefix that overruns the block, an unknown flag bit,
+ *   or trailing bytes.
+ */
+export function parseV2Meta(meta: Uint8Array): ParsedV2Meta {
+  if (meta.length < META_FIXED_PREFIX_BYTES) {
+    throw new CryptoError(
+      'Container metadata block is too short',
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_METADATA_MALFORMED'
+    );
+  }
+  const view = viewOf(meta);
+  const flags = view.getUint8(0);
+  const size = view.getUint32(1, false);
+  const sha256 = meta.slice(5, 5 + 32); // copy so `meta` can be scrubbed later
+  let offset = META_FIXED_PREFIX_BYTES;
+
+  const readString = (): string => {
+    if (offset + 2 > meta.length) {
+      throw new CryptoError(
+        'Container metadata length prefix is truncated',
+        CryptoErrorType.DECRYPTION_FAILED,
+        'CONTAINER_METADATA_MALFORMED'
+      );
+    }
+    const len = view.getUint16(offset, false);
+    offset += 2;
+    if (offset + len > meta.length) {
+      throw new CryptoError(
+        'Container metadata field overruns the block',
+        CryptoErrorType.DECRYPTION_FAILED,
+        'CONTAINER_METADATA_MALFORMED'
+      );
+    }
+    const value = utf8Decode(meta.subarray(offset, offset + len));
+    offset += len;
+    return value;
+  };
+
+  let filename: string | undefined;
+  let mime: string | undefined;
+  if ((flags & META_FLAG_FILENAME) !== 0) {
+    filename = readString();
+  }
+  if ((flags & META_FLAG_MIME) !== 0) {
+    mime = readString();
+  }
+  // A genuine block sets only known flags and consumes exactly its declared
+  // fields — reject unknown flag bits or any trailing bytes.
+  if ((flags & ~META_KNOWN_FLAGS) !== 0 || offset !== meta.length) {
+    throw new CryptoError(
+      'Container metadata block has unknown flags or trailing bytes',
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_METADATA_MALFORMED'
+    );
+  }
+
+  const result: ParsedV2Meta = { size, sha256 };
+  if (filename !== undefined) {
+    result.filename = filename;
+  }
+  if (mime !== undefined) {
+    result.mime = mime;
+  }
+  return result;
+}
+
+/** Byte-range views over a structurally-valid v2 container (pre-auth parse). */
+export interface ParsedV2Container {
+  /** The 22-byte header, verbatim — bound into every segment's AAD. */
+  header: Uint8Array;
+  /** Argon2id salt for the KEK derivation. */
+  salt: Uint8Array;
+  /** GCM nonce for the DEK-wrap segment. */
+  kekIv: Uint8Array;
+  /** The AES-GCM-wrapped DEK ciphertext (32 bytes). */
+  wrappedDek: Uint8Array;
+  /** GCM tag for the DEK-wrap segment. */
+  kekTag: Uint8Array;
+  /** GCM nonce for the encrypted-metadata segment. */
+  metaIv: Uint8Array;
+  /** The encrypted metadata block (`metaLen` bytes). */
+  encMeta: Uint8Array;
+  /** GCM tag for the encrypted-metadata segment. */
+  metaTag: Uint8Array;
+  /** GCM nonce for the encrypted-payload segment. */
+  dataIv: Uint8Array;
+  /** The encrypted payload (variable length, may be empty). */
+  encData: Uint8Array;
+  /** GCM tag for the encrypted-payload segment. */
+  dataTag: Uint8Array;
+  /** Argon2id KEK-derivation parameters embedded in the header. */
+  argonParams: { memoryCost: number; timeCost: number; parallelism: number };
+}
+
+/**
+ * Structurally parse a v2 container WITHOUT any key derivation or decryption —
+ * the pre-authentication surface that consumes attacker-controlled bytes. It
+ * mirrors {@link parseHeader}'s discipline: bounded reads, DoS-capped KDF
+ * parameters, and a typed {@link CryptoError} (never a raw throw) on every
+ * malformed input, so {@link CryptoCore.decryptContainer} can reject a bad
+ * blob before a single Argon2id byte is computed. Returned segments are
+ * subarray VIEWS over `bytes` (no copy).
+ *
+ * @throws CryptoError with one of: `INVALID_CONTAINER_INPUT` (non-Uint8Array),
+ *   `TRUNCATED_CONTAINER` (too short / `metaLen` overruns the buffer),
+ *   `CONTAINER_INVALID_MAGIC` (no "HPCR"), `CONTAINER_UNSUPPORTED_VERSION`
+ *   (version ≠ 0x02), `CONTAINER_UNSUPPORTED_KDF` (kdfId ≠ Argon2id),
+ *   `CONTAINER_INVALID_HEADER_PARAM` (zero/negative or sub-floor params), or
+ *   `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS` (params over the DoS caps).
+ */
+export function parseV2Container(bytes: Uint8Array): ParsedV2Container {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new CryptoError(
+      'Container input must be a Uint8Array',
+      CryptoErrorType.INVALID_INPUT,
+      'INVALID_CONTAINER_INPUT'
+    );
+  }
+  if (bytes.length < CONTAINER_FIXED_OVERHEAD) {
+    throw new CryptoError(
+      `Container is too small to be valid (need at least ${CONTAINER_FIXED_OVERHEAD} bytes, got ${bytes.length})`,
+      CryptoErrorType.INVALID_INPUT,
+      'TRUNCATED_CONTAINER'
+    );
+  }
+  if (!hasMagic(bytes)) {
+    throw new CryptoError(
+      'Missing or invalid container magic bytes (expected "HPCR")',
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_INVALID_MAGIC'
+    );
+  }
+
+  const view = viewOf(bytes);
+  const version = view.getUint8(MAGIC_LENGTH);
+  if (version !== CONTAINER_VERSION) {
+    throw new CryptoError(
+      `Unsupported container version: 0x${version
+        .toString(16)
+        .padStart(2, '0')} (this build produces 0x02)`,
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_UNSUPPORTED_VERSION'
+    );
+  }
+  const kdfId = view.getUint8(MAGIC_LENGTH + VERSION_LENGTH);
+  if (kdfId !== KDF_ID_ARGON2ID) {
+    throw new CryptoError(
+      `Unsupported container KDF id: 0x${kdfId
+        .toString(16)
+        .padStart(2, '0')} (containers require Argon2id)`,
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_UNSUPPORTED_KDF'
+    );
+  }
+
+  const paramsOffset = MAGIC_LENGTH + VERSION_LENGTH + KDF_ID_LENGTH; // 6
+  const memoryCost = view.getUint32(paramsOffset, false);
+  const timeCost = view.getUint32(paramsOffset + 4, false);
+  const parallelism = view.getUint16(paramsOffset + 8, false);
+  if (memoryCost <= 0 || timeCost <= 0 || parallelism <= 0) {
+    throw new CryptoError(
+      'Container Argon2id header parameters must all be positive',
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_INVALID_HEADER_PARAM'
+    );
+  }
+  if (
+    memoryCost > MAX_ARGON2_MEMORY_COST ||
+    timeCost > MAX_ARGON2_TIME_COST ||
+    parallelism > MAX_ARGON2_PARALLELISM
+  ) {
+    throw new CryptoError(
+      `Container Argon2id parameters exceed accepted bounds (memoryCost <= ${MAX_ARGON2_MEMORY_COST}, ` +
+        `timeCost <= ${MAX_ARGON2_TIME_COST}, parallelism <= ${MAX_ARGON2_PARALLELISM}). ` +
+        `Got memoryCost=${memoryCost}, timeCost=${timeCost}, parallelism=${parallelism}.`,
+      CryptoErrorType.INVALID_INPUT,
+      'CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS'
+    );
+  }
+  const argon2MemFloor = 8 * parallelism;
+  if (memoryCost < argon2MemFloor) {
+    throw new CryptoError(
+      `Container Argon2id memoryCost (${memoryCost}) must be at least 8 * parallelism ` +
+        `(${argon2MemFloor} = 8 × ${parallelism})`,
+      CryptoErrorType.DECRYPTION_FAILED,
+      'CONTAINER_INVALID_HEADER_PARAM'
+    );
+  }
+
+  // Fixed-offset segment slicing. `take` advances a cursor so the byte math
+  // stays in one place; every slice is a view over `bytes` (no copy).
+  let offset = 0;
+  const take = (length: number): Uint8Array => {
+    const seg = bytes.subarray(offset, offset + length);
+    offset += length;
+    return seg;
+  };
+
+  const header = take(HEADER_LENGTH);
+  const salt = take(CONTAINER_SALT_LENGTH);
+  const kekIv = take(CONTAINER_IV_LENGTH);
+  const wrappedDek = take(CONTAINER_DEK_LENGTH);
+  const kekTag = take(CONTAINER_TAG_LENGTH);
+  const metaIv = take(CONTAINER_IV_LENGTH);
+  const metaLen = view.getUint32(offset, false);
+  offset += CONTAINER_META_LENGTH_FIELD_BYTES;
+
+  // metaLen must leave room for metaTag + dataIv + dataTag (encData may be 0).
+  const requiredLength = CONTAINER_FIXED_OVERHEAD + metaLen;
+  if (bytes.length < requiredLength) {
+    throw new CryptoError(
+      `Container metadata length (${metaLen}) overruns the buffer`,
+      CryptoErrorType.INVALID_INPUT,
+      'TRUNCATED_CONTAINER'
+    );
+  }
+
+  const encMeta = take(metaLen);
+  const metaTag = take(CONTAINER_TAG_LENGTH);
+  const dataIv = take(CONTAINER_IV_LENGTH);
+  const encDataLength = bytes.length - offset - CONTAINER_TAG_LENGTH;
+  const encData = take(encDataLength);
+  const dataTag = take(CONTAINER_TAG_LENGTH);
+
+  return {
+    header,
+    salt,
+    kekIv,
+    wrappedDek,
+    kekTag,
+    metaIv,
+    encMeta,
+    metaTag,
+    dataIv,
+    encData,
+    dataTag,
+    argonParams: { memoryCost, timeCost, parallelism },
+  };
 }
 
 /**
@@ -1288,5 +1744,363 @@ export abstract class CryptoCore {
    */
   public getLegacyMode(): LegacyMode {
     return this.legacyMode;
+  }
+
+  /**
+   * Validate and UTF-8-encode an optional container metadata string field.
+   * Returns `undefined` when the field is absent (so the flag bit stays
+   * clear), or the encoded bytes when present. Rejects non-string values
+   * (`INVALID_CONTAINER_META`) and fields whose UTF-8 encoding exceeds the
+   * 65535-byte wire limit (`CONTAINER_METADATA_TOO_LARGE`).
+   */
+  private encodeContainerMetaField(
+    value: string | undefined,
+    field: 'filename' | 'mime'
+  ): Uint8Array | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (typeof value !== 'string') {
+      throw new CryptoError(
+        `Container metadata ${field} must be a string`,
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_CONTAINER_META'
+      );
+    }
+    const bytes = utf8Encode(value);
+    if (bytes.length > MAX_META_STRING_BYTES) {
+      throw new CryptoError(
+        `Container metadata ${field} is too large ` +
+          `(max ${MAX_META_STRING_BYTES} UTF-8 bytes, got ${bytes.length})`,
+        CryptoErrorType.INVALID_INPUT,
+        'CONTAINER_METADATA_TOO_LARGE'
+      );
+    }
+    return bytes;
+  }
+
+  /**
+   * Encrypt `data` into a self-describing, authenticated **v2 container** — an
+   * additive envelope format (magic "HPCR", version 0x02) that is SEPARATE from
+   * the v1 text/file ciphertext and available in BOTH runtimes (it is defined
+   * here on {@link CryptoCore}, so the Node and browser managers both inherit
+   * it). It differs from {@link encryptBytes} in three ways:
+   *
+   *  1. **Two-layer keying (KEK/DEK).** An Argon2id key-encryption-key (KEK)
+   *     derived from the password AES-256-GCM-wraps a fresh random 32-byte
+   *     data-encryption-key (DEK); the DEK encrypts the metadata and payload.
+   *  2. **Confidential metadata.** The optional `filename`/`mime` (plus the
+   *     derived `size` and the plaintext SHA-256) are packed into a metadata
+   *     block that is itself encrypted under the DEK — none of it appears in
+   *     cleartext anywhere in the output bytes.
+   *  3. **End-to-end integrity.** The SHA-256 of the plaintext is embedded and
+   *     re-verified on decrypt ({@link decryptContainer} throws
+   *     `CONTAINER_INTEGRITY_FAILED` on mismatch), on top of the per-segment
+   *     GCM authentication.
+   *
+   * The 22-byte header is bound verbatim into the AES-GCM AAD of ALL three
+   * segments (DEK-wrap, metadata, payload), so tampering with the version, KDF
+   * parameters, or any reserved byte flips every tag. The container is an
+   * in-memory format (no streaming): in Node,
+   * `writeFileSync(out, await cm.encryptContainer(readFileSync(inp), pw, meta))`;
+   * in the browser, wrap the result in a `Blob`.
+   *
+   * @param data - plaintext bytes to seal (the empty array is accepted; the
+   *   caller's buffer is not mutated or scrubbed)
+   * @param password - password (optional if a default passphrase is configured)
+   * @param meta - optional `{ filename?, mime? }`; stored confidentially
+   * @returns the v2 container bytes
+   * @throws CryptoError on invalid input (`INVALID_DATA`), a missing/weak
+   *   password (`INVALID_PASSWORD` / `WEAK_PASSWORD`), invalid metadata types
+   *   (`INVALID_CONTAINER_META`), oversized metadata/payload
+   *   (`CONTAINER_METADATA_TOO_LARGE` / `CONTAINER_DATA_TOO_LARGE`), or an
+   *   engine failure (`CONTAINER_ENCRYPTION_FAILED`).
+   */
+  public async encryptContainer(
+    data: Uint8Array,
+    password?: string,
+    meta?: ContainerMetadataInput
+  ): Promise<Uint8Array> {
+    if (!(data instanceof Uint8Array)) {
+      throw new CryptoError(
+        'Data must be a Uint8Array',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_DATA'
+      );
+    }
+
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+    if (!this.validatePassword(finalPassword)) {
+      throw new CryptoError(
+        'Password does not meet security requirements',
+        CryptoErrorType.INVALID_PASSWORD,
+        'WEAK_PASSWORD'
+      );
+    }
+    if (data.length > MAX_CONTAINER_DATA_SIZE) {
+      throw new CryptoError(
+        `Container payload is too large (max ${MAX_CONTAINER_DATA_SIZE} bytes)`,
+        CryptoErrorType.INVALID_INPUT,
+        'CONTAINER_DATA_TOO_LARGE'
+      );
+    }
+
+    // Validate + encode the optional metadata strings up front (before any
+    // key derivation), so bad metadata fails fast.
+    const filenameBytes = this.encodeContainerMetaField(
+      meta?.filename,
+      'filename'
+    );
+    const mimeBytes = this.encodeContainerMetaField(meta?.mime, 'mime');
+
+    let kek: Uint8Array | null = null;
+    let dek: Uint8Array | null = null;
+    let metaPlain: Uint8Array | null = null;
+    try {
+      const salt = this.engine.randomBytes(CONTAINER_SALT_LENGTH);
+      // KEK from the password (Argon2id, instance params).
+      kek = await this.deriveKeyBytes(finalPassword, salt);
+      // Fresh random DEK — the key that actually encrypts meta + payload.
+      dek = this.engine.randomBytes(CONTAINER_DEK_LENGTH);
+
+      // Header (version 0x02, instance Argon2id params) — bound into every AAD.
+      const header = packContainerHeader({
+        memoryCost: this.argon2Options.memoryCost,
+        timeCost: this.argon2Options.timeCost,
+        parallelism: this.argon2Options.parallelism,
+      });
+      const aad = header;
+
+      // 1) Wrap the DEK under the KEK.
+      const kekIv = this.engine.randomBytes(CONTAINER_IV_LENGTH);
+      const wrapped = await this.engine.aeadEncrypt(kek, kekIv, dek, aad);
+
+      // 2) Encrypt the metadata block (filename/mime/size + plaintext SHA-256)
+      //    under the DEK. Everything here is confidential.
+      const sha256 = await this.engine.sha256(data);
+      metaPlain = serializeV2Meta({
+        size: data.length,
+        sha256,
+        filename: filenameBytes,
+        mime: mimeBytes,
+      });
+      const metaIv = this.engine.randomBytes(CONTAINER_IV_LENGTH);
+      const encMeta = await this.engine.aeadEncrypt(
+        dek,
+        metaIv,
+        metaPlain,
+        aad
+      );
+      const metaLenField = new Uint8Array(CONTAINER_META_LENGTH_FIELD_BYTES);
+      viewOf(metaLenField).setUint32(0, encMeta.ciphertext.length, false);
+
+      // 3) Encrypt the payload under the DEK.
+      const dataIv = this.engine.randomBytes(CONTAINER_IV_LENGTH);
+      const encData = await this.engine.aeadEncrypt(dek, dataIv, data, aad);
+
+      const container = concatBytes(
+        header,
+        salt,
+        kekIv,
+        wrapped.ciphertext,
+        wrapped.tag,
+        metaIv,
+        metaLenField,
+        encMeta.ciphertext,
+        encMeta.tag,
+        dataIv,
+        encData.ciphertext,
+        encData.tag
+      );
+
+      // Scrub the secret key material and the cleartext metadata block. The
+      // caller's `data` is left untouched (caller owns it).
+      this.secureClear(kek);
+      this.secureClear(dek);
+      this.secureClear(metaPlain);
+      return container;
+    } catch (error) {
+      if (kek !== null) {
+        this.secureClear(kek);
+      }
+      if (dek !== null) {
+        this.secureClear(dek);
+      }
+      if (metaPlain !== null) {
+        this.secureClear(metaPlain);
+      }
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Container encryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.ENCRYPTION_FAILED,
+        'CONTAINER_ENCRYPTION_FAILED'
+      );
+    }
+  }
+
+  /**
+   * Decrypt a **v2 container** produced by {@link encryptContainer}, returning
+   * the recovered plaintext plus its authenticated {@link ContainerMetadata}.
+   *
+   * The flow mirrors the envelope: parse the header (pure, DoS-bounded — see
+   * {@link parseV2Container}) → derive the Argon2id KEK → unwrap the DEK →
+   * decrypt the metadata block → decrypt the payload → recompute
+   * SHA-256(payload) and compare it (in constant time) to the embedded digest.
+   * Every segment is GCM-authenticated against the verbatim header AAD, so a
+   * wrong password, any single-bit tamper, or a swapped segment surfaces as a
+   * generic `DECRYPTION_FAILED`; a payload whose recomputed hash (or length)
+   * does not match the sealed-in values throws
+   * `CryptoError(DECRYPTION_FAILED, 'CONTAINER_INTEGRITY_FAILED')`.
+   *
+   * Version isolation: a v0/v1 blob (no "HPCR" magic, or a version byte other
+   * than 0x02) is rejected by the pure header parse before any key derivation
+   * runs, so `decryptContainer` never accepts a non-container.
+   *
+   * @param container - the v2 container bytes
+   * @param password - password (optional if a default passphrase is configured)
+   * @returns `{ data, meta }` — the plaintext bytes and their
+   *   `{ filename?, mime?, size }` metadata
+   * @throws CryptoError on a non-container / foreign-version input (see
+   *   {@link parseV2Container}), a wrong password or any tamper
+   *   (`DECRYPTION_FAILED`), a malformed metadata block
+   *   (`CONTAINER_METADATA_MALFORMED`), or a failed integrity check
+   *   (`CONTAINER_INTEGRITY_FAILED`).
+   */
+  public async decryptContainer(
+    container: Uint8Array,
+    password?: string
+  ): Promise<DecryptedContainer> {
+    if (!(container instanceof Uint8Array)) {
+      throw new CryptoError(
+        'Encrypted container must be a Uint8Array',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_ENCRYPTED_DATA'
+      );
+    }
+
+    const finalPassword = password || this.defaultPassphrase;
+    if (!finalPassword || typeof finalPassword !== 'string') {
+      throw new CryptoError(
+        'Password is required. Either provide a password parameter or set a default passphrase in the constructor.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_PASSWORD'
+      );
+    }
+
+    // Pure, DoS-bounded structural parse. Throws a typed CryptoError (and
+    // rejects any v0/v1 blob) BEFORE any Argon2id work — so a malformed or
+    // foreign-version input can never trigger a KDF computation.
+    const parsed = parseV2Container(container);
+    const aad = parsed.header;
+
+    let kek: Uint8Array | null = null;
+    let dek: Uint8Array | null = null;
+    let metaPlain: Uint8Array | null = null;
+    let dataPlain: Uint8Array | null = null;
+    try {
+      // Derive the KEK using the header-embedded Argon2id params, then unwrap
+      // the DEK. A KDF failure is re-typed to DECRYPTION_FAILED (this is a
+      // decrypt op); a wrong password fails at the DEK-unwrap GCM tag.
+      try {
+        kek = await this.deriveKeyBytes(
+          finalPassword,
+          parsed.salt,
+          parsed.argonParams
+        );
+      } catch (err) {
+        throw this.remapKdfErrorForDecryption(err);
+      }
+      dek = await this.engine.aeadDecrypt(
+        kek,
+        parsed.kekIv,
+        parsed.wrappedDek,
+        parsed.kekTag,
+        aad
+      );
+      // KEK is no longer needed once the DEK is unwrapped.
+      this.secureClear(kek);
+      kek = null;
+
+      // Decrypt the confidential metadata block, then the payload, under the DEK.
+      metaPlain = await this.engine.aeadDecrypt(
+        dek,
+        parsed.metaIv,
+        parsed.encMeta,
+        parsed.metaTag,
+        aad
+      );
+      const meta = parseV2Meta(metaPlain);
+
+      dataPlain = await this.engine.aeadDecrypt(
+        dek,
+        parsed.dataIv,
+        parsed.encData,
+        parsed.dataTag,
+        aad
+      );
+      this.secureClear(dek);
+      dek = null;
+
+      // Integrity: the recomputed plaintext SHA-256 (and the embedded size)
+      // must match what the producer sealed in. Constant-time digest compare.
+      const actualSha = await this.engine.sha256(dataPlain);
+      if (
+        !constantTimeEqualBytes(actualSha, meta.sha256) ||
+        meta.size !== dataPlain.length
+      ) {
+        throw new CryptoError(
+          'Container integrity check failed: the decrypted payload does not match its embedded SHA-256 digest.',
+          CryptoErrorType.DECRYPTION_FAILED,
+          'CONTAINER_INTEGRITY_FAILED'
+        );
+      }
+
+      // Scrub the cleartext metadata block (it holds the digest + the
+      // filename/mime bytes); the decoded strings were already copied out.
+      // `dataPlain` is the return value — do NOT scrub it.
+      this.secureClear(metaPlain);
+      metaPlain = null;
+
+      const resultMeta: ContainerMetadata = { size: meta.size };
+      if (meta.filename !== undefined) {
+        resultMeta.filename = meta.filename;
+      }
+      if (meta.mime !== undefined) {
+        resultMeta.mime = meta.mime;
+      }
+      return { data: dataPlain, meta: resultMeta };
+    } catch (error) {
+      // On any failure (including a failed integrity check) scrub every buffer
+      // we allocated — the decrypted payload must not leak when we reject.
+      if (kek !== null) {
+        this.secureClear(kek);
+      }
+      if (dek !== null) {
+        this.secureClear(dek);
+      }
+      if (metaPlain !== null) {
+        this.secureClear(metaPlain);
+      }
+      if (dataPlain !== null) {
+        this.secureClear(dataPlain);
+      }
+      if (error instanceof CryptoError) {
+        throw error;
+      }
+      throw new CryptoError(
+        `Container decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        CryptoErrorType.DECRYPTION_FAILED,
+        'CONTAINER_DECRYPTION_FAILED'
+      );
+    }
   }
 }

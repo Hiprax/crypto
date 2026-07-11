@@ -38,6 +38,13 @@ export default [
         // browser; used by the isomorphic `codec.ts` for UTF-8 transcoding.
         TextEncoder: 'readonly',
         TextDecoder: 'readonly',
+        // Universal Web Crypto globals available in both Node (>=22) and the
+        // browser (secure context); used by the isomorphic `engine.web.ts`
+        // (`globalThis.crypto` + the `CryptoKey` type).
+        crypto: 'readonly',
+        Crypto: 'readonly',
+        CryptoKey: 'readonly',
+        SubtleCrypto: 'readonly',
       },
     },
     plugins: {
@@ -120,13 +127,16 @@ export default [
   // resolve a `node:crypto`. The esbuild `platform:'browser'` gate (Phase 7)
   // catches `node:` SPECIFIERS but NOT a bare `Buffer`/`process` GLOBAL, so
   // this static ESLint gate covers that gap. The glob is extended in later
-  // phases to the Web engine and browser entry files.
+  // phases to the remaining browser entry files.
   {
     files: [
       'src/core.ts',
       'src/codec.ts',
       'src/format-core.ts',
       'src/engine.ts',
+      // Phase 5: the Web engine (SubtleCrypto + hash-wasm) is in the browser
+      // graph — it may reference no Node global and import no `node:*`.
+      'src/engine.web.ts',
     ],
     rules: {
       'no-restricted-globals': [

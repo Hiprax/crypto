@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.5.0] - 2026-07-11
+
+Isomorphic (Node + browser) support. The library now encrypts and decrypts in **both** Node and the browser over **one** tested wire format: a zero-knowledge web app can encrypt entirely client-side and a Node service can decrypt the result (and vice-versa). This release is **purely additive** — every existing Node export, method signature, and behavior is preserved, and every existing v0/v1 ciphertext still decrypts — so it is a SemVer MINOR.
+
+### Added
+
+- **Isomorphic in-memory API — `encryptBytes` / `decryptBytes`** (`src/core.ts`). New `CryptoManager` methods that take and return `Uint8Array`, run identically in Node and the browser, and produce the v1 Argon2id text byte layout `[header:22][salt:32][iv:12][tag:16][ciphertext]`. The empty `Uint8Array` is accepted; the caller's buffer is never mutated. `encryptText` / `decryptText` are now re-expressed as thin base64url⇄bytes wrappers over these, so there is exactly **one** wire format and one code path across runtimes.
+- **Browser build + conditional exports** (`src/crypto-manager.browser.ts`, `src/index.browser.ts`, `package.json`). The `.` export is now conditional (`types → browser → node → default`): browser bundlers (webpack, Vite/Rollup, esbuild, Next.js) resolve a separate `dist/index.browser.js` whose import graph contains **zero `node:` builtins** and references no `Buffer`/`process` global, while Node resolves `dist/index.js` unchanged. The browser `CryptoManager` uses Web Crypto (SubtleCrypto) for AES-256-GCM/SHA-256/CSPRNG and WebAssembly `hash-wasm` for Argon2id, with a lighter **32 MiB Argon2id default** (`memoryCost = 2 ** 15`, classified `MEDIUM`) to avoid OOM on memory-constrained mobile browsers. Node-only methods (sync/PBKDF2, streaming file, `Buffer`-typed low-level) are throwing stubs that raise `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')`. The browser build does not export the Node-only `./utils` file helpers.
+- **Engine abstraction** (`src/engine.ts`, `src/engine.node.ts`, `src/engine.web.ts`). A tiny `CryptoEngine` interface (`randomBytes` / `deriveArgon2id` / `aeadEncrypt` / `aeadDecrypt` / `sha256`, tag returned separately) localizes every runtime-specific primitive to one file per runtime. The Node engine hosts the relocated Argon2 native→WASM lazy-load; the Web engine hides Web Crypto's `C‖T` appended-tag convention so both runtimes assemble byte-identical wire bytes.
+- **Container mode (v2 envelope) — `encryptContainer` / `decryptContainer`** (`src/core.ts`, `src/types.ts`). An optional, additive authenticated envelope (magic `HPCR`, version `0x02`) available in both runtimes: an Argon2id key-encryption key wraps a random 32-byte data-encryption key; optional `filename`/`mime` metadata (plus size and the plaintext SHA-256) are stored **confidentially** (encrypted under the DEK, never in cleartext); the embedded SHA-256 is re-verified on decrypt (`CONTAINER_INTEGRITY_FAILED` on mismatch). It does not touch the v0/v1 paths, and each format rejects the other's blobs. New types `ContainerMetadataInput`, `ContainerMetadata`, `DecryptedContainer`.
+- **Isomorphic codec + pure format layer** (`src/codec.ts`, `src/format-core.ts`). `codec.ts` provides `Buffer`-free `bytesToBase64url` / `base64urlToBytes` / `isValidBase64url` / `bytesToHex` / `utf8Encode` / `utf8Decode` / `concatBytes` (byte-identical to Node's `Buffer` base64url); `utils.isValidBase64Url` now delegates to it. `format-core.ts` holds the pure `Uint8Array`/`DataView` header logic.
+- **Cross-runtime interop tests, committed vectors, and a real-browser CI job** (`src/__tests__/interop.test.ts`, `src/__tests__/fixtures/node-vectors.json`, `src/__tests__/browser/interop.browser.test.ts`, `.github/workflows/ci.yml`). Node↔browser round-trips are proven at the primitive and end-to-end layers; committed Node-produced vectors are decrypted by the browser manager; a new `browser-tests` CI job runs the browser suite in real headless Chromium via Vitest Browser Mode (Playwright).
+- **Static browser-isolation gates** (`scripts/check-browser.mjs`, `package.json`, `eslint.config.ts`). `npm run check:browser` bundles the browser entry with esbuild `platform:'browser'` (cross-platform JS API, `write:false`) and fails on any `node:` specifier reaching the browser graph; an ESLint `no-restricted-globals` (`Buffer`/`process`) + `no-restricted-imports` (`node:*`) override guards the isomorphic files against a bare `Buffer` global esbuild cannot see. `npm run check:exports` runs `publint` + `@arethetypeswrong/cli`. Both are wired into `prepublishOnly` and the CI `test` job.
+
+### Changed
+
+- **Internal format-layer split; public `format.ts` API unchanged** (`src/format.ts`, `src/format-core.ts`). The header logic moved to a new pure `format-core.ts` (`Uint8Array`/`DataView`, pooled-`Buffer`-safe `DataView` construction); `format.ts` is now a thin Node wrapper that re-exports the constants/types and wraps the primitives back to their exact `Buffer`-typed signatures (`MAGIC_BYTES: Buffer`, `packHeader(...): Buffer`, …). Every output byte, constant, error code, and error `type` is preserved, so existing call sites and tests are unaffected.
+- **`secureClear` and `inspectHeader` parameters widened to `Uint8Array`** (`src/core.ts`). Backward-compatible — every Node `Buffer` is a `Uint8Array`, so existing `Buffer` call sites are unchanged — and now a plain `Uint8Array` (e.g. browser key material) is actually scrubbed / inspected rather than silently skipped.
+- **New npm scripts** (`package.json`): `test:node` (Jest, alias of `test`), `test:browser` (Vitest real-browser), `check:browser`, `check:exports`; `"sideEffects": false` declared for tree-shaking; devDependencies added for the browser toolchain (`esbuild`, `publint`, `@arethetypeswrong/cli`, `vitest`, `@vitest/browser`, `@vitest/browser-playwright`, `playwright`, `jiti`).
+
+### Files changed
+
+- `src/core.ts` — new isomorphic `abstract class CryptoCore`: option validation, `encryptBytes`/`decryptBytes`, the base64url-wrapper `encryptText`/`decryptText`, `encryptContainer`/`decryptContainer` (v2), `inspectHeader`, `secureClear`, classification helpers, and the shared `buildHeader`/`aadForV1`; `SECURITY_THRESHOLDS` and `isValidPassword` moved here (re-exported from `crypto-manager.ts`).
+- `src/codec.ts`, `src/format-core.ts` — new pure (`Buffer`/`node:`-free) codec and header modules.
+- `src/format.ts` — rewritten as a thin `Buffer`-typed wrapper over `format-core.ts` (public API byte- and type-identical).
+- `src/engine.ts`, `src/engine.node.ts`, `src/engine.web.ts` — new `CryptoEngine` interface + Node and Web engines; the Argon2 native→WASM lazy-load relocated from `crypto-manager.ts` into `engine.node.ts` (test hooks re-exported).
+- `src/crypto-manager.ts` — now `class CryptoManager extends CryptoCore` (injects the Node engine + 128 MiB HIGH profile); all Node-only Buffer/sync/file/streaming methods retained with identical behavior; async `encryptText`/`decryptText` inherited from the core.
+- `src/crypto-manager.browser.ts`, `src/index.browser.ts` — new browser manager (Web engine, 32 MiB default, throwing Node-only stubs) and browser entry (re-exports the core + `format-core` + `codec`, omits `utils`).
+- `src/types.ts` — new `ContainerMetadataInput`, `ContainerMetadata`, `DecryptedContainer` interfaces.
+- `src/index.ts` — additionally re-exports `./codec.js`.
+- `src/utils.ts` — `isValidBase64Url` delegates to `codec.isValidBase64url` (single source; public name/behavior unchanged).
+- `src/__tests__/` — new `codec.test.ts`, `format-core.test.ts`, `engine-node.test.ts`, `engine-web.test.ts`, `engine-web-unavailable.test.ts`, `encrypt-bytes.test.ts`, `browser-manager.test.ts`, `interop.test.ts`, `property-bytes.test.ts`, `container.test.ts`, `browser/interop.browser.test.ts`, and `fixtures/node-vectors.json`; `esm-smoke.test.ts` updated for the conditional `.` exports and a browser-entry Node probe.
+- `scripts/check-browser.mjs` — new cross-platform esbuild browser-isolation gate.
+- `vitest.config.ts` — new Vitest Browser Mode config (headless Chromium/Playwright).
+- `package.json` — conditional `.` exports (`types`/`browser`/`node`/`default`), `"sideEffects": false`, new scripts and browser devDependencies, `prepublishOnly` extended with `check:browser`/`check:exports`; `version` bumped `1.4.5` → `1.5.0`.
+- `package-lock.json` — browser toolchain devDependencies added; `version` synced to `1.5.0`.
+- `eslint.config.ts` — `no-restricted-globals`/`no-restricted-imports` override scoped to the isomorphic browser-graph files.
+- `.github/workflows/ci.yml` — new `browser-tests` job (ubuntu-latest, Node 22, Playwright chromium, `npm run test:browser`); `check:browser`/`check:exports` steps added to the `test` job.
+- `.npmignore` — excludes `vitest.config.ts` and the browser test suite from the published tarball.
+- `README.md` — new "Isomorphic API & Browser Support" and "Container Mode (v2 envelope)" sections; browser build/install notes; `encryptBytes`/`decryptBytes`/`encryptContainer`/`decryptContainer` method docs; "Container Format (v2)" byte layout; conditional-exports and error-code updates; Post-Quantum section kept in sync (browser uses the same primitives).
+- `SECURITY.md` — new "Browser build (threat-model notes)" section (memory hygiene, secure context, CSP, `node:`-free graph, `UNSUPPORTED_IN_BROWSER`); browser Argon2id default and v2 container added to the configuration-defaults and format/parser scope; post-quantum posture kept in sync.
+- `CLAUDE.md` — architecture/source-files, exports map, scripts, and the post-quantum sync note updated to cover the engine layer, `codec.ts`/`format-core.ts`, the browser build, and container mode.
+- `CHANGELOG.md` — this entry.
+
+---
+
 ## [1.4.5] - 2026-07-09
 
 ### Added

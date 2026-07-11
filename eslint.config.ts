@@ -137,6 +137,11 @@ export default [
       // Phase 5: the Web engine (SubtleCrypto + hash-wasm) is in the browser
       // graph — it may reference no Node global and import no `node:*`.
       'src/engine.web.ts',
+      // Phase 6: the browser CryptoManager and the browser entry point round out
+      // the browser import graph — same isolation rule (no `Buffer`/`process`,
+      // no `node:*`) applies so a bundler can include them.
+      'src/crypto-manager.browser.ts',
+      'src/index.browser.ts',
     ],
     rules: {
       'no-restricted-globals': [
@@ -162,6 +167,20 @@ export default [
             },
           ],
         },
+      ],
+    },
+  },
+  // The browser `CryptoManager`'s Node-only methods are intentional throwing
+  // stubs: they declare the Node API shape but ignore every argument (each just
+  // raises `UNSUPPORTED_IN_BROWSER`). Permit the `_`-prefixed unused parameters
+  // in that one file while keeping unused-variable checking fully strict
+  // everywhere else (and everywhere in this file for non-underscore names).
+  {
+    files: ['src/crypto-manager.browser.ts'],
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_' },
       ],
     },
   },

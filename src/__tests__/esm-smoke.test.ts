@@ -9,6 +9,12 @@
  * loads files through its own ESM transformer, which would mask
  * exports-map mistakes that real Node would catch.
  *
+ * Since the isomorphic (Node + browser) work, the root `.` export is
+ * CONDITIONAL (`types` → `browser` → `node` → `default`), so this suite also
+ * asserts that condition set + order and loads the built browser entry
+ * (`dist/index.browser.js`) under Node to prove it exposes `CryptoManager`
+ * while its Node-only methods throw `UNSUPPORTED_IN_BROWSER`.
+ *
  * What this test does NOT cover:
  *   - The dynamic-`import()` workaround for CommonJS callers (because
  *     spinning up a `--input-type=commonjs` worker would execute on the
@@ -38,6 +44,7 @@ import { pathToFileURL } from 'node:url';
 const REPO_ROOT = process.cwd();
 const DIST_DIR = path.join(REPO_ROOT, 'dist');
 const DIST_INDEX = path.join(DIST_DIR, 'index.js');
+const DIST_BROWSER_INDEX = path.join(DIST_DIR, 'index.browser.js');
 
 // Unique per-suite scratch directory. mkdtempSync creates the directory
 // atomically with a random suffix — the CodeQL-approved secure pattern
@@ -49,11 +56,13 @@ const TEST_DIR = mkdtempSync(
 describe('ESM smoke (Task 31)', () => {
   beforeAll(() => {
     mkdirSync(TEST_DIR, { recursive: true });
-    if (!existsSync(DIST_INDEX)) {
-      throw new Error(
-        `Built artefact not found at ${DIST_INDEX}. ` +
-          'Run `npm run build` before running the ESM smoke test.'
-      );
+    for (const artefact of [DIST_INDEX, DIST_BROWSER_INDEX]) {
+      if (!existsSync(artefact)) {
+        throw new Error(
+          `Built artefact not found at ${artefact}. ` +
+            'Run `npm run build` before running the ESM smoke test.'
+        );
+      }
     }
   });
 
@@ -61,7 +70,7 @@ describe('ESM smoke (Task 31)', () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it('package.json declares ESM and has no require export', () => {
+  it('package.json declares ESM with a conditional root export and no require anywhere', () => {
     // Read the published package.json directly so we test the shipped
     // configuration, not whatever ts-jest happens to imply.
     const pkgPath = path.join(REPO_ROOT, 'package.json');
@@ -70,7 +79,15 @@ describe('ESM smoke (Task 31)', () => {
       engines?: { node?: string };
       exports?: Record<
         string,
-        string | { types?: string; import?: string; require?: string }
+        | string
+        | {
+            types?: string;
+            import?: string;
+            require?: string;
+            browser?: string;
+            node?: string;
+            default?: string;
+          }
       >;
     };
     expect(pkg.type).toBe('module');
@@ -83,7 +100,40 @@ describe('ESM smoke (Task 31)', () => {
     if (!exportsMap) {
       throw new Error('package.json must define an exports map');
     }
-    for (const key of ['.', './crypto-manager', './utils']) {
+
+    // The root `.` export is CONDITIONAL: it routes bundlers (which set the
+    // `browser` condition) to the browser build and Node (which sets `node`)
+    // to the Node build, over ONE ESM format. Assert the exact condition set
+    // AND order — `types` first (TypeScript reads the exports map with the
+    // same first-match rule as Node) and `default` last (the catch-all) — plus
+    // the correct target for each condition.
+    const rootEntry = exportsMap['.'];
+    expect(typeof rootEntry).toBe('object');
+    const root = rootEntry as {
+      types?: string;
+      browser?: string;
+      node?: string;
+      default?: string;
+      import?: string;
+      require?: string;
+    };
+    expect(Object.keys(root)).toEqual(['types', 'browser', 'node', 'default']);
+    expect(root.types).toMatch(/index\.d\.ts$/);
+    // Bundlers → browser build; Node + the fallback → Node build.
+    expect(root.browser).toMatch(/index\.browser\.js$/);
+    expect(root.node).toMatch(/index\.js$/);
+    expect(root.node).not.toMatch(/index\.browser\.js$/);
+    expect(root.default).toMatch(/index\.js$/);
+    expect(root.default).not.toMatch(/index\.browser\.js$/);
+    // ESM-only: no `require` condition, and no bare `import` on the root (the
+    // `node`/`default` conditions already cover Node's ESM import).
+    expect(root.require).toBeUndefined();
+    expect(root.import).toBeUndefined();
+
+    // The Node-only subpath exports keep the simple `{ types, import }` shape
+    // — no `browser` condition (they are documented Node-only) and never a
+    // `require` condition.
+    for (const key of ['./crypto-manager', './utils']) {
       const entry = exportsMap[key];
       expect(entry).toBeDefined();
       expect(typeof entry).toBe('object');
@@ -91,11 +141,12 @@ describe('ESM smoke (Task 31)', () => {
         types?: string;
         import?: string;
         require?: string;
+        browser?: string;
       };
-      // Each entry should declare types + import, but NOT require.
       expect(obj.types).toMatch(/\.d\.ts$/);
       expect(obj.import).toMatch(/\.js$/);
       expect(obj.require).toBeUndefined();
+      expect(obj.browser).toBeUndefined();
     }
   });
 
@@ -138,6 +189,76 @@ process.stdout.write(ok ? 'OK' : 'BAD: ' + JSON.stringify(Object.keys(mod)));
 
       // Node's stderr can contain ExperimentalWarning lines, but the
       // exit code MUST be 0 and stdout MUST contain 'OK'.
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('OK');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Node loads dist/index.browser.js and Node-only methods throw UNSUPPORTED_IN_BROWSER', () => {
+    // The `browser` export condition points bundlers at
+    // dist/index.browser.js. That entry's import graph contains ZERO `node:`
+    // specifiers (enforced continuously by `npm run check:browser`), so it
+    // also loads cleanly under Node's own ESM resolver here. Loading it under
+    // Node lets us assert two guarantees without spinning up a browser:
+    //   1. `CryptoManager` is exported and the named export === the default
+    //      export (same shape as the Node build).
+    //   2. A Node-only method throws `CryptoError` with code
+    //      `UNSUPPORTED_IN_BROWSER` — the browser build's throwing stub —
+    //      proving the browser surface is the async in-memory subset, not the
+    //      full Node API (file/stream/sync/Buffer-typed methods are absent).
+    const tmpDir = path.join(
+      TEST_DIR,
+      `browser-${crypto.randomBytes(8).toString('hex')}`
+    );
+    mkdirSync(tmpDir, { recursive: true });
+    const probeFile = path.join(tmpDir, 'probe.mjs');
+
+    const browserUrl = pathToFileURL(DIST_BROWSER_INDEX).href;
+
+    writeFileSync(
+      probeFile,
+      `
+import * as mod from ${JSON.stringify(browserUrl)};
+const CM = mod.CryptoManager;
+let threw = false;
+let code = '';
+let name = '';
+try {
+  const cm = new CM();
+  // generateSecureRandom is Node-only (Buffer-typed CSPRNG); the browser
+  // build stubs it to throw synchronously.
+  cm.generateSecureRandom(16);
+} catch (err) {
+  threw = true;
+  code = err && err.code;
+  name = err && err.name;
+}
+const ok =
+  typeof CM === 'function' &&
+  typeof mod.default === 'function' &&
+  CM === mod.default &&
+  threw &&
+  name === 'CryptoError' &&
+  code === 'UNSUPPORTED_IN_BROWSER';
+process.stdout.write(
+  ok
+    ? 'OK'
+    : 'BAD: ' + JSON.stringify({ threw, name, code, keys: Object.keys(mod) })
+);
+`,
+      'utf8'
+    );
+
+    try {
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
+
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('OK');
     } finally {

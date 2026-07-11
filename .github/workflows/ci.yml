@@ -65,6 +65,23 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Browser-graph isolation gate. Bundles the browser entry with esbuild
+      # (platform=browser) and fails if any `node:` builtin is reachable, so
+      # node:crypto/fs/stream can never leak into the browser build. Enforced
+      # on every push/PR here (not just at release via prepublishOnly). The
+      # check uses esbuild's JS API (in-memory, write:false), so it is
+      # cross-platform and runs on the Windows leg too.
+      - name: Check browser isolation (no Node builtins in browser graph)
+        run: npm run check:browser
+
+      # Package-exports + published-types gate. publint validates the exports
+      # map; attw verifies the shipped .d.ts resolve for ESM and bundler
+      # consumers. CJS/node10 resolutions are intentionally ESM-only, so attw
+      # runs under `--profile esm-only`. Guards the conditional `.` export and
+      # the subpath exports against silent regressions.
+      - name: Check package exports and types
+        run: npm run check:exports
+
       # Collect coverage on the Ubuntu / Node 22 leg only — uploading from
       # every (os, node) cell would clutter the Codecov UI and double-count
       # lines that are identical across runners. Other matrix legs still

@@ -49,5 +49,15 @@ export default {
       statements: 80,
     },
   },
-  testPathIgnorePatterns: ['/node_modules/', '/dist/'],
+  // Exclude the real-browser Vitest suite from the Jest run. The specs under
+  // `src/__tests__/browser/` import from `'vitest'` and the built browser entry
+  // and are executed by Vitest Browser Mode (`npm run test:browser`), NOT Jest.
+  // Without this, Jest's `testMatch` (`**/__tests__/**/*.ts`) would collect them
+  // and fail on the `'vitest'` import. `collectCoverageFrom` already excludes
+  // `src/__tests__/**`, so browser specs never affect coverage either.
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '/dist/',
+    '/src/__tests__/browser/',
+  ],
 };

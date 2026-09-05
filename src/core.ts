@@ -148,6 +148,54 @@ const PASSWORD_MIN_LENGTH = 8;
 const ARGON2_ID = 2;
 
 /**
+ * Number of leading base64url characters {@link CryptoCore.inspectHeader}
+ * decodes from a string input.
+ *
+ * **Why a prefix is enough.** A v1 header is {@link HEADER_LENGTH} = 22 bytes
+ * and sits at the very front of the record, so reading it never requires the
+ * body. `inspectHeader` used to decode the WHOLE string — on a multi-megabyte
+ * ciphertext that allocates (and immediately discards) a plaintext-sized byte
+ * array to read 22 bytes.
+ *
+ * **Why 32 specifically.** `ceil(22 * 4 / 3) = 30` characters already carry
+ * the 22 header bytes, but 30 is not a multiple of 4. Rounding up to the next
+ * multiple of 4 makes the slice a whole number of base64 quanta, which is the
+ * load-bearing property: a quantum-aligned prefix of a *canonical* string is
+ * itself a canonical string, and its decode is a byte-exact prefix of the full
+ * decode — no partial-sextet tail to reconstruct and no dependence on the
+ * decoder's leniency rules. 32 characters decode to exactly 24 bytes: two more
+ * than {@link parseHeader}'s 22 and twenty more than {@link hasMagic}'s 4. The
+ * width is therefore `ceil(HEADER_LENGTH / 3) * 4`; it is spelled as a literal
+ * because it is a fixed property of a frozen wire format, and
+ * `inspect-prefix.test.ts` asserts the decode yields at least `HEADER_LENGTH`
+ * bytes, so a future header growth past 24 bytes fails loudly rather than
+ * silently truncating.
+ *
+ * **Why the canonical precondition holds.** The slice happens only AFTER
+ * `isValidBase64url` has accepted the ENTIRE string, so by then the input is
+ * known to be the exact form {@link bytesToBase64url} emits: URL-safe
+ * alphabet only, unpadded, no whitespace, no standard-alphabet aliases. That
+ * whole-string check deliberately does NOT narrow along with the decode —
+ * narrowing it would silently start accepting a malformed tail.
+ *
+ * **Why the short-input branches are unaffected.** The smallest canonical
+ * length above 32 is 34 — 33 is impossible, since `length % 4 === 1` carries
+ * no whole byte — and it decodes to 25 bytes, so a sliced input always has the
+ * full 24 bytes to work with. Every record too short to reach that width is
+ * therefore decoded in its entirety, and the branches that depend on a short
+ * decode (`null` for a non-magic record, `TRUNCATED_HEADER` for a
+ * magic-bearing record under 22 bytes) see exactly the bytes they saw before.
+ * Note the `length >` guard at the call site is a pure allocation saving, NOT
+ * a correctness condition: `String.prototype.slice` already clamps its `end`
+ * to the string length, so removing the guard would be behaviourally
+ * identical — it would just copy a substring that is already the whole string.
+ *
+ * `src/__tests__/inspect-prefix.test.ts` pins the equivalence, the bound, and
+ * every branch above.
+ */
+const HEADER_B64URL_PREFIX_CHARS = 32;
+
+/**
  * Pure (static) password-strength validator. Does NOT depend on any
  * `CryptoCore` instance state — it is a deterministic function of the
  * password string alone. Extracted to module scope so that the
@@ -1672,6 +1720,11 @@ export abstract class CryptoCore {
    * than surfacing the encoding error. Failing fast matches the documented
    * contract. `Uint8Array` inputs (including Node `Buffer`s) are read as-is.
    *
+   * Only the first {@link HEADER_B64URL_PREFIX_CHARS} characters of a string
+   * are decoded, so inspecting a multi-megabyte ciphertext costs the same as
+   * inspecting a tiny one. The returned value is identical to what decoding
+   * the whole string produces — see that constant for why.
+   *
    * @param input - either a base64url string (text format) or byte array
    *   (file contents). Strings are validated as base64url and decoded; byte
    *   arrays are read as-is.
@@ -1707,7 +1760,19 @@ export abstract class CryptoCore {
       // worth overriding, and keeping one implementation of "is this
       // canonical base64url" keeps the accept/reject boundary identical on
       // every runtime. Only the decode itself is swappable.
-      buf = this.decodeBase64url(input);
+      //
+      // Decode only the header prefix. The whole string has just been proven
+      // canonical, so a slice at a multiple of 4 is a whole number of base64
+      // quanta and decodes to a byte-exact prefix of the full decode — which
+      // is all `hasMagic` (bytes 0-3) and `parseHeader` (bytes 0-21) ever
+      // read. See {@link HEADER_B64URL_PREFIX_CHARS} for why 32 is the right
+      // width. The length guard only avoids copying a substring that would
+      // already be the whole string; `slice` clamps, so it is not load-bearing.
+      buf = this.decodeBase64url(
+        input.length > HEADER_B64URL_PREFIX_CHARS
+          ? input.slice(0, HEADER_B64URL_PREFIX_CHARS)
+          : input
+      );
     } else if (input instanceof Uint8Array) {
       buf = input;
     } else {

@@ -933,7 +933,9 @@ describe('decryptFile short front-matter read (Phase 5)', () => {
 
     const inputPath = path.join(TEST_DIR, 'short-read-input.bin');
     const outputPath = path.join(TEST_DIR, 'short-read-output.txt');
-    // Create a real file so existsSync(inputPath) passes before open() is called.
+    // Create a real file so the (mocked) open() is reached on a path that
+    // genuinely exists — decryptFile no longer pre-checks with existsSync,
+    // it opens directly.
     writeFileSync(inputPath, Buffer.alloc(100));
 
     try {
@@ -1477,4 +1479,652 @@ describe('Phase 3 — benign inputFd closeSync failure does not discard complete
       }
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// 12. v1.6.0 Phase 5 — file-open-once: the async file paths open their input
+//     exactly once, stream the body from that same handle, and always close it
+// ---------------------------------------------------------------------------
+//
+// `encryptFile` / `decryptFile` used to pre-check the input with `existsSync`
+// and then hand the PATH to `fs.createReadStream`, so a single call resolved
+// the name two or three times (check, stat/open, stream). That is a TOCTOU
+// window: the bytes that get encrypted, or the body that gets authenticated
+// against a header read earlier, need not come from the file that was checked.
+// Both methods now open once via `fs/promises.open`, take the size from
+// `fileHandle.stat()`, stream from `fileHandle.createReadStream(...)`, and
+// close the handle unconditionally in a `finally`.
+//
+// Observation seam: `jest.unstable_mockModule('node:fs/promises', ...)` with
+// `open` delegating to the real implementation and returning a Proxy that
+// counts `close` / `createReadStream` and records any close rejection.
+// `jest.spyOn` is NOT usable here — `crypto-manager.ts` imports
+// `node:fs/promises` as NAMED ESM bindings (`import { open as fsOpen } from
+// 'node:fs/promises'`), which are resolved at link time, so a namespace spy
+// never intercepts the production call. `node:fs` is mocked alongside it with a
+// counting `createReadStream` purely as a NEGATIVE assertion: the production
+// code must never re-resolve the input path into a second stream.
+
+interface HandleObservation {
+  /** Number of `fs/promises.open` calls, by resolved first argument. */
+  opensByPath: string[];
+  /** Number of `close()` calls made BY PRODUCTION CODE on our proxies. */
+  closes: number;
+  /** Number of `fileHandle.createReadStream()` calls on our proxies. */
+  handleReadStreams: number;
+  /** The options object each `fileHandle.createReadStream()` was given. */
+  readStreamArgs: unknown[];
+  /** Number of path-based `fs.createReadStream()` calls (must stay 0). */
+  pathReadStreams: number;
+  /** Any rejection thrown by a REAL production `close()` (e.g. EBADF). */
+  closeErrors: unknown[];
+  /** Number of close failures this observer deliberately injected. */
+  injectedCloseFailures: number;
+}
+
+/**
+ * Install passthrough mocks for `node:fs` and `node:fs/promises` that observe
+ * the input FileHandle without changing any behavior. Must be called after
+ * `jest.resetModules()` and before importing `../crypto-manager`.
+ *
+ * `failCloseOnHandle` (1-based) makes the Nth opened handle's `close()` reject
+ * with a synthetic EIO *after* the real descriptor has genuinely been closed,
+ * so the injection tests a failing close without leaking a descriptor.
+ */
+const installHandleObserver = (
+  opts: { failCloseOnHandle?: number } = {}
+): HandleObservation => {
+  const realFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+  const realFsPromises =
+    jest.requireActual<typeof import('node:fs/promises')>('node:fs/promises');
+
+  const obs: HandleObservation = {
+    opensByPath: [],
+    closes: 0,
+    handleReadStreams: 0,
+    readStreamArgs: [],
+    pathReadStreams: 0,
+    closeErrors: [],
+    injectedCloseFailures: 0,
+  };
+
+  jest.unstable_mockModule('node:fs', () => ({
+    ...realFs,
+    createReadStream: jest.fn((...args: unknown[]) => {
+      obs.pathReadStreams += 1;
+      return (
+        realFs.createReadStream as unknown as (...a: unknown[]) => unknown
+      )(...args);
+    }),
+  }));
+
+  jest.unstable_mockModule('node:fs/promises', () => ({
+    ...realFsPromises,
+    open: jest.fn(async (...args: unknown[]) => {
+      // Recorded BEFORE the await so a failed open (ENOENT) still counts as
+      // an attempt — "opened exactly once" must hold on the failure path too.
+      obs.opensByPath.push(String(args[0]));
+      const handle = await (
+        realFsPromises.open as unknown as (
+          ...a: unknown[]
+        ) => Promise<Record<string | symbol, unknown>>
+      )(...args);
+      const handleIndex = obs.opensByPath.length;
+
+      // A Proxy (not a spread copy) so every member the production code or
+      // Node internals touch still resolves. Every method is bound to the
+      // REAL handle, so `createReadStream` builds its stream over the real
+      // handle and the stream's own `autoClose` bypasses our counters — the
+      // `closes` count therefore reflects only EXPLICIT production closes.
+      return new Proxy(handle, {
+        get(target, prop): unknown {
+          if (prop === 'close') {
+            return async (): Promise<void> => {
+              obs.closes += 1;
+              try {
+                await (target['close'] as () => Promise<void>).call(target);
+              } catch (err) {
+                obs.closeErrors.push(err);
+                throw err;
+              }
+              // Inject AFTER the real close so the descriptor is genuinely
+              // released; only the reported outcome is a failure.
+              if (opts.failCloseOnHandle === handleIndex) {
+                obs.injectedCloseFailures += 1;
+                const injected = new Error(
+                  'EIO: injected input-handle close failure'
+                ) as Error & { code?: string };
+                injected.code = 'EIO';
+                throw injected;
+              }
+            };
+          }
+          if (prop === 'createReadStream') {
+            return (...streamArgs: unknown[]): unknown => {
+              obs.handleReadStreams += 1;
+              obs.readStreamArgs.push(streamArgs[0]);
+              return (
+                target['createReadStream'] as (...a: unknown[]) => unknown
+              ).call(target, ...streamArgs);
+            };
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    }),
+  }));
+
+  return obs;
+};
+
+/** Every `.tmp` sibling of `base` still present in TEST_DIR. */
+const strayTemps = (base: string): string[] =>
+  readdirSync(TEST_DIR).filter(
+    e => e.startsWith(`${path.basename(base)}.`) && e.endsWith('.tmp')
+  );
+
+describe('Phase 5 (v1.6.0) — file-open-once handle discipline', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.resetModules();
+  });
+
+  it('encryptFile: a missing input reports INPUT_FILE_NOT_FOUND and writes nothing', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-enoent-absent-input.txt');
+    const outputPath = path.join(TEST_DIR, 'p5-enoent-encrypt-output.bin');
+    expect(existsSync(inputPath)).toBe(false);
+
+    let caught: unknown;
+    try {
+      await cm.encryptFile(inputPath, outputPath, TEST_PASSWORD);
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(CryptoError);
+    const err = caught as InstanceType<typeof CryptoError>;
+    expect(err.type).toBe(CryptoErrorType.FILE_ERROR);
+    expect(err.code).toBe('INPUT_FILE_NOT_FOUND');
+    expect(err.message).toBe(`Input file does not exist: ${inputPath}`);
+
+    // The open was attempted exactly once and failed; nothing was opened
+    // twice, no handle was leaked, and no output of any kind was produced.
+    expect(obs.opensByPath).toEqual([inputPath]);
+    expect(obs.closes).toBe(0);
+    expect(obs.handleReadStreams).toBe(0);
+    expect(obs.pathReadStreams).toBe(0);
+    expect(existsSync(outputPath)).toBe(false);
+    expect(strayTemps(outputPath)).toHaveLength(0);
+  }, 15_000);
+
+  it('decryptFile: a missing input reports INPUT_FILE_NOT_FOUND and writes nothing', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-enoent-absent-input.bin');
+    const outputPath = path.join(TEST_DIR, 'p5-enoent-decrypt-output.txt');
+    expect(existsSync(inputPath)).toBe(false);
+
+    let caught: unknown;
+    try {
+      await cm.decryptFile(inputPath, outputPath, TEST_PASSWORD);
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(CryptoError);
+    const err = caught as InstanceType<typeof CryptoError>;
+    expect(err.type).toBe(CryptoErrorType.FILE_ERROR);
+    expect(err.code).toBe('INPUT_FILE_NOT_FOUND');
+    expect(err.message).toBe(`Input file does not exist: ${inputPath}`);
+
+    expect(obs.opensByPath).toEqual([inputPath]);
+    expect(obs.closes).toBe(0);
+    expect(obs.handleReadStreams).toBe(0);
+    expect(obs.pathReadStreams).toBe(0);
+    expect(existsSync(outputPath)).toBe(false);
+    expect(strayTemps(outputPath)).toHaveLength(0);
+  }, 15_000);
+
+  it('decryptFile: a missing input aborts BEFORE creating the output directory', async () => {
+    // Ordering guard. The open must come first: if it were moved below the
+    // output-directory creation, a call that fails with INPUT_FILE_NOT_FOUND
+    // would still leave a directory behind as a side effect.
+    installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-order-absent-input.bin');
+    const outDir = path.join(TEST_DIR, 'p5-order-should-not-exist');
+    const outputPath = path.join(outDir, 'out.txt');
+    expect(existsSync(outDir)).toBe(false);
+
+    await expect(
+      cm.decryptFile(inputPath, outputPath, TEST_PASSWORD)
+    ).rejects.toMatchObject({ code: 'INPUT_FILE_NOT_FOUND' });
+
+    expect(existsSync(outDir)).toBe(false);
+  }, 15_000);
+
+  it('round-trip: each call opens the input exactly once, streams the body from that handle, and closes it', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-roundtrip-plain.bin');
+    const encPath = path.join(TEST_DIR, 'p5-roundtrip-enc.bin');
+    const decPath = path.join(TEST_DIR, 'p5-roundtrip-dec.bin');
+    // Larger than the 64 KiB stream highWaterMark so the body genuinely
+    // streams in several chunks rather than completing in one read.
+    const payload = nodeCrypto.randomBytes(200 * 1024);
+    writeFileSync(inputPath, payload);
+
+    try {
+      await cm.encryptFile(inputPath, encPath, TEST_PASSWORD);
+
+      expect(obs.opensByPath).toEqual([inputPath]);
+      expect(obs.handleReadStreams).toBe(1);
+      expect(obs.closes).toBe(1);
+
+      // The plaintext stream is positioned EXPLICITLY at byte 0. A bare
+      // `createReadStream()` would read from the handle's current position,
+      // so any positional-read change above it could silently truncate the
+      // plaintext; `{ start: 0 }` makes that impossible.
+      expect(obs.readStreamArgs).toEqual([{ start: 0 }]);
+
+      const encSize = statSync(encPath).size;
+      await cm.decryptFile(encPath, decPath, TEST_PASSWORD);
+
+      // One open per call, and the second open is the CIPHERTEXT — not a
+      // re-open of the plaintext for the body.
+      expect(obs.opensByPath).toEqual([inputPath, encPath]);
+      expect(obs.handleReadStreams).toBe(2);
+      expect(obs.closes).toBe(2);
+
+      // The ciphertext body is bounded to [header+salt+iv, size-tag): the
+      // trailing GCM tag must never be fed back through `decipher.update()`.
+      // (`end` is INCLUSIVE, hence the -1.)
+      expect(obs.readStreamArgs[1]).toEqual({
+        start: 22 + 32 + 12,
+        end: encSize - 16 - 1,
+      });
+
+      // The belt-and-braces close runs AFTER the body stream has already
+      // auto-closed the descriptor. On a Node whose `FileHandle.close()` were
+      // not idempotent this would surface EBADF; it must stay empty.
+      expect(obs.closeErrors).toEqual([]);
+
+      // Negative: the input path was never re-resolved into a second stream.
+      expect(obs.pathReadStreams).toBe(0);
+
+      // And the data actually survived the round-trip.
+      expect(readFileSync(decPath).equals(payload)).toBe(true);
+    } finally {
+      for (const p of [inputPath, encPath, decPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
+
+  it('decryptFile: the empty-body path creates no stream yet still closes the handle', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-empty-plain.bin');
+    const encPath = path.join(TEST_DIR, 'p5-empty-enc.bin');
+    const decPath = path.join(TEST_DIR, 'p5-empty-dec.bin');
+    writeFileSync(inputPath, Buffer.alloc(0));
+
+    try {
+      await cm.encryptFile(inputPath, encPath, TEST_PASSWORD);
+      await cm.decryptFile(encPath, decPath, TEST_PASSWORD);
+
+      expect(obs.opensByPath).toEqual([inputPath, encPath]);
+      // encryptFile always streams (even a 0-byte body); decryptFile's
+      // `bodyLen === 0` branch never constructs a stream at all — which is
+      // exactly the path an ownership flag would skip the close on.
+      expect(obs.handleReadStreams).toBe(1);
+      expect(obs.closes).toBe(2);
+      expect(obs.closeErrors).toEqual([]);
+      expect(obs.pathReadStreams).toBe(0);
+
+      expect(statSync(decPath).size).toBe(0);
+    } finally {
+      for (const p of [inputPath, encPath, decPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
+
+  it('decryptFile: an early throw before stream construction still closes the handle', async () => {
+    // A truncated ciphertext fails INVALID_ENCRYPTED_FILE_SIZE after the
+    // front-matter read and long before any stream exists. That throw must
+    // still reach the handle `finally`.
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-truncated-enc.bin');
+    const outputPath = path.join(TEST_DIR, 'p5-truncated-dec.txt');
+    // Far too short to hold salt + iv + tag, and no HPCR magic → v0 path.
+    writeFileSync(inputPath, nodeCrypto.randomBytes(16));
+
+    try {
+      let caught: unknown;
+      try {
+        await cm.decryptFile(inputPath, outputPath, TEST_PASSWORD);
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect((caught as InstanceType<typeof CryptoError>).code).toBe(
+        'INVALID_ENCRYPTED_FILE_SIZE'
+      );
+      expect((caught as InstanceType<typeof CryptoError>).type).toBe(
+        CryptoErrorType.INVALID_INPUT
+      );
+
+      expect(obs.opensByPath).toEqual([inputPath]);
+      expect(obs.handleReadStreams).toBe(0);
+      expect(obs.closes).toBe(1);
+      expect(obs.closeErrors).toEqual([]);
+
+      // Nothing was written: no output, no orphan temp.
+      expect(existsSync(outputPath)).toBe(false);
+      expect(strayTemps(outputPath)).toHaveLength(0);
+    } finally {
+      if (existsSync(inputPath)) unlinkSync(inputPath);
+    }
+  }, 15_000);
+
+  it('decryptFile: a tampered ciphertext fails authentication, closes the handle, and leaves no output', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-tamper-plain.txt');
+    const encPath = path.join(TEST_DIR, 'p5-tamper-enc.bin');
+    const decPath = path.join(TEST_DIR, 'p5-tamper-dec.txt');
+    writeFileSync(inputPath, 'authenticate me, or do not write anything');
+
+    try {
+      await cm.encryptFile(inputPath, encPath, TEST_PASSWORD);
+
+      // Flip one bit in the middle of the ciphertext body.
+      const enc = readFileSync(encPath);
+      const bodyIndex = Math.floor((enc.length - 16 + 66) / 2);
+      enc[bodyIndex] = (enc[bodyIndex] as number) ^ 0x01;
+      writeFileSync(encPath, enc);
+
+      let caught: unknown;
+      try {
+        await cm.decryptFile(encPath, decPath, TEST_PASSWORD);
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect((caught as InstanceType<typeof CryptoError>).code).toBe(
+        'FILE_DECRYPTION_FAILED'
+      );
+      expect((caught as InstanceType<typeof CryptoError>).type).toBe(
+        CryptoErrorType.DECRYPTION_FAILED
+      );
+
+      // One open for the encrypt, one for the failed decrypt — and BOTH
+      // handles were closed even though the second call threw.
+      expect(obs.opensByPath).toEqual([inputPath, encPath]);
+      expect(obs.closes).toBe(2);
+      expect(obs.closeErrors).toEqual([]);
+      expect(obs.pathReadStreams).toBe(0);
+
+      // The unauthenticated plaintext must never reach the caller's path,
+      // and no temp file may survive.
+      expect(existsSync(decPath)).toBe(false);
+      expect(strayTemps(decPath)).toHaveLength(0);
+    } finally {
+      for (const p of [inputPath, encPath, decPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
+
+  it('encryptFile: a progress callback that throws on the first chunk keeps its identity, closes the handle, and leaves no .tmp', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    class CallerAbort extends Error {}
+    const sentinel = new CallerAbort('caller aborted from progress callback');
+
+    const inputPath = path.join(TEST_DIR, 'p5-progress-plain.bin');
+    const outputPath = path.join(TEST_DIR, 'p5-progress-enc.bin');
+    writeFileSync(inputPath, nodeCrypto.randomBytes(200 * 1024));
+
+    try {
+      let calls = 0;
+      let caught: unknown;
+      try {
+        await cm.encryptFile(inputPath, outputPath, TEST_PASSWORD, () => {
+          calls += 1;
+          // Event 1 is the (0, total) priming event; throw on the first
+          // real data chunk so the failure lands mid-stream.
+          if (calls >= 2) throw sentinel;
+        });
+      } catch (e) {
+        caught = e;
+      }
+
+      // Identity, not a wrapped CryptoError.
+      expect(caught).toBe(sentinel);
+
+      expect(obs.opensByPath).toEqual([inputPath]);
+      expect(obs.handleReadStreams).toBe(1);
+      expect(obs.closes).toBe(1);
+      expect(obs.closeErrors).toEqual([]);
+      expect(obs.pathReadStreams).toBe(0);
+
+      expect(existsSync(outputPath)).toBe(false);
+      expect(strayTemps(outputPath)).toHaveLength(0);
+      // Nothing anywhere in the scratch directory is a leftover temp.
+      expect(readdirSync(TEST_DIR).filter(e => e.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      for (const p of [inputPath, outputPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
+
+  // A close failure on the READ-ONLY input handle is benign: every byte has
+  // already been read, encrypted/authenticated, and written. Letting it
+  // propagate out of the `finally` would (a) skip `atomicRename` and send the
+  // outer catch to `safeUnlink(tempPath)`, destroying a complete and valid
+  // output, and (b) on a failure path, replace the in-flight exception. The
+  // sync twins already encode this rule — `encryptFileSync` / `decryptFileSync`
+  // wrap `closeSync(inputFd)` best-effort with exactly that rationale — so the
+  // async paths must not diverge from it.
+
+  it('encryptFile: a failing input-handle close does not discard the completed ciphertext', async () => {
+    const obs = installHandleObserver({ failCloseOnHandle: 1 });
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-closefail-plain.txt');
+    const outputPath = path.join(TEST_DIR, 'p5-closefail-enc.bin');
+    const decPath = path.join(TEST_DIR, 'p5-closefail-dec.txt');
+    const plaintext = 'a benign close failure must not cost me my ciphertext';
+    writeFileSync(inputPath, plaintext);
+
+    try {
+      // Must NOT throw: the work was finished before the close was attempted.
+      await expect(
+        cm.encryptFile(inputPath, outputPath, TEST_PASSWORD)
+      ).resolves.toBeUndefined();
+
+      expect(obs.injectedCloseFailures).toBe(1);
+
+      // The canonical output exists, is the promoted temp file, and is a
+      // genuinely decryptable ciphertext — not a truncated fragment.
+      expect(existsSync(outputPath)).toBe(true);
+      expect(strayTemps(outputPath)).toHaveLength(0);
+
+      await cm.decryptFile(outputPath, decPath, TEST_PASSWORD);
+      expect(readFileSync(decPath, 'utf8')).toBe(plaintext);
+    } finally {
+      for (const p of [inputPath, outputPath, decPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
+
+  it('decryptFile: a failing input-handle close does not mask the authentication failure', async () => {
+    // Handle #1 is the encrypt input; handle #2 is the tampered ciphertext
+    // whose close is made to fail while a GCM authentication error is already
+    // in flight. The caller must still be told authentication failed.
+    const obs = installHandleObserver({ failCloseOnHandle: 2 });
+    const { CryptoManager } = await import('../crypto-manager');
+    const { CryptoError } = await import('../types');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    const inputPath = path.join(TEST_DIR, 'p5-closemask-plain.txt');
+    const encPath = path.join(TEST_DIR, 'p5-closemask-enc.bin');
+    const decPath = path.join(TEST_DIR, 'p5-closemask-dec.txt');
+    writeFileSync(inputPath, 'the auth error must survive the close failure');
+
+    try {
+      await cm.encryptFile(inputPath, encPath, TEST_PASSWORD);
+
+      const enc = readFileSync(encPath);
+      const bodyIndex = Math.floor((enc.length - 16 + 66) / 2);
+      enc[bodyIndex] = (enc[bodyIndex] as number) ^ 0x01;
+      writeFileSync(encPath, enc);
+
+      let caught: unknown;
+      try {
+        await cm.decryptFile(encPath, decPath, TEST_PASSWORD);
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(obs.injectedCloseFailures).toBe(1);
+      expect(caught).toBeInstanceOf(CryptoError);
+      const err = caught as InstanceType<typeof CryptoError>;
+      expect(err.code).toBe('FILE_DECRYPTION_FAILED');
+      // The negative that matters: the close failure must NOT have replaced
+      // the authentication failure as the reported cause.
+      expect(err.message).not.toContain('injected input-handle close failure');
+      expect(err.message).not.toContain('EIO');
+
+      expect(existsSync(decPath)).toBe(false);
+      expect(strayTemps(decPath)).toHaveLength(0);
+    } finally {
+      for (const p of [inputPath, encPath, decPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
+
+  it('decryptFile: a progress callback that throws mid-body keeps its identity, closes the handle, and leaves no .tmp', async () => {
+    const obs = installHandleObserver();
+    const { CryptoManager } = await import('../crypto-manager');
+    const cm = new CryptoManager({
+      memoryCost: 2 ** 12,
+      timeCost: 1,
+      parallelism: 1,
+    });
+
+    class CallerAbort extends Error {}
+    const sentinel = new CallerAbort('caller aborted during decrypt progress');
+
+    const inputPath = path.join(TEST_DIR, 'p5-dprogress-plain.bin');
+    const encPath = path.join(TEST_DIR, 'p5-dprogress-enc.bin');
+    const decPath = path.join(TEST_DIR, 'p5-dprogress-dec.bin');
+    writeFileSync(inputPath, nodeCrypto.randomBytes(200 * 1024));
+
+    try {
+      await cm.encryptFile(inputPath, encPath, TEST_PASSWORD);
+
+      let calls = 0;
+      let caught: unknown;
+      try {
+        await cm.decryptFile(encPath, decPath, TEST_PASSWORD, () => {
+          calls += 1;
+          if (calls >= 2) throw sentinel;
+        });
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBe(sentinel);
+
+      expect(obs.opensByPath).toEqual([inputPath, encPath]);
+      expect(obs.handleReadStreams).toBe(2);
+      expect(obs.closes).toBe(2);
+      expect(obs.closeErrors).toEqual([]);
+      expect(obs.pathReadStreams).toBe(0);
+
+      expect(existsSync(decPath)).toBe(false);
+      expect(strayTemps(decPath)).toHaveLength(0);
+      expect(readdirSync(TEST_DIR).filter(e => e.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      for (const p of [inputPath, encPath, decPath]) {
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
+  }, 30_000);
 });

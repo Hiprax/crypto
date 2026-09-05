@@ -6,6 +6,7 @@ import {
   mkdir,
   unlink,
 } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import {
   existsSync,
   writeFileSync,
@@ -17,9 +18,8 @@ import {
   fstatSync,
   readSync,
   copyFileSync,
-  statSync,
 } from 'node:fs';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { dirname } from 'node:path';
 import type { CryptoManagerOptions, ProgressCallback } from './types.js';
@@ -613,6 +613,58 @@ export class CryptoManager extends CryptoCore {
   }
 
   /**
+   * Open `inputPath` for reading, mapping a missing file to the historical
+   * `CryptoError(FILE_ERROR, 'INPUT_FILE_NOT_FOUND')` contract.
+   *
+   * This is the async counterpart of the open-first pattern `encryptFileSync`
+   * and `decryptFileSync` already use, and it exists for two reasons:
+   *
+   * 1. **No TOCTOU window.** An `existsSync` pre-check followed by a later
+   *    open answers a question about a *name* at time T and then acts on
+   *    whatever that name resolves to at time T+1. Opening directly asks the
+   *    kernel once and keeps the answer.
+   * 2. **One descriptor for the whole operation.** The returned handle serves
+   *    every subsequent read — the small positional front-matter/tag reads
+   *    AND the body stream, via {@link FileHandle.createReadStream} — so an
+   *    operation performs exactly one name lookup and pins exactly one inode.
+   *    Previously the body was streamed by re-resolving `inputPath`, which
+   *    could land on a different file than the one whose header was parsed.
+   *
+   * Any error other than `ENOENT` propagates unchanged (`EACCES`, `EISDIR`,
+   * `ELOOP`, …) so the caller's outer catch wraps it as `FILE_*_FAILED`,
+   * exactly as before.
+   *
+   * **Lifecycle contract for callers:** close the returned handle
+   * unconditionally in a `finally`. `FileHandle.close()` is idempotent (a
+   * second call resolves against the same settled close and issues no second
+   * `close(2)`, so it can never close a recycled descriptor), and a stream
+   * derived from the handle with the default `autoClose: true` only closes it
+   * on `end`/`error` — neither of which fires for a stream that is
+   * constructed but never consumed. An ownership flag that skips the close
+   * when a stream was created therefore leaks the descriptor; an
+   * unconditional close does not.
+   *
+   * Wrap that close best-effort (`try { await h.close(); } catch {}`), as the
+   * sync paths do for `closeSync(inputFd)`: the handle is read-only, so a
+   * close failure costs nothing, whereas letting it escape a `finally` would
+   * discard already-completed output and mask the exception in flight.
+   */
+  private async openInputHandle(inputPath: string): Promise<FileHandle> {
+    try {
+      return await fsOpen(inputPath, 'r');
+    } catch (openErr) {
+      if ((openErr as Error & { code?: string }).code === 'ENOENT') {
+        throw new CryptoError(
+          `Input file does not exist: ${inputPath}`,
+          CryptoErrorType.FILE_ERROR,
+          'INPUT_FILE_NOT_FOUND'
+        );
+      }
+      throw openErr;
+    }
+  }
+
+  /**
    * Invoke a {@link ProgressCallback} for a single progress event.
    *
    * **Throw-propagation policy (Option A — "honest abort"):** if the supplied
@@ -1049,239 +1101,273 @@ export class CryptoManager extends CryptoCore {
     let tempPath: string | null = null;
     let key: Buffer | null = null;
 
+    // Assigned from the input handle's own `stat()` below; read again after
+    // the handle has been closed for the final progress event.
+    let totalBytes: number;
+
     try {
-      // Check if input file exists
-      if (!existsSync(inputPath)) {
-        throw new CryptoError(
-          `Input file does not exist: ${inputPath}`,
-          CryptoErrorType.FILE_ERROR,
-          'INPUT_FILE_NOT_FOUND'
-        );
-      }
-
-      // Stat the input now so the progress callback receives a stable
-      // `totalBytes` for every event (race-free against external writers
-      // is impossible without exclusive open, but we at least lock in the
-      // value we'll report).
-      const totalBytes = statSync(inputPath).size;
-
-      // Ensure output directory exists
-      const outputDir = dirname(outputPath);
-      if (!existsSync(outputDir)) {
-        try {
-          await mkdir(outputDir, { recursive: true });
-        } catch (dirError) {
-          throw new CryptoError(
-            `Cannot create output directory: ${dirError instanceof Error ? dirError.message : 'Unknown error'}`,
-            CryptoErrorType.FILE_ERROR,
-            'OUTPUT_DIR_CREATION_FAILED'
-          );
-        }
-      }
-
-      // Allocate a sibling temp path; we only rename to outputPath on success.
-      tempPath = this.buildTempOutputPath(outputPath);
-
-      // Generate salt and IV
-      const salt = this.generateSecureRandom(this.saltLength);
-      const iv = this.generateSecureRandom(this.ivLength);
-
-      // Derive key from password
-      key = await this.deriveKey(finalPassword, salt);
-
-      // Build v1 header for the Argon2id KDF used by async file encryption.
-      const versionHeader = this.buildHeader(KDF_ID_ARGON2ID);
-
-      // Emit an initial 0/total event so callers can prime UI even on
-      // empty files (where the data event never fires). We invoke this
-      // BEFORE opening the temp output file: a throwing callback at this
-      // point would otherwise leave the write-stream's underlying file
-      // descriptor open, which on Windows blocks the subsequent
-      // safeUnlink in the catch block and leaves an orphan tmp file
-      // behind.
-      this.invokeProgress(progress, 0, totalBytes);
-
-      // Create encryption transform stream. AAD binds the on-disk v1
-      // header bytes so any tampering with the header (including
-      // reserved-byte regions) flips the GCM tag and decryption fails.
-      const cipher = crypto.createCipheriv(
-        this.algorithm,
-        key,
-        iv
-      ) as crypto.CipherGCM;
-      cipher.setAAD(this.aadForV1(versionHeader));
-
-      // Open the temp output file once and stream everything through it.
-      const outputStream = createWriteStream(tempPath, { flags: 'w' });
-
-      // Persistent stream-error guard for the lifetime of this operation.
-      // Records the first stream 'error' event so subsequent writeChunk
-      // calls fail fast, and rejects any writeChunk that is currently
-      // waiting for 'drain' (so the promise never hangs). Multiple 'error'
-      // listeners on a stream are fine — pipeline() attaches its own and
-      // they coexist independently.
-      let streamError: Error | null = null;
-      let pendingChunkReject: ((err: Error) => void) | null = null;
-      const onStreamError = (err: Error): void => {
-        streamError = err;
-        if (pendingChunkReject !== null) {
-          const rej = pendingChunkReject;
-          pendingChunkReject = null;
-          rej(err);
-        }
-      };
-      outputStream.on('error', onStreamError);
-
-      // Helper to await a single write that may apply backpressure. We need
-      // this for the upfront [v1 header][salt][iv] prefix and for the
-      // trailing auth tag — pipeline() handles the body for us but it
-      // doesn't know about these out-of-band writes.
-      //
-      // Guarantees: the promise settles exactly once (idempotent
-      // settleOnce guard); all transient 'drain' listeners are removed on
-      // settle; a stream 'error' always rejects rather than crashing the
-      // process (unhandled-error) or hanging (drain never fires after an
-      // error). The ok===true path no longer resolves synchronously before
-      // the write callback — that was the root cause of the silent-drop bug.
-      const writeChunk = (chunk: Buffer): Promise<void> =>
-        new Promise<void>((resolve, reject) => {
-          // Fail fast if the stream already errored before this call.
-          if (streamError !== null) {
-            reject(streamError);
-            return;
-          }
-
-          let settled = false;
-          let drainListener: (() => void) | null = null;
-
-          const settleOnce = (err?: Error | null): void => {
-            if (settled) return;
-            settled = true;
-            // Deregister from the stream-level error handler.
-            pendingChunkReject = null;
-            // Remove any 'drain' listener (safe no-op if already fired
-            // or never registered).
-            if (drainListener !== null) {
-              outputStream.removeListener('drain', drainListener);
-              drainListener = null;
-            }
-            if (err) reject(err);
-            else resolve();
-          };
-
-          // Register so onStreamError can settle us if the stream errors
-          // while we are waiting for the write callback or for 'drain'.
-          pendingChunkReject = (err): void => settleOnce(err);
-
-          const ok = outputStream.write(chunk, err => {
-            // Write callback fires when this chunk's data has been
-            // processed. For ok===true: sole settlement path. For
-            // ok===false: drain may have already settled us (idempotent).
-            settleOnce(err ?? null);
-          });
-
-          if (!ok) {
-            // Backpressured: resolve as soon as the buffer drains so the
-            // producer can resume without waiting for the write callback
-            // (which arrives after drain). The write callback's
-            // settleOnce call is then a no-op.
-            drainListener = (): void => settleOnce(null);
-            outputStream.once('drain', drainListener);
-          }
-          // ok===true: the write callback (above) handles settlement.
-          // We deliberately do NOT call resolve() here synchronously —
-          // that was the bug: resolving before the callback meant a
-          // subsequent write-callback error was silently dropped, and
-          // the stream 'error' event went unhandled (process crash).
-        });
+      // Open the input exactly once. ENOENT becomes the historical
+      // INPUT_FILE_NOT_FOUND error; anything else falls through to the outer
+      // catch. This replaces the old `existsSync` pre-check (a TOCTOU window)
+      // and is the same descriptor the body stream reads from below.
+      const fileHandle = await this.openInputHandle(inputPath);
 
       try {
-        // Header: [v1 header][salt][iv]
-        await writeChunk(Buffer.concat([versionHeader, salt, iv]));
+        // Size comes from the OPEN handle, not a second name lookup: same
+        // inode, no intervening rename/replace. The progress callback then
+        // receives a stable `totalBytes` for every event.
+        totalBytes = (await fileHandle.stat()).size;
 
-        // Body: stream input -> cipher -> output. The cipher is a Transform,
-        // so pipeline() handles backpressure and will reject if any stage
-        // errors out, leaving the temp file truncated (we delete it below).
-        const inputStream = createReadStream(inputPath);
+        // Ensure output directory exists
+        const outputDir = dirname(outputPath);
+        if (!existsSync(outputDir)) {
+          try {
+            await mkdir(outputDir, { recursive: true });
+          } catch (dirError) {
+            throw new CryptoError(
+              `Cannot create output directory: ${dirError instanceof Error ? dirError.message : 'Unknown error'}`,
+              CryptoErrorType.FILE_ERROR,
+              'OUTPUT_DIR_CREATION_FAILED'
+            );
+          }
+        }
 
-        // Attach the progress listener BEFORE pipeline() so we never miss a
-        // chunk. We accumulate `chunk.length` from the readable side
-        // (plaintext bytes consumed); the cipher's output size differs from
-        // the input due to GCM block padding, but reporting plaintext
-        // progress is what callers expect ("how much of MY file have you
-        // processed").
-        let bytesProcessed = 0;
-        let progressError: unknown = undefined;
-        if (progress !== undefined) {
-          inputStream.on('data', (chunk: Buffer | string) => {
-            // If a previous chunk's callback already threw, skip further
-            // invocations — the input stream is being torn down and we
-            // do not want to dispatch a second event into a callback the
-            // caller has already failed.
-            if (progressError !== undefined) {
+        // Allocate a sibling temp path; we only rename to outputPath on success.
+        tempPath = this.buildTempOutputPath(outputPath);
+
+        // Generate salt and IV
+        const salt = this.generateSecureRandom(this.saltLength);
+        const iv = this.generateSecureRandom(this.ivLength);
+
+        // Derive key from password
+        key = await this.deriveKey(finalPassword, salt);
+
+        // Build v1 header for the Argon2id KDF used by async file encryption.
+        const versionHeader = this.buildHeader(KDF_ID_ARGON2ID);
+
+        // Emit an initial 0/total event so callers can prime UI even on
+        // empty files (where the data event never fires). We invoke this
+        // BEFORE opening the temp output file: a throwing callback at this
+        // point would otherwise leave the write-stream's underlying file
+        // descriptor open, which on Windows blocks the subsequent
+        // safeUnlink in the catch block and leaves an orphan tmp file
+        // behind.
+        this.invokeProgress(progress, 0, totalBytes);
+
+        // Create encryption transform stream. AAD binds the on-disk v1
+        // header bytes so any tampering with the header (including
+        // reserved-byte regions) flips the GCM tag and decryption fails.
+        const cipher = crypto.createCipheriv(
+          this.algorithm,
+          key,
+          iv
+        ) as crypto.CipherGCM;
+        cipher.setAAD(this.aadForV1(versionHeader));
+
+        // Open the temp output file once and stream everything through it.
+        const outputStream = createWriteStream(tempPath, { flags: 'w' });
+
+        // Persistent stream-error guard for the lifetime of this operation.
+        // Records the first stream 'error' event so subsequent writeChunk
+        // calls fail fast, and rejects any writeChunk that is currently
+        // waiting for 'drain' (so the promise never hangs). Multiple 'error'
+        // listeners on a stream are fine — pipeline() attaches its own and
+        // they coexist independently.
+        let streamError: Error | null = null;
+        let pendingChunkReject: ((err: Error) => void) | null = null;
+        const onStreamError = (err: Error): void => {
+          streamError = err;
+          if (pendingChunkReject !== null) {
+            const rej = pendingChunkReject;
+            pendingChunkReject = null;
+            rej(err);
+          }
+        };
+        outputStream.on('error', onStreamError);
+
+        // Helper to await a single write that may apply backpressure. We need
+        // this for the upfront [v1 header][salt][iv] prefix and for the
+        // trailing auth tag — pipeline() handles the body for us but it
+        // doesn't know about these out-of-band writes.
+        //
+        // Guarantees: the promise settles exactly once (idempotent
+        // settleOnce guard); all transient 'drain' listeners are removed on
+        // settle; a stream 'error' always rejects rather than crashing the
+        // process (unhandled-error) or hanging (drain never fires after an
+        // error). The ok===true path no longer resolves synchronously before
+        // the write callback — that was the root cause of the silent-drop bug.
+        const writeChunk = (chunk: Buffer): Promise<void> =>
+          new Promise<void>((resolve, reject) => {
+            // Fail fast if the stream already errored before this call.
+            if (streamError !== null) {
+              reject(streamError);
               return;
             }
-            const len =
-              typeof chunk === 'string'
-                ? Buffer.byteLength(chunk)
-                : chunk.length;
-            bytesProcessed += len;
-            // If the callback throws, capture the error and destroy the
-            // input stream. pipeline() then rejects with the destroy
-            // reason, the cipher and output stream are torn down, and the
-            // outer catch handles temp-file cleanup. We tag the captured
-            // error so the catch block can re-throw it (preserving the
-            // caller's identity) instead of wrapping it as a generic
-            // FILE_ENCRYPTION_FAILED.
-            try {
-              progress(bytesProcessed, totalBytes);
-            } catch (err) {
-              progressError = tagProgressThrow(err);
-              inputStream.destroy(
-                err instanceof Error ? err : new Error(String(err))
-              );
+
+            let settled = false;
+            let drainListener: (() => void) | null = null;
+
+            const settleOnce = (err?: Error | null): void => {
+              if (settled) return;
+              settled = true;
+              // Deregister from the stream-level error handler.
+              pendingChunkReject = null;
+              // Remove any 'drain' listener (safe no-op if already fired
+              // or never registered).
+              if (drainListener !== null) {
+                outputStream.removeListener('drain', drainListener);
+                drainListener = null;
+              }
+              if (err) reject(err);
+              else resolve();
+            };
+
+            // Register so onStreamError can settle us if the stream errors
+            // while we are waiting for the write callback or for 'drain'.
+            pendingChunkReject = (err): void => settleOnce(err);
+
+            const ok = outputStream.write(chunk, err => {
+              // Write callback fires when this chunk's data has been
+              // processed. For ok===true: sole settlement path. For
+              // ok===false: drain may have already settled us (idempotent).
+              settleOnce(err ?? null);
+            });
+
+            if (!ok) {
+              // Backpressured: resolve as soon as the buffer drains so the
+              // producer can resume without waiting for the write callback
+              // (which arrives after drain). The write callback's
+              // settleOnce call is then a no-op.
+              drainListener = (): void => settleOnce(null);
+              outputStream.once('drain', drainListener);
             }
+            // ok===true: the write callback (above) handles settlement.
+            // We deliberately do NOT call resolve() here synchronously —
+            // that was the bug: resolving before the callback meant a
+            // subsequent write-callback error was silently dropped, and
+            // the stream 'error' event went unhandled (process crash).
           });
-        }
 
         try {
-          await pipeline(inputStream, cipher, outputStream, { end: false });
-        } catch (pipelineError) {
-          // If the pipeline rejection was triggered by our destroy() call
-          // above, surface the original callback throw rather than the
-          // (less informative) "stream destroyed" wrapper.
-          if (progressError !== undefined) {
-            throw progressError;
+          // Header: [v1 header][salt][iv]
+          await writeChunk(Buffer.concat([versionHeader, salt, iv]));
+
+          // Body: stream input -> cipher -> output. The cipher is a Transform,
+          // so pipeline() handles backpressure and will reject if any stage
+          // errors out, leaving the temp file truncated (we delete it below).
+          //
+          // The stream reads from the handle we already opened, so the bytes
+          // encrypted are the bytes of the inode we stat'd — a second
+          // `createReadStream(inputPath)` would re-resolve the name and could
+          // land on a different file. `start: 0` is explicit and load-bearing:
+          // a bare `createReadStream()` reads from the handle's CURRENT
+          // position, so any non-positional read added above this line in
+          // future would silently truncate the plaintext.
+          const inputStream = fileHandle.createReadStream({ start: 0 });
+
+          // Attach the progress listener BEFORE pipeline() so we never miss a
+          // chunk. We accumulate `chunk.length` from the readable side
+          // (plaintext bytes consumed); the cipher's output size differs from
+          // the input due to GCM block padding, but reporting plaintext
+          // progress is what callers expect ("how much of MY file have you
+          // processed").
+          let bytesProcessed = 0;
+          let progressError: unknown = undefined;
+          if (progress !== undefined) {
+            inputStream.on('data', (chunk: Buffer | string) => {
+              // If a previous chunk's callback already threw, skip further
+              // invocations — the input stream is being torn down and we
+              // do not want to dispatch a second event into a callback the
+              // caller has already failed.
+              if (progressError !== undefined) {
+                return;
+              }
+              const len =
+                typeof chunk === 'string'
+                  ? Buffer.byteLength(chunk)
+                  : chunk.length;
+              bytesProcessed += len;
+              // If the callback throws, capture the error and destroy the
+              // input stream. pipeline() then rejects with the destroy
+              // reason, the cipher and output stream are torn down, and the
+              // outer catch handles temp-file cleanup. We tag the captured
+              // error so the catch block can re-throw it (preserving the
+              // caller's identity) instead of wrapping it as a generic
+              // FILE_ENCRYPTION_FAILED.
+              try {
+                progress(bytesProcessed, totalBytes);
+              } catch (err) {
+                progressError = tagProgressThrow(err);
+                inputStream.destroy(
+                  err instanceof Error ? err : new Error(String(err))
+                );
+              }
+            });
           }
-          throw pipelineError;
+
+          try {
+            await pipeline(inputStream, cipher, outputStream, { end: false });
+          } catch (pipelineError) {
+            // If the pipeline rejection was triggered by our destroy() call
+            // above, surface the original callback throw rather than the
+            // (less informative) "stream destroyed" wrapper.
+            if (progressError !== undefined) {
+              throw progressError;
+            }
+            throw pipelineError;
+          }
+
+          // Trailing auth tag.
+          await writeChunk(cipher.getAuthTag());
+        } finally {
+          // Close without rejecting — a close/flush error is captured by
+          // onStreamError and re-thrown below. Rejecting here would mask an
+          // in-flight error (a throw in `finally` replaces the current
+          // exception). Skip end() on an already-destroyed stream to avoid
+          // ERR_STREAM_DESTROYED; with the persistent 'error' listener
+          // attached, end(cb) still fires its callback on a failed-open
+          // stream, so this path neither hangs nor crashes the process.
+          if (!outputStream.destroyed) {
+            await new Promise<void>(resolve => {
+              outputStream.end(() => resolve());
+            });
+          }
+          // Remove the persistent error listener now that the stream is
+          // closed — prevents a dangling reference on the (now-closed)
+          // stream object.
+          outputStream.removeListener('error', onStreamError);
         }
 
-        // Trailing auth tag.
-        await writeChunk(cipher.getAuthTag());
+        // Surface any stream error captured by onStreamError that was not
+        // already thrown by writeChunk or pipeline (belt-and-suspenders;
+        // on the success path streamError is null — no-op).
+        if (streamError !== null) {
+          throw streamError;
+        }
       } finally {
-        // Close without rejecting — a close/flush error is captured by
-        // onStreamError and re-thrown below. Rejecting here would mask an
-        // in-flight error (a throw in `finally` replaces the current
-        // exception). Skip end() on an already-destroyed stream to avoid
-        // ERR_STREAM_DESTROYED; with the persistent 'error' listener
-        // attached, end(cb) still fires its callback on a failed-open
-        // stream, so this path neither hangs nor crashes the process.
-        if (!outputStream.destroyed) {
-          await new Promise<void>(resolve => {
-            outputStream.end(() => resolve());
-          });
+        // Unconditional, not conditional on whether a stream was created.
+        // `FileHandle.close()` is idempotent — after the body stream ends
+        // with the default `autoClose: true` the handle already reports
+        // `fd === -1`, so this issues no second `close(2)` and cannot touch
+        // a recycled descriptor. Skipping the close whenever a stream exists
+        // would instead LEAK the descriptor in the case where a stream is
+        // constructed but never consumed or destroyed: `autoClose` only fires
+        // on `end`/`error`, and neither happens then. Every early throw above
+        // — a failed `stat()`, OUTPUT_DIR_CREATION_FAILED, a KDF failure, a
+        // throwing progress callback — lands here too.
+        //
+        // Best-effort, exactly like `closeSync(inputFd)` in `encryptFileSync`:
+        // the input is read-only and, on the success path, every byte has
+        // already been encrypted, authenticated and written, so a rare
+        // EIO/EBADF here must not (a) skip the `atomicRename` below and send
+        // the outer catch to `safeUnlink(tempPath)`, destroying a complete
+        // ciphertext, or (b) replace an exception that is already in flight —
+        // a throw in a `finally` supersedes the current one.
+        try {
+          await fileHandle.close();
+        } catch {
+          // ignore — benign close failure on a read-only input handle
         }
-        // Remove the persistent error listener now that the stream is
-        // closed — prevents a dangling reference on the (now-closed)
-        // stream object.
-        outputStream.removeListener('error', onStreamError);
-      }
-
-      // Surface any stream error captured by onStreamError that was not
-      // already thrown by writeChunk or pipeline (belt-and-suspenders;
-      // on the success path streamError is null — no-op).
-      if (streamError !== null) {
-        throw streamError;
       }
 
       // Atomically promote the temp file to the final output path.
@@ -1399,49 +1485,54 @@ export class CryptoManager extends CryptoCore {
     let tempPath: string | null = null;
     let key: Buffer | null = null;
 
+    // All assigned inside the input-handle block below and read after it has
+    // been closed (the final progress event and the key/salt/iv/tag scrub).
+    let totalSize: number;
+    let salt: Buffer;
+    let iv: Buffer;
+    let tag: Buffer;
+
     try {
-      // Check if input file exists
-      if (!existsSync(inputPath)) {
-        throw new CryptoError(
-          `Input file does not exist: ${inputPath}`,
-          CryptoErrorType.FILE_ERROR,
-          'INPUT_FILE_NOT_FOUND'
-        );
-      }
+      // Open the input exactly once, up front. ENOENT becomes the historical
+      // INPUT_FILE_NOT_FOUND error; anything else falls through to the outer
+      // catch. This replaces the old `existsSync` pre-check (a TOCTOU window)
+      // AND the second `createReadStream(inputPath)` that used to re-resolve
+      // the name for the body: every read below — the front matter, the
+      // trailing tag, and the ciphertext body — is served from THIS handle,
+      // so the bytes authenticated are the bytes of the inode whose header
+      // was parsed.
+      //
+      // Opening before the output directory is created preserves the previous
+      // failure ordering: a missing input still aborts without creating any
+      // directory.
+      const fileHandle = await this.openInputHandle(inputPath);
 
-      // Ensure output directory exists
-      const outputDir = dirname(outputPath);
-      if (!existsSync(outputDir)) {
-        try {
-          await mkdir(outputDir, { recursive: true });
-        } catch (dirError) {
-          throw new CryptoError(
-            `Cannot create output directory: ${dirError instanceof Error ? dirError.message : 'Unknown error'}`,
-            CryptoErrorType.FILE_ERROR,
-            'OUTPUT_DIR_CREATION_FAILED'
-          );
-        }
-      }
-
-      // Read just the metadata regions of the file (header + salt + iv at
-      // the front, auth tag at the back) without loading the body. We open
-      // the file once, do all small reads, then close the handle so the
-      // subsequent createReadStream can take its own.
-      const fileHandle = await fsOpen(inputPath, 'r');
-      let totalSize: number;
       let formatHeaderLen: number;
       let argonOverrides:
         | { memoryCost: number; timeCost: number; parallelism: number }
         | undefined;
-      let salt: Buffer;
-      let iv: Buffer;
-      let tag: Buffer;
       // For v1 ciphertexts, capture the on-disk header bytes verbatim so we
       // can include them in the AES-GCM AAD. Re-serialising via packHeader
       // would zero-fill reserved regions, hiding any tampering — see
       // decryptText for the full rationale.
       let headerForAad: Buffer | null = null;
       try {
+        // Ensure output directory exists
+        const outputDir = dirname(outputPath);
+        if (!existsSync(outputDir)) {
+          try {
+            await mkdir(outputDir, { recursive: true });
+          } catch (dirError) {
+            throw new CryptoError(
+              `Cannot create output directory: ${dirError instanceof Error ? dirError.message : 'Unknown error'}`,
+              CryptoErrorType.FILE_ERROR,
+              'OUTPUT_DIR_CREATION_FAILED'
+            );
+          }
+        }
+
+        // Read just the metadata regions of the file (header + salt + iv at
+        // the front, auth tag at the back) without loading the body.
         const stat = await fileHandle.stat();
         totalSize = stat.size;
 
@@ -1554,159 +1645,190 @@ export class CryptoManager extends CryptoCore {
             'INVALID_ENCRYPTED_FILE_SIZE'
           );
         }
-      } finally {
-        await fileHandle.close();
-      }
 
-      // Compute the byte range of the ciphertext body.
-      const bodyStart = formatHeaderLen + this.saltLength + this.ivLength;
-      const bodyEnd = totalSize - this.tagLength; // exclusive
-      const bodyLen = bodyEnd - bodyStart;
+        // Compute the byte range of the ciphertext body.
+        const bodyStart = formatHeaderLen + this.saltLength + this.ivLength;
+        const bodyEnd = totalSize - this.tagLength; // exclusive
+        const bodyLen = bodyEnd - bodyStart;
 
-      // Derive key from password (use embedded params if v1). Re-type any
-      // KDF failure to DECRYPTION_FAILED — this is a decrypt op.
-      try {
-        key = await this.deriveKey(finalPassword, salt, argonOverrides);
-      } catch (err) {
-        throw this.remapKdfErrorForDecryption(err);
-      }
+        // Derive key from password (use embedded params if v1). Re-type any
+        // KDF failure to DECRYPTION_FAILED — this is a decrypt op.
+        try {
+          key = await this.deriveKey(finalPassword, salt, argonOverrides);
+        } catch (err) {
+          throw this.remapKdfErrorForDecryption(err);
+        }
 
-      // Allocate a sibling temp path; only rename on success.
-      tempPath = this.buildTempOutputPath(outputPath);
+        // Allocate a sibling temp path; only rename on success.
+        tempPath = this.buildTempOutputPath(outputPath);
 
-      // Create the decipher and bind AAD and auth tag BEFORE writing any
-      // ciphertext to it. The tag is read from the trailing bytes of the
-      // input but must be set before decipher.update() so that a tampered
-      // body fails authentication at decipher.final().
-      //
-      // For v1 ciphertexts, AAD includes the on-disk header bytes verbatim
-      // (so any tampering with the header — including the reserved bytes
-      // — flips the GCM tag and decryption fails). For v0 ciphertexts
-      // (no header) the AAD is just `this.aad` to preserve backward
-      // compatibility with pre-v1 ciphertexts.
-      const decipher = crypto.createDecipheriv(
-        this.algorithm,
-        key,
-        iv
-      ) as crypto.DecipherGCM;
-      const decipherAad =
-        headerForAad === null ? this.aad : this.aadForV1(headerForAad);
-      decipher.setAAD(decipherAad);
-      decipher.setAuthTag(tag);
+        // Create the decipher and bind AAD and auth tag BEFORE writing any
+        // ciphertext to it. The tag is read from the trailing bytes of the
+        // input but must be set before decipher.update() so that a tampered
+        // body fails authentication at decipher.final().
+        //
+        // For v1 ciphertexts, AAD includes the on-disk header bytes verbatim
+        // (so any tampering with the header — including the reserved bytes
+        // — flips the GCM tag and decryption fails). For v0 ciphertexts
+        // (no header) the AAD is just `this.aad` to preserve backward
+        // compatibility with pre-v1 ciphertexts.
+        const decipher = crypto.createDecipheriv(
+          this.algorithm,
+          key,
+          iv
+        ) as crypto.DecipherGCM;
+        const decipherAad =
+          headerForAad === null ? this.aad : this.aadForV1(headerForAad);
+        decipher.setAAD(decipherAad);
+        decipher.setAuthTag(tag);
 
-      // Initial progress event — a literal `(0, totalSize)` start sentinel,
-      // matching the `decryptFileSync` contract. The metadata bytes
-      // (header + salt + iv + tag) have already been read off disk by this
-      // point, but we report `0` so callers can use the first event as a
-      // deterministic start marker; per-chunk events (via the `data` event
-      // on the body read stream) report `consumedFrontAndTag + bodyConsumed`
-      // bytes, and the final event reports `(totalSize, totalSize)`.
-      const consumedFrontAndTag =
-        bodyStart + this.tagLength; /* bytes already read from input */
-      this.invokeProgress(progress, 0, totalSize);
+        // Initial progress event — a literal `(0, totalSize)` start sentinel,
+        // matching the `decryptFileSync` contract. The metadata bytes
+        // (header + salt + iv + tag) have already been read off disk by this
+        // point, but we report `0` so callers can use the first event as a
+        // deterministic start marker; per-chunk events (via the `data` event
+        // on the body read stream) report `consumedFrontAndTag + bodyConsumed`
+        // bytes, and the final event reports `(totalSize, totalSize)`.
+        const consumedFrontAndTag =
+          bodyStart + this.tagLength; /* bytes already read from input */
+        this.invokeProgress(progress, 0, totalSize);
 
-      // Stream the body bytes through the decipher into the temp file. We
-      // bound the read to [bodyStart, bodyEnd) so the trailing tag is not
-      // fed back into update(). For empty bodies (bodyLen === 0) we skip
-      // the read stream and just call decipher.final() to authenticate.
-      const outputStream = createWriteStream(tempPath, { flags: 'w' });
+        // Stream the body bytes through the decipher into the temp file. We
+        // bound the read to [bodyStart, bodyEnd) so the trailing tag is not
+        // fed back into update(). For empty bodies (bodyLen === 0) we skip
+        // the read stream and just call decipher.final() to authenticate.
+        const outputStream = createWriteStream(tempPath, { flags: 'w' });
 
-      // Persistent stream-error guard for the output stream's lifetime.
-      // Without this, an 'error' event on outputStream with no listener
-      // (e.g. a failed file-open when tempPath's parent is actually a
-      // regular file → ENOTDIR) causes Node to raise ERR_UNHANDLED_ERROR
-      // and crash the host process. With the listener, the error is
-      // captured in streamError and re-thrown explicitly after the finally
-      // so the outer catch can clean up the temp file and wrap it as
-      // FILE_DECRYPTION_FAILED. This mirrors the onStreamError guard that
-      // encryptFile has had since v1.4.0 (Phase 2 of the v1.4.0 plan).
-      let streamError: Error | null = null;
-      const onStreamError = (err: Error): void => {
-        if (streamError === null) streamError = err;
-      };
-      outputStream.on('error', onStreamError);
+        // Persistent stream-error guard for the output stream's lifetime.
+        // Without this, an 'error' event on outputStream with no listener
+        // (e.g. a failed file-open when tempPath's parent is actually a
+        // regular file → ENOTDIR) causes Node to raise ERR_UNHANDLED_ERROR
+        // and crash the host process. With the listener, the error is
+        // captured in streamError and re-thrown explicitly after the finally
+        // so the outer catch can clean up the temp file and wrap it as
+        // FILE_DECRYPTION_FAILED. This mirrors the onStreamError guard that
+        // encryptFile has had since v1.4.0 (Phase 2 of the v1.4.0 plan).
+        let streamError: Error | null = null;
+        const onStreamError = (err: Error): void => {
+          if (streamError === null) streamError = err;
+        };
+        outputStream.on('error', onStreamError);
 
-      try {
-        if (bodyLen > 0) {
-          const inputStream = createReadStream(inputPath, {
-            start: bodyStart,
-            end: bodyEnd - 1, // createReadStream end is INCLUSIVE
-          });
-
-          // Attach the progress listener BEFORE pipeline() so we never miss
-          // a chunk. We accumulate ciphertext-body bytes consumed; the
-          // reported `bytesProcessed` is `consumedFrontAndTag + bodyConsumed`
-          // so the value monotonically grows from `consumedFrontAndTag` to
-          // `totalSize` over the streaming portion.
-          let bodyConsumed = 0;
-          let progressError: unknown = undefined;
-          if (progress !== undefined) {
-            inputStream.on('data', (chunk: Buffer | string) => {
-              if (progressError !== undefined) {
-                return;
-              }
-              const len =
-                typeof chunk === 'string'
-                  ? Buffer.byteLength(chunk)
-                  : chunk.length;
-              bodyConsumed += len;
-              try {
-                progress(consumedFrontAndTag + bodyConsumed, totalSize);
-              } catch (err) {
-                progressError = tagProgressThrow(err);
-                inputStream.destroy(
-                  err instanceof Error ? err : new Error(String(err))
-                );
-              }
+        try {
+          if (bodyLen > 0) {
+            // Stream the body from the SAME handle the header and tag were
+            // read from — no second name resolution, so the body cannot come
+            // from a file that replaced `inputPath` mid-operation.
+            const inputStream = fileHandle.createReadStream({
+              start: bodyStart,
+              end: bodyEnd - 1, // createReadStream end is INCLUSIVE
             });
-          }
 
-          try {
-            await pipeline(inputStream, decipher, outputStream, {
-              end: false,
-            });
-          } catch (pipelineError) {
-            if (progressError !== undefined) {
-              throw progressError;
-            }
-            throw pipelineError;
-          }
-        } else {
-          // Empty plaintext: still need to drive update()/final() to
-          // verify the tag. decipher.update with zero bytes is safe;
-          // calling final() may throw if the tag is invalid.
-          const finalBuf = decipher.final();
-          if (finalBuf.length > 0) {
-            await new Promise<void>((resolve, reject) => {
-              outputStream.write(finalBuf, err => {
-                if (err) reject(err);
-                else resolve();
+            // Attach the progress listener BEFORE pipeline() so we never miss
+            // a chunk. We accumulate ciphertext-body bytes consumed; the
+            // reported `bytesProcessed` is `consumedFrontAndTag + bodyConsumed`
+            // so the value monotonically grows from `consumedFrontAndTag` to
+            // `totalSize` over the streaming portion.
+            let bodyConsumed = 0;
+            let progressError: unknown = undefined;
+            if (progress !== undefined) {
+              inputStream.on('data', (chunk: Buffer | string) => {
+                if (progressError !== undefined) {
+                  return;
+                }
+                const len =
+                  typeof chunk === 'string'
+                    ? Buffer.byteLength(chunk)
+                    : chunk.length;
+                bodyConsumed += len;
+                try {
+                  progress(consumedFrontAndTag + bodyConsumed, totalSize);
+                } catch (err) {
+                  progressError = tagProgressThrow(err);
+                  inputStream.destroy(
+                    err instanceof Error ? err : new Error(String(err))
+                  );
+                }
               });
+            }
+
+            try {
+              await pipeline(inputStream, decipher, outputStream, {
+                end: false,
+              });
+            } catch (pipelineError) {
+              if (progressError !== undefined) {
+                throw progressError;
+              }
+              throw pipelineError;
+            }
+          } else {
+            // Empty plaintext: still need to drive update()/final() to
+            // verify the tag. decipher.update with zero bytes is safe;
+            // calling final() may throw if the tag is invalid.
+            const finalBuf = decipher.final();
+            if (finalBuf.length > 0) {
+              await new Promise<void>((resolve, reject) => {
+                outputStream.write(finalBuf, err => {
+                  if (err) reject(err);
+                  else resolve();
+                });
+              });
+            }
+          }
+        } finally {
+          // Close without rejecting — a close/flush error is captured by
+          // onStreamError and re-thrown below. Rejecting here would mask an
+          // in-flight error (a throw in `finally` replaces the current
+          // exception). Skip end() on an already-destroyed stream to avoid
+          // ERR_STREAM_DESTROYED; with the persistent 'error' listener
+          // attached, end(cb) still fires its callback on a failed-open
+          // stream, so this path neither hangs nor crashes the process.
+          if (!outputStream.destroyed) {
+            await new Promise<void>(resolve => {
+              outputStream.end(() => resolve());
             });
           }
+          outputStream.removeListener('error', onStreamError);
+        }
+
+        // Surface a stream error captured by onStreamError that was not
+        // already thrown by the body pipeline (e.g. a failed temp-file open
+        // on the empty-body path where pipeline() is never called).
+        // On the success path streamError is null — this is a no-op.
+        if (streamError !== null) {
+          throw streamError;
         }
       } finally {
-        // Close without rejecting — a close/flush error is captured by
-        // onStreamError and re-thrown below. Rejecting here would mask an
-        // in-flight error (a throw in `finally` replaces the current
-        // exception). Skip end() on an already-destroyed stream to avoid
-        // ERR_STREAM_DESTROYED; with the persistent 'error' listener
-        // attached, end(cb) still fires its callback on a failed-open
-        // stream, so this path neither hangs nor crashes the process.
-        if (!outputStream.destroyed) {
-          await new Promise<void>(resolve => {
-            outputStream.end(() => resolve());
-          });
+        // Unconditional, not conditional on whether the body stream was
+        // created. `FileHandle.close()` is idempotent — once the stream has
+        // ended with the default `autoClose: true` the handle already reports
+        // `fd === -1`, so this issues no second `close(2)` and cannot touch a
+        // recycled descriptor. Skipping the close whenever a stream exists
+        // would instead LEAK the descriptor in the case where a stream is
+        // constructed but never consumed or destroyed: `autoClose` only fires
+        // on `end`/`error`, and neither happens then. It also covers the two
+        // paths that create NO stream at all — the empty-body branch
+        // (`bodyLen === 0`) and every early throw above (a short header read,
+        // OUTPUT_DIR_CREATION_FAILED, a bad KDF parameter, a KDF failure).
+        //
+        // The close sits BEFORE the atomic rename below so the input
+        // descriptor is released the moment the last byte is read, exactly as
+        // it was when the body had its own stream.
+        //
+        // Best-effort, exactly like `closeSync(inputFd)` in `decryptFileSync`:
+        // the input is read-only and, on the success path, authentication and
+        // output writing have already succeeded, so a rare EIO/EBADF here must
+        // not (a) skip the `atomicRename` below and send the outer catch to
+        // `safeUnlink(tempPath)`, destroying the validated plaintext, or
+        // (b) replace an exception that is already in flight — most
+        // importantly a GCM authentication failure, which the caller must see
+        // as such and not as an I/O error.
+        try {
+          await fileHandle.close();
+        } catch {
+          // ignore — benign close failure on a read-only input handle
         }
-        outputStream.removeListener('error', onStreamError);
-      }
-
-      // Surface a stream error captured by onStreamError that was not
-      // already thrown by the body pipeline (e.g. a failed temp-file open
-      // on the empty-body path where pipeline() is never called).
-      // On the success path streamError is null — this is a no-op.
-      if (streamError !== null) {
-        throw streamError;
       }
 
       // Atomic rename and scrub key material.

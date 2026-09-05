@@ -24,7 +24,7 @@
 - ✅ **Strong password** validation with detailed feedback
 - 🔄 **Cross-platform** compatibility
 - 📝 **Full TypeScript** support with strict typing
-- 🧪 **Comprehensive testing** with 80%+ coverage
+- 🧪 **Comprehensive testing** — 1,100+ tests across Node and real Chromium, with a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
 - 🚀 **Modern ES modules** with tree-shaking support
 - 🔒 **Security-focused** with constant-time comparisons
 - 🔑 **Default passphrase** support for simplified usage
@@ -64,7 +64,11 @@ Note: a successful first load is cached for the lifetime of the process (subsequ
 
 ### Browser build
 
-`@hiprax/crypto` is **isomorphic**: the `.` entry is a conditional export, so a browser bundler (webpack 5, Vite/Rollup, esbuild, Next.js) automatically resolves the separate browser build (`dist/index.browser.js`) while Node resolves the Node build (`dist/index.js`). The browser build's import graph contains **zero `node:` builtins** and references no `Buffer`/`process` global, so nothing like `node:crypto`/`node:fs`/`node:stream` is ever dragged into your bundle. Two complementary static gates enforce this continuously (in CI and at publish): an esbuild `platform:'browser'` bundle gate (`npm run check:browser`) fails on any `node:` specifier reaching the browser graph, and an ESLint `no-restricted-globals` (`Buffer`/`process`) + `no-restricted-imports` (`node:*`) override on the isomorphic source files catches a bare `Buffer`/`process` global that esbuild cannot see.
+`@hiprax/crypto` is **isomorphic**: the `.` entry is a conditional export, so a browser bundler (webpack 5, Vite/Rollup, esbuild, Next.js) automatically resolves the separate browser build (`dist/index.browser.js`) while Node resolves the Node build (`dist/index.js`). The browser build's import graph contains **zero `node:` builtins** and references no `Buffer`/`process` global, so nothing like `node:crypto`/`node:fs`/`node:stream` is ever dragged into your bundle. Three complementary static gates enforce this continuously (in CI and at publish), and they cover three disjoint defect classes:
+
+- `npm run check:browser` — an esbuild `platform:'browser'` bundle of the browser entry; fails on any `node:` specifier reaching the browser graph.
+- The ESLint `no-restricted-globals` (`Buffer`/`process`) + `no-restricted-imports` (`node:*`) override on the isomorphic source files — catches a bare `Buffer`/`process` **value** that esbuild cannot see, because a bundle succeeds and then `ReferenceError`s at runtime.
+- `npm run check:types:browser` — type-checks a throwaway browser-only consumer against the built `dist/`, resolved through the package's `browser` export condition with `"types": []` and `"skipLibCheck": false`. This is the only gate that can see a **type-position** Node reference: `no-restricted-globals` does not fire on `interface X { y: Buffer }` (it inspects value references only), and esbuild erases types before it ever sees them. A Node type reaching `dist/index.browser.d.ts` — or anything it re-exports — now fails the build instead of reaching your project as a `Cannot find name 'Buffer'` error.
 
 ```bash
 # The browser build needs the WASM Argon2id provider (Web Crypto has no Argon2id):
@@ -520,6 +524,8 @@ Low-level AES-256-GCM encryption. Returns `{ encrypted: Buffer, tag: Buffer }`.
 
 > **Security:** the caller is responsible for ensuring each `(key, iv)` pair is used at most once. See [AES-GCM (key, IV) reuse](#aes-gcm-key-iv-reuse--security-boundary-for-the-low-level-api) for the full explanation and recommended pattern. Prefer `encryptText` / `encryptFile` for any code that does not have a specific reason to manage IVs by hand.
 
+Throws `CryptoError(INVALID_INPUT, 'DATA_TOO_LARGE_FOR_GCM')` if `data` exceeds the AES-GCM per-invocation bound — see [The AES-GCM per-invocation size limit](#the-aes-gcm-per-invocation-size-limit).
+
 ```typescript
 const key = crypto.generateSecureRandom(32);
 const iv = crypto.generateSecureRandom(12); // fresh random IV per message
@@ -530,7 +536,7 @@ const { encrypted, tag } = crypto.encryptData(Buffer.from('data'), key, iv);
 
 Low-level AES-256-GCM decryption. Returns the decrypted data as a Buffer.
 
-The caller must supply the exact `(key, iv, tag)` that were produced by `encryptData` (and the matching `aad`, configured on the `CryptoManager` instance). Tag-check failure surfaces as `CryptoError` with code `DECRYPTION_FAILED` regardless of which condition failed (wrong key, wrong IV, wrong AAD, or tampered ciphertext) — the generic message is intentional, to avoid leaking which case applied.
+The caller must supply the exact `(key, iv, tag)` that were produced by `encryptData` (and the matching `aad`, configured on the `CryptoManager` instance). Tag-check failure surfaces as `CryptoError` with code `DECRYPTION_FAILED` regardless of which condition failed (wrong key, wrong IV, wrong AAD, or tampered ciphertext) — the generic message is intentional, to avoid leaking which case applied. A ciphertext past the AES-GCM per-invocation bound is rejected up front with `DATA_TOO_LARGE_FOR_GCM`, since no such input could have been produced correctly.
 
 ```typescript
 const decrypted = crypto.decryptData(encrypted, key, iv, tag);
@@ -584,6 +590,8 @@ const mode = crypto.getLegacyMode();
 
 Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Uint8Array` (file contents — a Node `Buffer` is a `Uint8Array`, so `Buffer` inputs keep working). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; byte inputs are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_KDF`, `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
 
+Inspecting a large ciphertext is cheap: since v1.6.0 only the first 32 base64url characters of a string input are decoded — enough for the 22-byte header with two bytes to spare — so the call allocates 24 bytes rather than a copy of the whole payload, whatever its size. The well-formedness check still scans the entire string (narrowing it would stop rejecting a malformed tail), but it does so in one allocation-free pass.
+
 > **This is a v1 inspector, not a format sniffer.** A [v2 container](#container-format-v2) reuses the same `HPCR` magic and the same 22-byte header shape, so it passes the magic check and is then rejected on its version byte: `inspectHeader` on a container **throws** `CryptoError` with type `DECRYPTION_FAILED` and code `UNSUPPORTED_VERSION`. It never returns `null` for a container, and there is no input for which it reports "v2". If the input may be either format, classify it first — see [Telling the formats apart](#telling-the-formats-apart).
 
 ### Types and Enums
@@ -612,6 +620,8 @@ import {
   type DecryptedContainer,
 } from '@hiprax/crypto';
 ```
+
+> **`EncryptionResult` is Node-only.** It describes the `{ encrypted: Buffer, tag: Buffer }` return of the low-level `encryptData`, so it names the Node `Buffer` global. As of v1.6.0 it lives in `crypto-manager.ts` rather than `types.ts` and is exported from `@hiprax/crypto` (unchanged) and, additionally, from `@hiprax/crypto/crypto-manager`. It is **not** part of the browser type surface — nothing on the browser build can produce one (`encryptData` there throws `UNSUPPORTED_IN_BROWSER`), and a browser-only TypeScript project would previously have failed to compile on the two `Buffer` references it carried. Every other name in the list above is available in both runtimes.
 
 ### Utility Functions
 
@@ -1325,7 +1335,15 @@ npm run build          # the browser suite imports dist/index.browser.js
 npm run test:browser   # headless Chromium via Playwright
 ```
 
-Two static isolation gates back the browser build and run in CI on every push: `npm run check:browser` (an esbuild `platform:'browser'` bundle that fails on any `node:` specifier reaching the browser graph) and `npm run check:exports` (`publint` + `@arethetypeswrong/cli`).
+Three static gates back the browser build and the published package, and all three run in CI on every push: `npm run check:browser` (an esbuild `platform:'browser'` bundle that fails on any `node:` specifier reaching the browser graph), `npm run check:types:browser` (type-checks a browser-only consumer against `dist/` with no Node types available, so a Node type in the browser declaration graph fails the build), and `npm run check:exports` (`publint` + `@arethetypeswrong/cli`).
+
+Everything above is chained into a single command, which stops at the first failure:
+
+```bash
+npm run verify
+```
+
+It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports`, and takes roughly 2.5 minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
 
 ## ⚡ Benchmarks
 
@@ -1336,7 +1354,7 @@ npm run build
 npm run bench
 ```
 
-The full suite takes roughly **2.5-5.5 minutes** on a modern laptop. Argon2id at the default 128 MiB / `t=3` / `p=1` profile dominates the wall time (each derivation takes ~150-300 ms), and every encrypt path performs one derivation per call. The codec group is the exception: it performs no key derivation in any measured case, which is the point of it — the KDF is large enough to hide a codec regression entirely. It runs first and takes ~30 s. To run a single bench file in isolation:
+The full suite takes roughly **2.5-5.5 minutes** on a modern laptop. Argon2id at the default 128 MiB / `t=3` / `p=1` profile dominates the wall time (each derivation takes ~100-400 ms depending on the host), and every encrypt path performs one derivation per call. The codec group is the exception: it performs no key derivation in any measured case, which is the point of it — the KDF is large enough to hide a codec regression entirely. It runs first and takes ~30 s. To run a single bench file in isolation:
 
 ```bash
 node bench/codec.mjs          # base64url codec + inspectHeader, no KDF
@@ -1375,9 +1393,36 @@ try {
 - `MEMORY_ERROR`: Memory-related errors
 - `VALIDATION_ERROR`: Validation failures
 
-`CryptoError.type` is one of the categories above; the more specific `CryptoError.code` string distinguishes individual failures. Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (install `hash-wasm` or, in Node, native build tools); and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
+`CryptoError.type` is one of the categories above; the more specific `CryptoError.code` string distinguishes individual failures. Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (install `hash-wasm` or, in Node, native build tools); `DATA_TOO_LARGE_FOR_GCM` (type `INVALID_INPUT`) — see below; and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
+
+### The AES-GCM per-invocation size limit
+
+NIST [SP 800-38D](https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38d.pdf) section 5.2.1.1 caps a single AES-GCM invocation at `2 ** 39 - 256` bits of plaintext — `2 ** 36 - 32` bytes, 68,719,476,704 bytes, about 64 GiB. Beyond that the 32-bit block counter wraps, the keystream repeats, and the result has **neither confidentiality nor authenticity**. Neither OpenSSL's EVP layer nor Node's `crypto.createCipheriv` enforces it, so a library that does not check simply returns broken ciphertext.
+
+This library checks. `encryptBytes`, `decryptBytes`, `encryptData`, `decryptData`, `encryptFile`, `encryptFileSync`, `decryptFile` and `decryptFileSync` throw `CryptoError` with type `INVALID_INPUT` and code `DATA_TOO_LARGE_FOR_GCM` for anything past the bound. The check runs **before** any key derivation, before any temp file is created and before any cipher is constructed, so a refused call leaves no output file, no `.tmp` file, and no wasted Argon2id run. There is deliberately **no opt-out**: an opt-out would be an opt-in to a broken construction. Inputs at exactly the limit are accepted.
+
+The bound and its assertion helper are exported from both entry points, so you can range-check ahead of a call:
+
+```typescript
+import { MAX_GCM_PLAINTEXT_BYTES, assertGcmPlaintextLimit } from '@hiprax/crypto';
+
+console.log(MAX_GCM_PLAINTEXT_BYTES); // 68719476704
+
+// Throws CryptoError(INVALID_INPUT, 'DATA_TOO_LARGE_FOR_GCM') past the bound.
+assertGcmPlaintextLimit(fileSizeInBytes);
+```
+
+In practice this is a bound on a *single* call, not on how much data the library can protect: split larger payloads across separate calls, each of which gets its own fresh salt, key and IV. Container mode is already stricter — a v2 container's payload is capped at `0xffffffff` bytes (just under 4 GiB, the width of the size field in its metadata block) and rejects anything larger with `CONTAINER_DATA_TOO_LARGE`, well below the GCM limit — and the text API is bounded far earlier still by V8's maximum string length (about 384 MiB of plaintext once base64url-encoded).
 
 ## 📦 Development
+
+### Verifying everything
+
+```bash
+npm run verify
+```
+
+The single gate. It chains `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` and stops at the first failure (~2.5 minutes). `prepublishOnly` is defined as exactly this command, so a change cannot pass a working session and then fail a release. Run it before opening a pull request; the individual steps below are for iterating.
 
 ### Building
 

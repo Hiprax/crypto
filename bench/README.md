@@ -49,7 +49,7 @@ derivation anywhere in a measured case**.
 
 It exists because the codec's cost was invisible everywhere else. Every other
 group in this directory pays Argon2id at the default 128 MiB / t=3 / p=1
-profile, which is ~150-300 ms per derivation. Against that, even an encoder
+profile, which is ~100-400 ms per derivation depending on the host. Against that, even an encoder
 trailing the platform's own by two orders of magnitude moves a 1 MiB
 `encryptText` total by only a few percent — inside Argon2id's own run-to-run
 spread. `bench/encrypt-text.mjs` therefore stayed flat while the codec

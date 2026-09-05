@@ -1,5 +1,5 @@
 /**
- * Real-browser interop suite (Phase 9 — browser-ci).
+ * Real-browser interop suite.
  *
  * Runs INSIDE a headless Chromium via Vitest Browser Mode (Playwright
  * provider), so every assertion here executes against a real browser engine:
@@ -24,6 +24,13 @@
  *      AAD-bound header byte) both reject via `CryptoError`.
  *   5. The Node-only surface (file/stream/sync/`Buffer`-typed low-level) is
  *      present but throws `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')`.
+ *   6. The **v2 container** works here too — SubtleCrypto AES-256-GCM over a
+ *      two-layer key hierarchy plus WASM Argon2id — round-tripping across the
+ *      edge-size table, opening every Node-produced golden container with its
+ *      confidential `filename` / `mime` / `size` intact, and rejecting a wrong
+ *      password, a bit flipped in any of the three GCM ciphertext segments, a
+ *      structurally invalid header, and a foreign `aad`. This is the only place
+ *      the container's portability is proven outside a Node process.
  *
  * Unlike the Node suite, this one does NOT gate on Argon2id availability: the
  * browser IS the target runtime, so if hash-wasm cannot derive here that is a
@@ -76,10 +83,26 @@ interface NodeVector {
   ciphertext: string;
 }
 
+/**
+ * One committed v2 container golden. `plaintextBase64url` is the base64url of
+ * the payload that was sealed (`plaintextLength` its byte count — the value
+ * `decryptContainer` must report back as `meta.size`), and `meta` is the
+ * confidential metadata the container carries.
+ */
+interface NodeContainerVector {
+  description: string;
+  password: string;
+  plaintextBase64url: string;
+  plaintextLength: number;
+  meta: { filename?: string; mime?: string };
+  container: string;
+}
+
 interface NodeVectorsFixture {
   generatedWith: { package: string; version: string; kdf: string };
   kdfParams: { memoryCost: number; timeCost: number; parallelism: number };
   vectors: NodeVector[];
+  containers: NodeContainerVector[];
 }
 
 // The JSON import is typed loosely by the bundler; assert the shape we rely on.
@@ -103,11 +126,114 @@ function fillerBytes(length: number): Uint8Array {
   return out;
 }
 
+/**
+ * Index of `needle` inside `haystack`, or -1 (a pure substring search — there
+ * is no `Buffer.indexOf` in the browser). Used to prove that confidential
+ * container metadata never appears in cleartext on the wire.
+ */
+function bytesIndexOf(haystack: Uint8Array, needle: Uint8Array): number {
+  if (needle.length === 0 || needle.length > haystack.length) return -1;
+  outer: for (let i = 0; i <= haystack.length - needle.length; i += 1) {
+    for (let j = 0; j < needle.length; j += 1) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
 /** Flip a single bit at `offset`, returning a NEW array (input untouched). */
 function flipBitAt(buf: Uint8Array, offset: number): Uint8Array {
   const out = Uint8Array.from(buf);
   out[offset] = (out[offset] ?? 0) ^ 0x01;
   return out;
+}
+
+/**
+ * Flip the HIGH bit at `offset`, returning a NEW array. Used where a low-bit
+ * flip would leave a header field inside its accepted range: driving the high
+ * bit of `memoryCost` or of `metaLen` puts the field far out of bounds, which
+ * is what the pre-authentication structural parse must reject.
+ */
+function flipHighBitAt(buf: Uint8Array, offset: number): Uint8Array {
+  const out = Uint8Array.from(buf);
+  out[offset] = (out[offset] ?? 0) ^ 0x80;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// v2 CONTAINER byte layout. Every offset below is fixed except `encMeta`
+// (length = the `metaLen` field) and `encData` (whatever is left before the
+// trailing tag):
+//
+//   header 0(22) | salt 22(32) | kekIv 54(12) | wrappedDek 66(32) | kekTag 98(16)
+//   metaIv 114(12) | metaLen 126(u32BE,4) | encMeta 130(metaLen)
+//   metaTag 130+metaLen(16) | dataIv 146+metaLen(12) | encData 158+metaLen
+//   dataTag len-16(16)
+//
+// so `container.length === 174 + metaLen + payload.length` always holds. Only
+// THREE of those segments are GCM ciphertext — `wrappedDek`, `encMeta` and
+// `encData` — and those are the only ones whose tamper surfaces as an
+// authentication failure. The offsets are spelled out here rather than read
+// from a parser export because `parseV2Container` deliberately does not reach
+// the browser entry point: this spec must pin the WIRE layout independently of
+// the code that slices it.
+// ---------------------------------------------------------------------------
+const CONTAINER_IV_LENGTH = 12;
+const CONTAINER_TAG_LENGTH = 16;
+/** Every container segment except `encMeta` and `encData` (22+32+12+32+16+12+4+16+12+16). */
+const CONTAINER_FIXED_OVERHEAD = 174;
+const CONTAINER_VERSION_OFFSET = 4;
+const CONTAINER_MEMORY_COST_OFFSET = 6;
+const CONTAINER_TIME_COST_OFFSET = 10;
+const CONTAINER_PARALLELISM_OFFSET = 14;
+/** First of the six reserved header bytes — parsed by nobody, bound into every AAD. */
+const CONTAINER_RESERVED_HEADER_OFFSET = 16;
+const CONTAINER_WRAPPED_DEK_OFFSET = 66;
+const CONTAINER_META_LEN_OFFSET = 126;
+const CONTAINER_ENC_META_OFFSET = 130;
+
+/** Read a container's `metaLen` field (u32BE at offset 126). */
+function containerMetaLen(container: Uint8Array): number {
+  return new DataView(
+    container.buffer,
+    container.byteOffset,
+    container.byteLength
+  ).getUint32(CONTAINER_META_LEN_OFFSET, false);
+}
+
+/** Absolute offset of a container's `encData` segment (158 + `metaLen`). */
+function containerEncDataOffset(container: Uint8Array): number {
+  return (
+    CONTAINER_ENC_META_OFFSET +
+    containerMetaLen(container) +
+    CONTAINER_TAG_LENGTH +
+    CONTAINER_IV_LENGTH
+  );
+}
+
+/**
+ * Assert that `run()` REJECTED with exactly `{ type, code }` — and, as the
+ * negative, that it did not resolve (no payload was ever handed back).
+ */
+async function expectContainerRejection(
+  run: () => Promise<unknown>,
+  expected: { type: CryptoErrorType; code: string }
+): Promise<void> {
+  let caught: unknown;
+  let resolved = false;
+  try {
+    await run();
+    resolved = true;
+  } catch (err) {
+    caught = err;
+  }
+  // The thing that must NOT have happened: a decrypted payload came back.
+  expect(resolved).toBe(false);
+  expect(caught).toBeInstanceOf(CryptoError);
+  const error = caught as InstanceType<typeof CryptoError>;
+  expect(error.code).toBe(expected.code);
+  expect(error.type).toBe(expected.type);
 }
 
 /** Assert a synchronous Node-only stub threw the `UNSUPPORTED_IN_BROWSER` error. */
@@ -217,6 +343,38 @@ describe('@hiprax/crypto browser build — real headless Chromium (Vitest Browse
       expect(Array.isArray(fixture.vectors)).toBe(true);
       expect(fixture.vectors.length).toBeGreaterThanOrEqual(4);
       expect(fixture.generatedWith.kdf).toBe('argon2id');
+
+      // Anti-vacuity: the golden-CONTAINER specs below are generated by a
+      // `for` loop over `fixture.containers`. An empty array would silently
+      // produce zero of them and the suite would still go green.
+      expect(Array.isArray(fixture.containers)).toBe(true);
+      expect(fixture.containers.length).toBeGreaterThanOrEqual(4);
+      for (const vector of fixture.containers) {
+        const container = base64urlToBytes(vector.container);
+        expect(container[CONTAINER_VERSION_OFFSET]).toBe(0x02);
+        expect(container.length).toBe(
+          CONTAINER_FIXED_OVERHEAD +
+            containerMetaLen(container) +
+            vector.plaintextLength
+        );
+        // The goldens must stay on the low-cost TEST profile the fixture
+        // documents; a regeneration at the 128 MiB production default would
+        // otherwise be accepted silently (and crawl in a browser).
+        const headerView = new DataView(
+          container.buffer,
+          container.byteOffset,
+          container.byteLength
+        );
+        expect(headerView.getUint32(CONTAINER_MEMORY_COST_OFFSET, false)).toBe(
+          fixture.kdfParams.memoryCost
+        );
+        expect(headerView.getUint32(CONTAINER_TIME_COST_OFFSET, false)).toBe(
+          fixture.kdfParams.timeCost
+        );
+        expect(headerView.getUint16(CONTAINER_PARALLELISM_OFFSET, false)).toBe(
+          fixture.kdfParams.parallelism
+        );
+      }
     });
 
     for (const vector of fixture.vectors) {
@@ -333,6 +491,246 @@ describe('@hiprax/crypto browser build — real headless Chromium (Vitest Browse
 
       // A buffer with no HPCR magic is treated as a legacy (v0) ciphertext.
       expect(cm.inspectHeader(new Uint8Array(64))).toBeNull();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The v2 container, inside a real browser.
+  //
+  // Everything above proves the v1 text/bytes format crosses runtimes. The
+  // container is a different, additive envelope: an Argon2id KEK wraps a random
+  // DEK, and THREE independent AES-GCM segments (`wrappedDek`, `encMeta`,
+  // `encData`) are each bound to `aad ‖ header`. Node-side tests can only
+  // exercise the Web engine through a Node process; here it runs on the real
+  // SubtleCrypto with a real WASM Argon2id, which is the only way to know the
+  // envelope is genuinely portable.
+  //
+  // Negative scoping matters and is deliberate: only the three GCM ciphertext
+  // segments turn a bit flip into an authentication failure. A bit in the
+  // header parameters or in the `metaLen` field is refused EARLIER, by the pure
+  // pre-authentication structural parse, with its own code — so a blanket
+  // "any bit anywhere -> DECRYPTION_FAILED" expectation would simply be false.
+  // ---------------------------------------------------------------------------
+  describe('v2 container inside the browser (SubtleCrypto + WASM Argon2id)', () => {
+    /** Metadata `decryptContainer` must report for a golden (size is authenticated too). */
+    const expectedMetaOf = (
+      vector: NodeContainerVector
+    ): { filename?: string; mime?: string; size: number } => ({
+      ...vector.meta,
+      size: vector.plaintextLength,
+    });
+
+    it('round-trips across edge sizes with confidential metadata intact', async () => {
+      // 0/1/15/16/17 straddle the AES block boundary; 4096 is multi-block.
+      for (const size of [0, 1, 15, 16, 17, 4096]) {
+        const data = fillerBytes(size);
+        const container = await cm.encryptContainer(data, PASSWORD, {
+          filename: 'in-browser.dat',
+          mime: 'application/x-browser',
+        });
+
+        // It is a v2 container, and it obeys the documented byte layout.
+        expect(container[CONTAINER_VERSION_OFFSET]).toBe(0x02);
+        expect(container.length).toBe(
+          CONTAINER_FIXED_OVERHEAD + containerMetaLen(container) + size
+        );
+        // Confidentiality: the filename must not sit in the clear on the wire.
+        expect(bytesIndexOf(container, utf8Encode('in-browser.dat'))).toBe(-1);
+
+        const { data: back, meta } = await cm.decryptContainer(
+          container,
+          PASSWORD
+        );
+        expect(back.length).toBe(size);
+        expect(bytesEqual(back, data)).toBe(true);
+        expect(meta).toEqual({
+          filename: 'in-browser.dat',
+          mime: 'application/x-browser',
+          size,
+        });
+      }
+    });
+
+    // The crown jewel for the container format: Node-sealed envelopes opened by
+    // a real browser. A DEFAULT (32 MiB) manager is used deliberately —
+    // decryption reads the Argon2id params from the container header, so it is
+    // independent of this manager's own configuration.
+    for (const vector of fixture.containers) {
+      it(`opens Node-produced golden container: ${vector.description}`, async () => {
+        const container = base64urlToBytes(vector.container);
+        const expectedPayload = base64urlToBytes(vector.plaintextBase64url);
+        expect(expectedPayload.length).toBe(vector.plaintextLength);
+
+        const { data, meta } = await defaultCm.decryptContainer(
+          container,
+          vector.password
+        );
+        expect(data.length).toBe(vector.plaintextLength);
+        expect(bytesEqual(data, expectedPayload)).toBe(true);
+        // Exact metadata shape: a golden with no `mime` must come back without
+        // one, not with an extra field.
+        expect(meta).toEqual(expectedMetaOf(vector));
+      });
+    }
+
+    it('rejects a wrong password', async () => {
+      const container = await cm.encryptContainer(fillerBytes(64), PASSWORD, {
+        filename: 'secret.dat',
+      });
+      await expectContainerRejection(
+        () => cm.decryptContainer(container, WRONG_PASSWORD),
+        { type: CryptoErrorType.DECRYPTION_FAILED, code: 'DECRYPTION_FAILED' }
+      );
+      // ...and still opens with the right one, so the rejection is the password.
+      const { data } = await cm.decryptContainer(container, PASSWORD);
+      expect(data.length).toBe(64);
+    });
+
+    // Tamper, part 1: the three GCM ciphertext segments. `DECRYPTION_FAILED` is
+    // the only acceptable outcome — `CONTAINER_INTEGRITY_FAILED` would mean a
+    // GCM tag was ACCEPTED on modified bytes and the damage was only noticed
+    // afterwards by the SHA-256 re-check.
+    const gcmSegments: Array<{
+      label: string;
+      offsetOf: (container: Uint8Array) => number;
+    }> = [
+      {
+        label: 'wrappedDek (offset 66)',
+        offsetOf: () => CONTAINER_WRAPPED_DEK_OFFSET,
+      },
+      {
+        label: 'encMeta (offset 130)',
+        offsetOf: () => CONTAINER_ENC_META_OFFSET,
+      },
+      {
+        label: 'encData (offset 158 + metaLen)',
+        offsetOf: containerEncDataOffset,
+      },
+    ];
+
+    for (const segment of gcmSegments) {
+      it(`rejects a single-bit tamper in ${segment.label} with DECRYPTION_FAILED`, async () => {
+        // A non-empty payload is required for `encData` to exist at all.
+        const container = await cm.encryptContainer(fillerBytes(96), PASSWORD, {
+          filename: 'tamper-me.bin',
+          mime: 'application/octet-stream',
+        });
+        const offset = segment.offsetOf(container);
+        // Pin the offset to the SEGMENT, not merely to somewhere in range: a
+        // mis-derived `encData` offset would land in the adjacent `dataIv` and
+        // still throw, quietly testing nonce binding instead of ciphertext
+        // authentication. These two identities make that impossible.
+        expect(container.length).toBe(
+          CONTAINER_FIXED_OVERHEAD + containerMetaLen(container) + 96
+        );
+        expect(
+          containerEncDataOffset(container) + 96 + CONTAINER_TAG_LENGTH
+        ).toBe(container.length);
+        // `encMeta` at offset 130 is only INSIDE that segment while the
+        // container actually carries metadata; with `metaLen` 0 it would
+        // land in `metaTag` and still throw, testing the wrong segment.
+        expect(containerMetaLen(container)).toBeGreaterThan(0);
+        expect(offset).toBeLessThan(container.length - CONTAINER_TAG_LENGTH);
+
+        await expectContainerRejection(
+          () => cm.decryptContainer(flipBitAt(container, offset), PASSWORD),
+          { type: CryptoErrorType.DECRYPTION_FAILED, code: 'DECRYPTION_FAILED' }
+        );
+        // The untampered container still opens — the rejection above is the
+        // flipped bit, not a broken fixture.
+        const { data } = await cm.decryptContainer(container, PASSWORD);
+        expect(data.length).toBe(96);
+      });
+    }
+
+    it('rejects a flipped RESERVED header byte via the AAD binding (not the structural parse)', async () => {
+      // Header offsets 16-21 are reserved: the structural parse never reads
+      // them, so this can only be caught by the header being bound verbatim
+      // into every segment's AAD.
+      const container = await cm.encryptContainer(fillerBytes(48), PASSWORD);
+      await expectContainerRejection(
+        () =>
+          cm.decryptContainer(
+            flipBitAt(container, CONTAINER_RESERVED_HEADER_OFFSET),
+            PASSWORD
+          ),
+        { type: CryptoErrorType.DECRYPTION_FAILED, code: 'DECRYPTION_FAILED' }
+      );
+    });
+
+    // Tamper, part 2: bytes the PRE-AUTHENTICATION structural parse rejects.
+    // These never reach a GCM tag, and never reach the KDF — each carries its
+    // OWN code, so asserting `DECRYPTION_FAILED` here would be wrong.
+    const preAuthCases: Array<{
+      label: string;
+      mutate: (container: Uint8Array) => Uint8Array;
+      type: CryptoErrorType;
+      code: string;
+    }> = [
+      {
+        label: 'a flipped magic byte (offset 0)',
+        mutate: c => flipBitAt(c, 0),
+        type: CryptoErrorType.DECRYPTION_FAILED,
+        code: 'CONTAINER_INVALID_MAGIC',
+      },
+      {
+        label: 'a flipped version byte (offset 4: 0x02 -> 0x03)',
+        mutate: c => flipBitAt(c, CONTAINER_VERSION_OFFSET),
+        type: CryptoErrorType.DECRYPTION_FAILED,
+        code: 'CONTAINER_UNSUPPORTED_VERSION',
+      },
+      {
+        label: 'the memoryCost high bit (offset 6), over the DoS cap',
+        mutate: c => flipHighBitAt(c, CONTAINER_MEMORY_COST_OFFSET),
+        type: CryptoErrorType.INVALID_INPUT,
+        code: 'CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS',
+      },
+      {
+        label: 'the metaLen high bit (offset 126), overrunning the buffer',
+        mutate: c => flipHighBitAt(c, CONTAINER_META_LEN_OFFSET),
+        type: CryptoErrorType.INVALID_INPUT,
+        code: 'TRUNCATED_CONTAINER',
+      },
+    ];
+
+    for (const preAuth of preAuthCases) {
+      it(`rejects ${preAuth.label} with ${preAuth.code}, not DECRYPTION_FAILED`, async () => {
+        const container = base64urlToBytes(
+          fixture.containers[0]?.container ?? ''
+        );
+        expect(container.length).toBeGreaterThanOrEqual(
+          CONTAINER_FIXED_OVERHEAD
+        );
+        await expectContainerRejection(
+          () => cm.decryptContainer(preAuth.mutate(container), PASSWORD),
+          { type: preAuth.type, code: preAuth.code }
+        );
+      });
+    }
+
+    it('does not open a container sealed under a different `aad`', async () => {
+      const appA = new CryptoManager({ ...LOW_COST, aad: 'application-A' });
+      const appB = new CryptoManager({ ...LOW_COST, aad: 'application-B' });
+      const container = await appA.encryptContainer(fillerBytes(48), PASSWORD, {
+        filename: 'domain-separated.dat',
+      });
+
+      // Same password AND identical Argon2id params (⇒ byte-identical header),
+      // so the ONLY separator is the bound `aad` context string.
+      await expectContainerRejection(
+        () => appB.decryptContainer(container, PASSWORD),
+        { type: CryptoErrorType.DECRYPTION_FAILED, code: 'DECRYPTION_FAILED' }
+      );
+      // The default-`aad` manager is equally locked out.
+      await expectContainerRejection(
+        () => cm.decryptContainer(container, PASSWORD),
+        { type: CryptoErrorType.DECRYPTION_FAILED, code: 'DECRYPTION_FAILED' }
+      );
+
+      // Sanity: the originating application still opens its own container.
+      const { data, meta } = await appA.decryptContainer(container, PASSWORD);
+      expect(data.length).toBe(48);
+      expect(meta).toEqual({ filename: 'domain-separated.dat', size: 48 });
     });
   });
 });

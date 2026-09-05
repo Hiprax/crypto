@@ -494,6 +494,163 @@ process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(pro
     }
   });
 
+  it('names the v2 container version from both entries, and it matches the wire byte', () => {
+    // `FORMAT_VERSION` (0x01) has always reached both entries through the
+    // format module, but `CONTAINER_VERSION` (0x02) lived only in `core.ts`,
+    // so a consumer could not name the version of a format this library
+    // PRODUCES — container mode is on the isomorphic core, so both runtimes
+    // emit v2 blobs. This pins four things that a plain "the export exists"
+    // check would miss:
+    //
+    //   1. Both entries expose it and agree on the value (the same asymmetry
+    //      tripwire as the AES-GCM bound above: `index.ts` re-exports a named
+    //      list while `index.browser.ts` re-exports `format-core.js` with
+    //      `export *`, so half-wired constants type-check and lint cleanly).
+    //   2. It equals the byte actually written at offset 4 by a REAL
+    //      `encryptContainer` call — not a literal that drifted from the
+    //      packer. A `CONTAINER_VERSION = 3` typo passes an `=== 0x02`-free
+    //      check but fails here.
+    //   3. It is distinguishable from `FORMAT_VERSION`, which is the whole
+    //      point of exporting it (routing a blob without decrypting it).
+    //   4. `inspectHeader` on a container throws `UNSUPPORTED_VERSION` rather
+    //      than returning `null` — the documented reason a consumer needs the
+    //      constant instead of using `inspectHeader` as a format sniffer.
+    //
+    // Negative half: the browser entry must still export NOTHING from
+    // `./utils.js`. That list is DERIVED from `dist/utils.js` at run time
+    // rather than hard-coded, so adding a Node-only helper cannot slip past
+    // a stale literal.
+    const tmpDir = path.join(
+      TEST_DIR,
+      `container-version-${crypto.randomBytes(8).toString('hex')}`
+    );
+    mkdirSync(tmpDir, { recursive: true });
+    const probeFile = path.join(tmpDir, 'probe.mjs');
+
+    const nodeUrl = pathToFileURL(DIST_INDEX).href;
+    const browserUrl = pathToFileURL(DIST_BROWSER_INDEX).href;
+    const utilsUrl = pathToFileURL(path.join(DIST_DIR, 'utils.js')).href;
+
+    writeFileSync(
+      probeFile,
+      `
+import * as node from ${JSON.stringify(nodeUrl)};
+import * as browser from ${JSON.stringify(browserUrl)};
+import * as utils from ${JSON.stringify(utilsUrl)};
+
+const problems = [];
+
+for (const [label, mod] of [['node', node], ['browser', browser]]) {
+  if (mod.CONTAINER_VERSION !== 0x02) {
+    problems.push(label + '.CONTAINER_VERSION=' + String(mod.CONTAINER_VERSION));
+  }
+  if (mod.FORMAT_VERSION !== 0x01) {
+    problems.push(label + '.FORMAT_VERSION=' + String(mod.FORMAT_VERSION));
+  }
+  if (mod.CONTAINER_VERSION === mod.FORMAT_VERSION) {
+    problems.push(label + ': the two version constants are indistinguishable');
+  }
+}
+
+if (node.CONTAINER_VERSION !== browser.CONTAINER_VERSION) {
+  problems.push('entries disagree on CONTAINER_VERSION');
+}
+
+// The constant must match the byte a real container carries. Use a cheap
+// Argon2id profile: this asserts the FORMAT, not the KDF strength.
+const cm = new node.CryptoManager({
+  memoryCost: 8192,
+  timeCost: 1,
+  parallelism: 1,
+});
+const password = 'MyP@ssw0rd123!';
+const container = await cm.encryptContainer(
+  new TextEncoder().encode('phase-10'),
+  password,
+  { filename: 'note.txt' }
+);
+if (container[4] !== node.CONTAINER_VERSION) {
+  problems.push(
+    'wire byte ' + container[4] + ' != CONTAINER_VERSION ' + node.CONTAINER_VERSION
+  );
+}
+
+// A v1 ciphertext must carry the OTHER constant at the same offset, so the
+// two are genuinely a discriminator and not both trivially true.
+const v1 = await cm.encryptBytes(new TextEncoder().encode('phase-10'), password);
+if (v1[4] !== node.FORMAT_VERSION) {
+  problems.push('v1 wire byte ' + v1[4] + ' != FORMAT_VERSION ' + node.FORMAT_VERSION);
+}
+
+// inspectHeader is a v1 inspector: a container throws, it does not return
+// null. Both documented input forms are checked — the byte path and the
+// base64url-string path, which decodes only a 32-char prefix and so could
+// plausibly have diverged from the byte path on a non-0x01 version.
+for (const [form, value] of [
+  ['bytes', container],
+  ['string', node.bytesToBase64url(container)],
+]) {
+  let inspectCode = null;
+  let inspectType = null;
+  let inspectReturned = 'did-not-return';
+  try {
+    inspectReturned = JSON.stringify(cm.inspectHeader(value));
+  } catch (err) {
+    inspectCode = err && err.code;
+    inspectType = err && err.type;
+  }
+  if (inspectCode !== 'UNSUPPORTED_VERSION' || inspectType !== 'DECRYPTION_FAILED') {
+    problems.push(
+      'inspectHeader(container as ' + form + ') -> returned ' + inspectReturned +
+        ' / type=' + inspectType + ' code=' + inspectCode
+    );
+  }
+}
+
+// Positive control for the line above: on a real v1 ciphertext the same call
+// must SUCCEED and report version 1. Without this, an inspectHeader that
+// threw UNSUPPORTED_VERSION on everything would pass the container check.
+try {
+  const v1Header = cm.inspectHeader(v1);
+  if (!v1Header || v1Header.version !== node.FORMAT_VERSION) {
+    problems.push('inspectHeader(v1) -> ' + JSON.stringify(v1Header));
+  }
+} catch (err) {
+  problems.push('inspectHeader(v1) threw ' + (err && err.code));
+}
+
+// Negative half: no Node-only file helper may be reachable from the browser
+// entry. Derived from the real \`dist/utils.js\` export list.
+const browserKeys = new Set(Object.keys(browser));
+const leaked = Object.keys(utils).filter(k => browserKeys.has(k));
+if (leaked.length > 0) {
+  problems.push('browser entry leaks utils exports: ' + leaked.join(','));
+}
+if (Object.keys(utils).length === 0) {
+  problems.push('utils export list is empty — the negative check would be vacuous');
+}
+
+process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(problems));
+`,
+      'utf8'
+    );
+
+    try {
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 60_000,
+        windowsHide: true,
+      });
+
+      expect(result.stdout).toContain('OK');
+      expect(result.stdout).not.toContain('BAD');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('Node refuses to load dist/index.js via require() (ESM-only contract)', () => {
     // We don't have a CJS build, so a `require()` call from a CJS
     // worker MUST fail. This locks in the ESM-only contract: if a

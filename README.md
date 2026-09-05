@@ -582,7 +582,9 @@ const mode = crypto.getLegacyMode();
 
 ##### `inspectHeader(input: string | Uint8Array): ParsedHeader | null`
 
-Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Uint8Array` (file contents — a Node `Buffer` is a `Uint8Array`, so `Buffer` inputs keep working). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; byte inputs are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_VERSION`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
+Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Uint8Array` (file contents — a Node `Buffer` is a `Uint8Array`, so `Buffer` inputs keep working). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; byte inputs are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_KDF`, `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
+
+> **This is a v1 inspector, not a format sniffer.** A [v2 container](#container-format-v2) reuses the same `HPCR` magic and the same 22-byte header shape, so it passes the magic check and is then rejected on its version byte: `inspectHeader` on a container **throws** `CryptoError` with type `DECRYPTION_FAILED` and code `UNSUPPORTED_VERSION`. It never returns `null` for a container, and there is no input for which it reports "v2". If the input may be either format, classify it first — see [Telling the formats apart](#telling-the-formats-apart).
 
 ### Types and Enums
 
@@ -1148,7 +1150,7 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 
 **Decryption error codes specific to the format header**
 
-- `UNSUPPORTED_VERSION`: header magic matches but the version byte is not `0x01`.
+- `UNSUPPORTED_VERSION`: header magic matches but the version byte is not `0x01` — most often a [v2 container](#container-format-v2) (version `0x02`) fed to a v1 path. `inspectHeader` reports it unconditionally; `decryptBytes` / `decryptText` report it only in `legacyMode: 'strict'` or `'reject'`, because the default `'auto'` mode treats a failed header parse as a possible v0 ciphertext and surfaces the eventual failure as the generic code `DECRYPTION_FAILED`.
 - `UNSUPPORTED_KDF`: header KDF identifier is unknown.
 - `KDF_MISMATCH`: ciphertext was produced by the sync path but is being decrypted by the async path (or vice-versa).
 - `INVALID_MAGIC`: only emitted by the low-level `parseHeader` helper when the magic check fails (the high-level decrypt methods treat that case as v0 and apply `legacyMode`).
@@ -1168,6 +1170,44 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 ```
 
 The `kdf-params` block is the same Argon2id layout as v1 (`[memoryCost u32BE][timeCost u32BE][parallelism u16BE][reserved 6×0x00]`); containers are always Argon2id. The `encMeta` segment decrypts (under the DEK) to a canonical serialization of `{ flags, size, sha256, filename?, mime? }` — the filename/mime bytes are present **only** inside this encrypted block and never in cleartext. After the payload decrypts, its SHA-256 (and length) are re-checked against the sealed-in values; a mismatch throws `CONTAINER_INTEGRITY_FAILED`. See [Container Mode](#-container-mode-v2-envelope) for the API and error codes.
+
+#### Telling the formats apart
+
+The version byte sits at offset 4 in both formats, and both version constants are exported from the Node **and** the browser entry point — `FORMAT_VERSION` (`0x01`, v1 text/file ciphertext) and `CONTAINER_VERSION` (`0x02`, v2 container). So a consumer holding raw bytes can route them without decrypting and without hard-coding a magic number:
+
+```typescript
+import {
+  CONTAINER_VERSION,
+  FORMAT_VERSION,
+  MAGIC_BYTES,
+} from '@hiprax/crypto';
+
+const hasHpcrMagic = (bytes: Uint8Array): boolean =>
+  bytes.length > MAGIC_BYTES.length &&
+  MAGIC_BYTES.every((b, i) => bytes[i] === b);
+
+const isHpcr = hasHpcrMagic(bytes);
+
+if (isHpcr && bytes[4] === CONTAINER_VERSION) {
+  // v2 container: metadata and the integrity check come back with the payload.
+  const { data, meta } = await cm.decryptContainer(bytes, password);
+} else if (isHpcr && bytes[4] === FORMAT_VERSION) {
+  // v1: the only branch on which `inspectHeader` is safe to call.
+  const header = cm.inspectHeader(bytes); // { version: 1, kdfId, params, headerLen }
+  const plaintext = await cm.decryptBytes(bytes, password);
+} else {
+  // Legacy v0, or not this library's output at all. `decryptBytes` applies the
+  // configured `legacyMode` here; `'strict'`/`'reject'` refuse it outright.
+  const plaintext = await cm.decryptBytes(bytes, password);
+}
+```
+
+Two details make this correct rather than merely plausible:
+
+- **Check the magic before reading byte 4.** A legacy v0 ciphertext opens with a 32-byte random salt, so roughly one in `2 ** 32` of them begins with the four `HPCR` bytes by chance (the library's `legacyMode: 'auto'` recovery exists for exactly that case). Reading `bytes[4]` on its own would misclassify any v0 blob whose fifth byte happens to be `0x02`.
+- **Use `MAGIC_BYTES`, not the exported `hasMagic()`, on a `Uint8Array`.** The Node entry's `hasMagic` keeps its original contract of accepting only a real `Buffer` and returns `false` for anything else, while `encryptBytes` / `encryptContainer` return a plain `Uint8Array` in both runtimes. The browser entry's `hasMagic` accepts any `Uint8Array`. The byte comparison above behaves identically on both entries; `hasMagic` does not. Wrap the value (`hasMagic(Buffer.from(bytes))`) if you want the Node helper specifically.
+
+Note that `inspectHeader` is deliberately **not** part of this decision: it parses v1 headers only and throws `UNSUPPORTED_VERSION` on a container. Classify first, then call it on the v1 branch.
 
 ## 🛡️ Security Features
 

@@ -278,7 +278,7 @@ export function isValidPassword(password: string): boolean {
 
 /**
  * Container format version byte (v1 text/file ciphertext uses
- * {@link FORMAT_VERSION} = 0x01). Feeding a v2 blob to the v1
+ * `FORMAT_VERSION` = 0x01). Feeding a v2 blob to the v1
  * `decryptBytes`/`decryptText` path is rejected — in `auto` mode the v1
  * `parseHeader` throws `UNSUPPORTED_VERSION`, which the v0 fallback cannot
  * rescue, so a `CryptoError` is thrown either way — and {@link parseV2Container}
@@ -1736,6 +1736,19 @@ export abstract class CryptoCore {
    * decrypting. Returns `null` for legacy v0 ciphertexts that do not carry a
    * header. Useful for tooling and tests.
    *
+   * **This is a v1 inspector, not a format sniffer.** A v2 container
+   * ({@link encryptContainer}) reuses the same 22-byte header SHAPE and the
+   * same "HPCR" magic, so it passes {@link hasMagic} and reaches
+   * {@link parseHeader}, which rejects its `0x02` version byte: inspecting a
+   * container **throws** `CryptoError(DECRYPTION_FAILED,
+   * 'UNSUPPORTED_VERSION')` — it does not return `null`, and there is no
+   * input for which this method reports "v2". Classify first when the input
+   * may be either format: the byte at offset {@link MAGIC_LENGTH} is
+   * `FORMAT_VERSION` (0x01) for v1 and {@link CONTAINER_VERSION} (0x02) for a
+   * container. Both constants are re-exported from the package's Node and
+   * browser entry points; `FORMAT_VERSION` lives in `./format-core.js`, which
+   * this module does not import, hence the plain reference.
+   *
    * String inputs are validated as well-formed base64url BEFORE decoding —
    * a base64url decode silently coerces invalid characters, which would make
    * a malformed input look like a v0 ciphertext (returning `null`) rather
@@ -1751,9 +1764,17 @@ export abstract class CryptoCore {
    *   (file contents). Strings are validated as base64url and decoded; byte
    *   arrays are read as-is.
    * @returns the parsed header, or `null` when the input lacks the v1 magic
+   * @throws CryptoError (`INVALID_INPUT` / `INVALID_INPUT`) if the input is an
+   *   empty string, or is neither a string nor a `Uint8Array`.
    * @throws CryptoError (`INVALID_INPUT` / `INVALID_BASE64URL`) if the input
-   *   string is not well-formed base64url, or if the input begins with the
-   *   v1 magic but is otherwise malformed.
+   *   string is not well-formed base64url.
+   * @throws CryptoError (`DECRYPTION_FAILED` / `UNSUPPORTED_VERSION`) if the
+   *   input carries the "HPCR" magic but a version byte other than 0x01 —
+   *   most commonly a v2 container, whose version byte is
+   *   {@link CONTAINER_VERSION}.
+   * @throws CryptoError if the input begins with the v1 magic but is
+   *   otherwise malformed (`TRUNCATED_HEADER`, `UNSUPPORTED_KDF`,
+   *   `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`).
    */
   public inspectHeader(input: string | Uint8Array): ParsedHeader | null {
     let buf: Uint8Array;

@@ -52,6 +52,14 @@ export type { Argon2Hasher, Argon2Provider };
 // so existing imports from `./crypto-manager` (and `./index`) resolve unchanged.
 export { SECURITY_THRESHOLDS, isValidPassword };
 
+// The v2 container version byte, so a consumer can name the format this library
+// produces instead of hard-coding `0x02`. `FORMAT_VERSION` (0x01) already
+// reaches the entry points through `./format.js`; this is its v2 counterpart,
+// and `./crypto-manager.browser.js` re-exports it identically so both entries
+// expose the same name. A pure pass-through — nothing in this module's body
+// uses it — hence a `export … from` statement rather than an import binding.
+export { CONTAINER_VERSION } from './core.js';
+
 /**
  * Symbol used to mark an error that was thrown by a user-supplied
  * {@link ProgressCallback}. The catch blocks in the file methods detect

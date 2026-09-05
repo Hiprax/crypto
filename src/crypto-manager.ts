@@ -125,8 +125,14 @@ function isProgressThrow(thrown: unknown): boolean {
  * graph and breaks any browser-only consumer compiled without `@types/node`.
  * {@link CryptoManager.encryptData} is its only producer and lives in this
  * Node-only module, so this is where it belongs. It is re-exported from
- * `./index.js`, keeping both public Node import paths
- * (`@hiprax/crypto` and `@hiprax/crypto/crypto-manager`) working unchanged.
+ * `./index.js`, so `import type { EncryptionResult } from '@hiprax/crypto'` —
+ * the path that carried it before — keeps working unchanged. Declaring it
+ * here additionally exposes it on `@hiprax/crypto/crypto-manager`, which it
+ * was NOT reachable from previously: that subpath's declarations only ever
+ * type-IMPORTED the name from `./types.js` and never re-exported it. So the
+ * Node surface strictly grows; only the browser entry loses the name, which
+ * is the point (it names a global browsers do not have, and no browser API
+ * produces one).
  */
 export interface EncryptionResult {
   encrypted: Buffer;

@@ -666,9 +666,23 @@ process.stdout.write(ok ? 'OK' : 'BAD');
  *   - `npm run check:browser` bundles with esbuild, which erases types before
  *     it ever resolves them.
  *
- * To see this test fail: add `foo: Buffer;` to any interface in `src/types.ts`,
- * `src/core.ts`, `src/codec.ts`, `src/format-core.ts`, `src/engine.ts`,
- * `src/engine.web.ts` or `src/crypto-manager.browser.ts` and rebuild.
+ * To see this test fail: add `foo: Buffer;` to an interface in any of the seven
+ * sources behind {@link BROWSER_DECLARATION_GRAPH} — `src/index.browser.ts`,
+ * `src/crypto-manager.browser.ts`, `src/core.ts`, `src/types.ts`,
+ * `src/format-core.ts`, `src/codec.ts`, `src/engine.ts` — and rebuild.
+ *
+ * `src/engine.web.ts` is deliberately NOT one of them, and the distinction is
+ * worth stating because it is counterintuitive: the Web engine is very much in
+ * the browser RUNTIME graph, but it is not in the browser DECLARATION graph.
+ * `crypto-manager.browser.ts` imports `webEngine` as a constructor-local VALUE
+ * only, so declaration emit never needs to name the module — verified: no file
+ * in the graph carries an import edge to `./engine.web.js`, and the closure
+ * test below asserts the reachable set equals exactly those seven. A
+ * type-position `Buffer` in `engine.web.ts` would therefore redden neither this
+ * test nor `npm run check:types:browser`, because no browser consumer's
+ * compiler ever resolves `dist/engine.web.d.ts`. That file is guarded instead
+ * by `npm run check:browser` (no `node:` specifier in the bundled graph) and by
+ * the ESLint isomorphic-file override (no value-position `Buffer`/`process`).
  */
 describe('browser declaration purity (dist/*.d.ts)', () => {
   beforeAll(() => {

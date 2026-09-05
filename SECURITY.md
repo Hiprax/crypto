@@ -241,13 +241,20 @@ reports and audits can reference them:
 4. **No `node:` in the browser graph.** The browser entry
    (`dist/index.browser.js`) imports zero `node:` builtins and references no
    `Buffer`/`process` global; this isolation is enforced continuously (in CI
-   and at publish) by two complementary static gates: an esbuild
-   `platform:'browser'` bundle gate (`npm run check:browser`) that fails on any
-   `node:` specifier reaching the browser graph, and an ESLint
-   `no-restricted-globals` (`Buffer`/`process`) + `no-restricted-imports`
-   (`node:*`) override on the isomorphic source files that catches a bare
-   `Buffer`/`process` global esbuild cannot see. So
-   `node:crypto`/`node:fs`/`node:stream` can never enter a consumer's bundle.
+   and at publish) by three complementary static gates, which cover three
+   disjoint defect classes: an esbuild `platform:'browser'` bundle gate
+   (`npm run check:browser`) that fails on any `node:` specifier reaching the
+   browser graph; an ESLint `no-restricted-globals` (`Buffer`/`process`) +
+   `no-restricted-imports` (`node:*`) override on the isomorphic source files
+   that catches a bare `Buffer`/`process` **value** esbuild cannot see; and
+   `npm run check:types:browser`, which type-checks a browser-only consumer
+   against the built `dist/` through the `browser` export condition with no
+   Node types available. Only the third can see a **type-position** Node
+   reference: `no-restricted-globals` inspects value references only, and
+   esbuild erases types before it sees them, so a Node type reaching
+   `dist/index.browser.d.ts` or anything it re-exports fails the build too.
+   So `node:crypto`/`node:fs`/`node:stream` can never enter a consumer's
+   bundle.
 5. **Node-only methods are unavailable, not silently degraded.** The
    synchronous (PBKDF2), streaming-file, and `Buffer`-typed low-level methods
    throw `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')` in the browser

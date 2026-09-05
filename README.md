@@ -1411,6 +1411,8 @@ NIST [SP 800-38D](https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublica
 
 This library checks. `encryptBytes`, `decryptBytes`, `encryptData`, `decryptData`, `encryptFile`, `encryptFileSync`, `decryptFile` and `decryptFileSync` throw `CryptoError` with type `INVALID_INPUT` and code `DATA_TOO_LARGE_FOR_GCM` for anything past the bound. The check runs **before** any key derivation, before any temp file is created and before any cipher is constructed, so a refused call leaves no output file, no `.tmp` file, and no wasted Argon2id run. There is deliberately **no opt-out**: an opt-out would be an opt-in to a broken construction. Inputs at exactly the limit are accepted.
 
+The bound is asserted on the ciphertext body too, which has one consequence when upgrading: a ciphertext larger than the bound produced by **1.5.0 or earlier** is now refused on decryption rather than decrypted. Counter wrap is deterministic and the tag mask is fixed, so an earlier version could read back its own oversized output even though that output had neither confidentiality nor authenticity. If you hold such an artifact — a single file over 68,719,476,704 bytes — pin `@hiprax/crypto@1.5.0` to recover the plaintext, then re-encrypt it in chunks.
+
 The bound and its assertion helper are exported from both entry points, so you can range-check ahead of a call:
 
 ```typescript

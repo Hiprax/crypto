@@ -15,6 +15,15 @@
  *   - `isValidBase64url` agrees with the historical Node round-trip validator
  *     for arbitrary strings (incl. padding / bad chars / bad length) and never
  *     throws.
+ *   - `isValidBase64url` is exactly equivalent to the historical
+ *     decode-then-re-encode definition it replaced, i.e.
+ *     `isValidBase64url(s) === (bytesToBase64url(base64urlToBytes(s)) === s &&
+ *     s.length > 0)`, at every `length % 4` residue and for the traps a naive
+ *     structural check falls into (a code unit >= 256 whose low byte aliases
+ *     an alphabet character, the standard-alphabet `+` / `/`, and testing the
+ *     final character's UTF-16 CODE UNIT instead of its decoded 6-bit SEXTET).
+ *   - The chunked encoder is byte-identical to Buffer across its internal
+ *     flush boundary and neither mutates nor retains its input.
  *   - `bytesToHex`, `utf8Encode`, `utf8Decode`, `concatBytes` equal their
  *     Node counterparts, incl. padding boundaries (lengths 0..3) and
  *     multi-byte Unicode.
@@ -64,6 +73,64 @@ function oracleIsValidBase64Url(str: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Code units that stress every branch of the decoder's leniency contract AND
+ * every trap in the canonical-form check: both base64 alphabets, `=`, ASCII
+ * whitespace / line wrapping, stray punctuation, code units >= 256 whose LOW
+ * BYTE aliases an alphabet character or `=`, a surrogate pair, and lone
+ * surrogate halves.
+ */
+const ADVERSARIAL_CODE_UNITS: number[] = [
+  0x41,
+  0x42,
+  0x51,
+  0x79,
+  0x7a,
+  0x30,
+  0x39, // A B Q y z 0 9
+  0x2d,
+  0x5f, // - _ (the URL-safe alphabet)
+  // + / : the standard alphabet. The LENIENT decoder accepts these as aliases;
+  // the CANONICAL encoder never emits them.
+  0x2b,
+  0x2f,
+  0x3d, // =
+  0x20,
+  0x09,
+  0x0a,
+  0x0d, // space, tab, LF, CR
+  0x21,
+  0x40,
+  0x23, // ! @ #
+  // U+0141 has low byte 0x41 ('A'); U+013D has low byte 0x3D ('=').
+  0x0141,
+  0x013d,
+  0xd83d,
+  0xde00, // the surrogate pair of U+1F600
+  0xd800,
+  0xdfff, // lone surrogate halves
+];
+
+/** Arbitrary string drawn from {@link ADVERSARIAL_CODE_UNITS}. */
+const arbAdversarialString = fc
+  .array(fc.constantFrom(...ADVERSARIAL_CODE_UNITS), {
+    minLength: 0,
+    maxLength: 32,
+  })
+  .map(codes => String.fromCharCode(...codes));
+
+/**
+ * The historical `isValidBase64url` definition: decode, re-encode, compare.
+ * `isValidBase64url` is now an O(n) structural scan, and the ONLY thing that
+ * makes that safe is that it accepts exactly the same set of strings this
+ * round trip does. Expressed with the codec's OWN encoder / decoder (each
+ * independently pinned to `Buffer` elsewhere in this file), plus the
+ * `s.length > 0` clause the original `!s` short-circuit contributed.
+ */
+function oracleCanonicalRoundTrip(s: string): boolean {
+  return bytesToBase64url(base64urlToBytes(s)) === s && s.length > 0;
 }
 
 describe('codec: bytesToBase64url', () => {
@@ -121,6 +188,116 @@ describe('codec: bytesToBase64url', () => {
     expect(bytesToBase64url(bytes)).toBe(
       Buffer.from(bytes).toString('base64url')
     );
+  });
+
+  it('matches Buffer base64url over 0..4096-byte inputs (fast-check)', () => {
+    // Wider than the 512-byte property above. Note 4096 bytes encodes to 5462
+    // characters, still BELOW the 8192-character flush threshold, so this
+    // property exercises the triple loop at depth but never a flush; the flush
+    // itself is covered by the boundary test below.
+    fc.assert(
+      fc.property(fc.uint8Array({ minLength: 0, maxLength: 4096 }), bytes => {
+        expect(bytesToBase64url(bytes)).toBe(
+          Buffer.from(bytes).toString('base64url')
+        );
+      }),
+      FC_RUNS
+    );
+  });
+
+  it('is byte-identical to Buffer across the internal flush boundary', () => {
+    // The encoder emits into a scratch buffer flushed every 8192 output
+    // characters, i.e. every 6144 input bytes. An off-by-one in the flush
+    // condition, a scratch length that is not a multiple of 4, or a tail
+    // written past the scratch would corrupt or truncate output at exactly
+    // these lengths and nowhere else, which a random-length property can miss.
+    // Cover both sides of the first TWO boundaries and every `len % 3`.
+    const lengths: number[] = [];
+    for (let len = 6140; len <= 6150; len += 1) {
+      lengths.push(len);
+    }
+    for (let len = 12284; len <= 12294; len += 1) {
+      lengths.push(len);
+    }
+    for (const len of lengths) {
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i += 1) {
+        bytes[i] = (i * 31 + 7) & 0xff;
+      }
+      expect(bytesToBase64url(bytes)).toBe(
+        Buffer.from(bytes).toString('base64url')
+      );
+    }
+  });
+
+  it('does not mutate its input and emits no padding or standard-alphabet character', () => {
+    const bytes = new Uint8Array(9000);
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = (i * 251 + 3) & 0xff;
+    }
+    const snapshot = Uint8Array.from(bytes);
+    const encoded = bytesToBase64url(bytes);
+    // Negative assertions: nothing was written back into the caller's buffer,
+    // and no character outside the canonical URL-safe alphabet was emitted.
+    expect(bytesEqual(bytes, snapshot)).toBe(true);
+    expect(encoded).not.toMatch(/[=+/]/);
+    expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  it('emits only alphabet characters for out-of-contract array-like input', () => {
+    // `bytesToBase64url` is a public export of both entry points, so a plain
+    // JavaScript caller can hand it an array-like whose elements fall outside
+    // 0..255. It must still emit only base64url characters, never a NUL from
+    // an out-of-range lookup into the 64-entry alphabet table. Each of these
+    // exercises a DIFFERENT table index: the two tail branches and the main
+    // triple loop.
+    // The expected strings are GOLDEN VALUES captured from the previous
+    // implementation, so this also pins that the rewrite changed no output
+    // byte even outside the declared type.
+    const outOfRange: Array<[number[], string]> = [
+      [[300], 'LA'], // remainder 1: a per-byte `b0 >> 2` would index 75
+      [[-1], '_w'], // remainder 1: negative element
+      [[0, 4096], 'EAA'], // remainder 2: a per-byte `b1 >> 4` would index 256
+      [[300, 4096], 'PAA'], // remainder 2: both tail lookups out of range
+      [[300, 4096, 70000], 'PRFw'], // remainder 0: the main triple loop
+      [[1_000_000_000], 'AA'], // remainder 1: overflows int32 shifts
+    ];
+    for (const [elements, expected] of outOfRange) {
+      const encoded = bytesToBase64url(elements as unknown as Uint8Array);
+      expect(encoded).toBe(expected);
+      // Negative: no NUL, and nothing outside the alphabet, may leak through
+      // an out-of-range lookup into the 64-entry table.
+      expect(encoded).toMatch(/^[A-Za-z0-9_-]*$/);
+      expect(encoded).not.toContain('\u0000');
+    }
+  });
+
+  it('is unaffected by the size of the preceding call (per-call scratch)', () => {
+    // What this pins is that NO state survives between calls: a large encode
+    // followed by a small one (and vice versa) is exactly as correct as either
+    // alone. A module-scope scratch sized on first use overflows or truncates
+    // here. (It does NOT, and cannot, prove the memory-hygiene half of the
+    // per-call rationale — that a correctly-sliced shared buffer would still
+    // retain the last payload's characters. That property is unobservable
+    // from outside; it is why the allocation is per call, not something a
+    // test can assert.)
+    const big = new Uint8Array(20_000);
+    for (let i = 0; i < big.length; i += 1) {
+      big[i] = (i * 13 + 5) & 0xff;
+    }
+    const small = new Uint8Array([0x01]);
+    const bigExpected = Buffer.from(big).toString('base64url');
+    const smallExpected = Buffer.from(small).toString('base64url');
+    // ORDER IS LOAD-BEARING: the SMALL encode must come first. A module-scope
+    // scratch sized on first use would then be 2 entries long, and the `big`
+    // call below would silently drop every write past index 1 and emit a
+    // 2-character string. If the big call came first, that same broken
+    // implementation would size the scratch to 8192 and pass.
+    expect(bytesToBase64url(small)).toBe(smallExpected);
+    expect(bytesToBase64url(big)).toBe(bigExpected);
+    expect(bytesToBase64url(new Uint8Array(0))).toBe('');
+    expect(bytesToBase64url(small)).toBe(smallExpected);
+    expect(bytesToBase64url(big)).toBe(bigExpected);
   });
 });
 
@@ -303,6 +480,92 @@ describe('codec: base64urlToBytes', () => {
       ).toBe(true);
       void canonical;
     });
+
+    it('equals Buffer decode over arbitrary binary strings (fast-check)', () => {
+      // Unrestricted UTF-16: whatever the generator produces, the decoder must
+      // agree with Node byte-for-byte rather than diverging on some code unit
+      // the curated pools above happen not to contain.
+      fc.assert(
+        fc.property(
+          fc.string({ minLength: 0, maxLength: 256, unit: 'binary' }),
+          s => {
+            expect(
+              bytesEqual(
+                base64urlToBytes(s),
+                new Uint8Array(Buffer.from(s, 'base64url'))
+              )
+            ).toBe(true);
+          }
+        ),
+        FC_RUNS
+      );
+    });
+
+    it('equals Buffer decode over the adversarial alphabet (fast-check)', () => {
+      fc.assert(
+        fc.property(arbAdversarialString, s => {
+          expect(
+            bytesEqual(
+              base64urlToBytes(s),
+              new Uint8Array(Buffer.from(s, 'base64url'))
+            )
+          ).toBe(true);
+        }),
+        { numRuns: 3000 }
+      );
+    });
+
+    it('never throws, for any string (fast-check + explicit extremes)', () => {
+      // Negative contract: the decoder has NO rejection path at all. Every
+      // string, however malformed, yields bytes — that is what lets
+      // `decryptText` fail on the authentication tag rather than on a parse.
+      fc.assert(
+        fc.property(
+          fc.string({ minLength: 0, maxLength: 256, unit: 'binary' }),
+          s => {
+            expect(() => base64urlToBytes(s)).not.toThrow();
+          }
+        ),
+        FC_RUNS
+      );
+      const extremes = [
+        '',
+        '=',
+        '===',
+        'A',
+        '\u0000',
+        '\ud800',
+        '\udfff',
+        ' '.repeat(1000),
+        '='.repeat(1000),
+        'A'.repeat(100_000),
+      ];
+      for (const s of extremes) {
+        expect(() => base64urlToBytes(s)).not.toThrow();
+        expect(
+          bytesEqual(
+            base64urlToBytes(s),
+            new Uint8Array(Buffer.from(s, 'base64url'))
+          )
+        ).toBe(true);
+      }
+    });
+
+    it('discards a trailing sextet that cannot complete a byte', () => {
+      // 5 alphabet characters carry 30 bits: 3 whole bytes plus 6 orphan bits
+      // that Node drops. A decoder that kept them would return 4 bytes.
+      const five = 'Zm9vY';
+      const decoded = base64urlToBytes(five);
+      expect(decoded.length).toBe(3);
+      expect(
+        bytesEqual(decoded, new Uint8Array(Buffer.from(five, 'base64url')))
+      ).toBe(true);
+      // A single orphan character carries nothing at all.
+      expect(base64urlToBytes('A').length).toBe(0);
+      // Skipped characters do not count towards the sextet total, so the
+      // orphan is still the 5th ALPHABET character, not the 5th code unit.
+      expect(base64urlToBytes('Zm 9v Y').length).toBe(3);
+    });
   });
 });
 
@@ -368,10 +631,155 @@ describe('codec: isValidBase64url', () => {
   });
 
   it('never throws for any input', () => {
-    const inputs = ['', 'A', '===', ' ', '💥', 'Zm9v', 'a'.repeat(1000)];
+    const inputs = ['', 'A', '===', '\u0000', '💥', 'Zm9v', 'a'.repeat(1000)];
     for (const s of inputs) {
       expect(() => isValidBase64url(s)).not.toThrow();
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // Equivalence with the decode-then-re-encode definition this function
+  // replaced. `isValidBase64url` is now an O(n), allocation-free structural
+  // scan; these properties are the guarantee that the swap changed no answer.
+  // -------------------------------------------------------------------------
+  describe('canonical-form equivalence with the round-trip definition', () => {
+    it('equals the round trip over arbitrary binary strings (fast-check)', () => {
+      fc.assert(
+        fc.property(
+          fc.string({ minLength: 0, maxLength: 256, unit: 'binary' }),
+          s => {
+            expect(isValidBase64url(s)).toBe(oracleCanonicalRoundTrip(s));
+          }
+        ),
+        FC_RUNS
+      );
+    });
+
+    it('equals the round trip over the adversarial alphabet (fast-check)', () => {
+      // This generator is what catches the two structural traps: a code unit
+      // >= 256 whose low byte aliases an alphabet character, and the
+      // standard-alphabet `+` / `/` that the LENIENT decoder accepts but the
+      // canonical encoder never emits.
+      fc.assert(
+        fc.property(arbAdversarialString, s => {
+          expect(isValidBase64url(s)).toBe(oracleCanonicalRoundTrip(s));
+        }),
+        { numRuns: 3000 }
+      );
+    });
+
+    it('equals the round trip over canonical encodings of random bytes (fast-check)', () => {
+      fc.assert(
+        fc.property(fc.uint8Array({ minLength: 0, maxLength: 256 }), bytes => {
+          const s = bytesToBase64url(bytes);
+          expect(isValidBase64url(s)).toBe(oracleCanonicalRoundTrip(s));
+          expect(isValidBase64url(s)).toBe(s.length > 0);
+        }),
+        FC_RUNS
+      );
+    });
+
+    it('classifies every length 0..5 exactly as the round trip does', () => {
+      // One canonical and one non-canonical string at each reachable length,
+      // covering all four `length % 4` residues.
+      const cases: Array<[string, boolean]> = [
+        ['', false], // length 0: the falsy short-circuit
+        ['A', false], // length 1: %4 === 1, cannot carry a whole byte
+        ['Zg', true], // length 2: %4 === 2, canonical encoding of 'f'
+        ['AB', false], // length 2: last sextet 1 -> low 4 bits non-zero
+        ['Zm8', true], // length 3: %4 === 3, canonical encoding of 'fo'
+        ['AAB', false], // length 3: last sextet 1 -> low 2 bits non-zero
+        ['Zm9v', true], // length 4: %4 === 0, canonical encoding of 'foo'
+        ['Zm9vY', false], // length 5: %4 === 1
+      ];
+      for (const [s, expected] of cases) {
+        expect(isValidBase64url(s)).toBe(expected);
+        expect(isValidBase64url(s)).toBe(oracleCanonicalRoundTrip(s));
+        expect(isValidBase64url(s)).toBe(oracleIsValidBase64Url(s));
+      }
+    });
+
+    it('tests the final character by its SEXTET value, not its code unit', () => {
+      // The tail-bit condition is about the DECODED 6-bit value of the last
+      // character, never its UTF-16 code unit. Implementing it as
+      // `s.charCodeAt(L - 1) & 0x0f` (or `& 0x03`) is wrong in BOTH
+      // directions, and each of these four strings catches one direction:
+      //
+      //  'Zg'  last 'g' = code 0x67 (low 4 bits 0x7), sextet 32 (low 4 bits 0)
+      //        -> canonical; a code-unit test would reject it.
+      //  'A0'  last '0' = code 0x30 (low 4 bits 0), sextet 52 (low 4 bits 4)
+      //        -> NOT canonical; a code-unit test would accept it.
+      //  'AAA' last 'A' = code 0x41 (low 2 bits 1), sextet 0 (low 2 bits 0)
+      //        -> canonical; a code-unit test would reject it.
+      //  'AAD' last 'D' = code 0x44 (low 2 bits 0), sextet 3 (low 2 bits 3)
+      //        -> NOT canonical; a code-unit test would accept it.
+      const cases: Array<[string, boolean]> = [
+        ['Zg', true],
+        ['A0', false],
+        ['AAA', true],
+        ['AAD', false],
+      ];
+      for (const [s, expected] of cases) {
+        expect(isValidBase64url(s)).toBe(expected);
+        expect(isValidBase64url(s)).toBe(oracleCanonicalRoundTrip(s));
+      }
+    });
+
+    it('rejects the standard-alphabet and >= 256 aliases the decoder accepts', () => {
+      // The decoder maps '+'/'/' onto '-'/'_' and truncates every code unit to
+      // its low 8 bits, so all of these DECODE fine — but none of them can be
+      // encoder OUTPUT, so none is canonical.
+      const nonCanonical = [
+        // 'a+/b' decodes to exactly the same bytes as the canonical 'a-_b'
+        // asserted below; only the alphabet differs.
+        'a+/b',
+        'Zm+v', // a single standard-alphabet character is enough
+        '\u0141\u0141\u0141\u0141', // low bytes spell 'AAAA'
+        'Q\u0141QQ', // one aliasing unit inside an otherwise canonical string
+        'Zg==', // padding
+        'a=', // padding
+        'a b', // interior whitespace
+        'Zm9v\n', // trailing newline
+        ' Zm9v', // leading whitespace
+        'Zm9v!', // stray punctuation
+      ];
+      for (const s of nonCanonical) {
+        expect(isValidBase64url(s)).toBe(false);
+        expect(isValidBase64url(s)).toBe(oracleCanonicalRoundTrip(s));
+        // Negative: rejecting it here must NOT make the decoder reject it too.
+        expect(() => base64urlToBytes(s)).not.toThrow();
+      }
+      // The URL-safe form of the alias case IS canonical, which is what makes
+      // the rejections above a real distinction rather than a blanket no.
+      expect(isValidBase64url('a-_b')).toBe(true);
+      expect(oracleCanonicalRoundTrip('a-_b')).toBe(true);
+      expect(isValidBase64url('Zm-v')).toBe(true);
+    });
+
+    it('never throws and returns false for non-string input', () => {
+      fc.assert(
+        fc.property(arbAdversarialString, s => {
+          expect(() => isValidBase64url(s)).not.toThrow();
+        }),
+        FC_RUNS
+      );
+      const notStrings = [
+        undefined,
+        null,
+        0,
+        1,
+        NaN,
+        {},
+        [],
+        new String('Zm9v'),
+      ];
+      for (const value of notStrings) {
+        expect(() =>
+          isValidBase64url(value as unknown as string)
+        ).not.toThrow();
+        expect(isValidBase64url(value as unknown as string)).toBe(false);
+      }
+    });
   });
 });
 

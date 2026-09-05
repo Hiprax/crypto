@@ -35,7 +35,7 @@
  * providers); the `ARGON2_NOT_AVAILABLE` failure path is covered separately in
  * `engine-web-unavailable.test.ts`.
  */
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { webEngine } from '../engine.web';
 import { nodeEngine } from '../engine.node';
 import { CryptoError, CryptoErrorType } from '../types';
@@ -420,5 +420,279 @@ describe('webEngine.sha256', () => {
     expect(bytesToHex(digest)).toBe(
       'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
     );
+  });
+});
+
+/**
+ * Phase 7 — the Web Crypto per-call entropy cap, pinned deterministically.
+ *
+ * `getRandomValues` rejects a single request larger than 65 536 bytes with a
+ * `QuotaExceededError`, while Node's `crypto.randomBytes` has no such limit.
+ * `webRandomBytes` hides that difference by filling the output in <= 65 536-byte
+ * chunks, and the two engines are only drop-in interchangeable while it does.
+ *
+ * Two complementary checks, because neither alone is enough:
+ *
+ *   - A SPY-based test that replaces `getRandomValues` with a marker filler.
+ *     Each call stamps the region it was handed with its own call index, so the
+ *     resulting array *encodes* the split and the assertions are exact and
+ *     fully deterministic — no probability anywhere. This is what pins the
+ *     boundary arithmetic at 0 / 65 536 / 65 537 / 200 000.
+ *   - A REAL, unmocked test that the delivered bytes are genuine entropy, so a
+ *     regression that "chunks" correctly while leaving the tail zeroed is
+ *     caught too. Its probabilistic assertions are scoped to FULL 4096-byte
+ *     windows (an all-zero window has probability 2^-32768), never to a single
+ *     byte, so it cannot flake.
+ */
+describe('webEngine.randomBytes chunking at the Web Crypto per-call cap', () => {
+  /** Web Crypto's documented per-call quota; the engine must never exceed it. */
+  const CAP = 65536;
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  /**
+   * Replace `getRandomValues` with a deterministic marker filler: the Nth call
+   * fills the view it is given with the byte value N. The returned `chunks`
+   * array records the exact (offset, length) of every call.
+   */
+  function spyOnGetRandomValues(): Array<{ offset: number; length: number }> {
+    const chunks: Array<{ offset: number; length: number }> = [];
+    jest
+      .spyOn(globalThis.crypto, 'getRandomValues')
+      .mockImplementation(<T extends ArrayBufferView | null>(view: T): T => {
+        if (view !== null && ArrayBuffer.isView(view)) {
+          chunks.push({ offset: view.byteOffset, length: view.byteLength });
+          const bytes = new Uint8Array(
+            view.buffer,
+            view.byteOffset,
+            view.byteLength
+          );
+          bytes.fill(chunks.length & 0xff);
+        }
+        return view;
+      });
+    return chunks;
+  }
+
+  it('makes NO entropy call at all for length 0 and returns an empty array', () => {
+    const chunks = spyOnGetRandomValues();
+    const bytes = webEngine.randomBytes(0);
+
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(bytes.length).toBe(0);
+    // NEGATIVE: a `<=` loop bound would ask Web Crypto for a zero-length view;
+    // harmless in Node, but it is not the contract and it is free to assert.
+    expect(chunks).toEqual([]);
+  });
+
+  it('fills exactly ONE chunk for a request of exactly 65536 bytes', () => {
+    const chunks = spyOnGetRandomValues();
+    const bytes = webEngine.randomBytes(CAP);
+
+    expect(bytes.length).toBe(CAP);
+    // Boundary n: still a single call — an off-by-one that splits here would
+    // work, but it would also mean the loop bound is wrong in the other
+    // direction, so pin it.
+    expect(chunks).toEqual([{ offset: 0, length: CAP }]);
+    // Every byte carries call #1's marker: the whole buffer really was filled.
+    expect(bytes[0]).toBe(1);
+    expect(bytes[CAP - 1]).toBe(1);
+    expect(bytes.every(byte => byte === 1)).toBe(true);
+  });
+
+  it('splits a 65537-byte request into 65536 + 1, with the last byte from the SECOND call', () => {
+    const chunks = spyOnGetRandomValues();
+    const bytes = webEngine.randomBytes(CAP + 1);
+
+    expect(bytes.length).toBe(CAP + 1);
+    // Boundary n+1: the single byte past the cap must come from its own call,
+    // because one call for 65537 bytes would throw QuotaExceededError.
+    expect(chunks).toEqual([
+      { offset: 0, length: CAP },
+      { offset: CAP, length: 1 },
+    ]);
+    expect(bytes[CAP - 1]).toBe(1);
+    expect(bytes[CAP]).toBe(2);
+    // NEGATIVE: the tail byte must NOT be left at its zero-initialised value,
+    // which is exactly what a `length` (rather than `end`) slice bug produces.
+    expect(bytes[CAP]).not.toBe(0);
+  });
+
+  it('splits a 200000-byte request into three full chunks plus a remainder', () => {
+    const chunks = spyOnGetRandomValues();
+    const length = 200000;
+    const bytes = webEngine.randomBytes(length);
+
+    expect(bytes.length).toBe(length);
+    expect(chunks).toEqual([
+      { offset: 0, length: CAP },
+      { offset: CAP, length: CAP },
+      { offset: 2 * CAP, length: CAP },
+      { offset: 3 * CAP, length: length - 3 * CAP },
+    ]);
+    // NEGATIVE: no single request may exceed the Web Crypto quota.
+    expect(chunks.every(chunk => chunk.length <= CAP)).toBe(true);
+    // Each region carries its own call's marker, so no region was filled twice
+    // and none was skipped.
+    expect(bytes[0]).toBe(1);
+    expect(bytes[CAP]).toBe(2);
+    expect(bytes[2 * CAP]).toBe(3);
+    expect(bytes[3 * CAP]).toBe(4);
+    expect(bytes[length - 1]).toBe(4);
+  });
+
+  it('delivers real entropy across the chunk boundary (unmocked)', () => {
+    // The marker tests above prove the SPLIT; this proves the BYTES. Assertions
+    // are over full 4096-byte windows, never a single byte, so they are
+    // deterministic in practice (p(all-zero window) = 2^-32768).
+    for (const length of [CAP, CAP + 1, 200000]) {
+      const bytes = webEngine.randomBytes(length);
+      expect(bytes.length).toBe(length);
+
+      // Only FULL windows are scanned, so the trailing partial chunk (1 byte at
+      // 65537, 3392 bytes at 200000) is not entropy-checked here. That tail is
+      // covered by the marker tests above, which assert `bytes[CAP]` and
+      // `bytes[length - 1]` carry the LAST call's marker and therefore that the
+      // final view really aliases `out`. Do not delete those on the assumption
+      // that this loop subsumes them.
+      const windowSize = 4096;
+      for (
+        let offset = 0;
+        offset + windowSize <= length;
+        offset += windowSize
+      ) {
+        const window = bytes.subarray(offset, offset + windowSize);
+        expect(window.some(byte => byte !== 0)).toBe(true);
+      }
+    }
+
+    // NEGATIVE: the chunked path must not repeat a block — a fill that reused
+    // one 65536-byte chunk of entropy for the whole buffer would be
+    // catastrophic (repeated salts/IVs) yet would pass every length check.
+    const big = webEngine.randomBytes(200000);
+    const firstChunk = bytesToHex(big.subarray(0, CAP));
+    const secondChunk = bytesToHex(big.subarray(CAP, 2 * CAP));
+    const thirdChunk = bytesToHex(big.subarray(2 * CAP, 3 * CAP));
+    expect(secondChunk).not.toBe(firstChunk);
+    expect(thirdChunk).not.toBe(firstChunk);
+    expect(thirdChunk).not.toBe(secondChunk);
+  });
+});
+
+/**
+ * Phase 7 — the empty-plaintext case of Web Crypto's appended-tag convention.
+ *
+ * `subtle.encrypt` returns `C‖T`; the {@link CryptoEngine} contract returns the
+ * tag separately, so `webAeadEncrypt` slices the trailing 16 bytes off. With an
+ * empty plaintext the whole result IS the tag, which makes this the degenerate
+ * case where a wrong split boundary is invisible in every length check that
+ * only looks at `combined.length`. The v2 container's `encMeta`/`encData`
+ * segments can legitimately be empty, so this is a reachable wire-format case,
+ * not a curiosity.
+ */
+describe('webEngine.aeadEncrypt — empty-plaintext tag split parity with nodeEngine', () => {
+  it('returns an empty ciphertext plus a 16-byte tag byte-identical to nodeEngine', async () => {
+    const key = webEngine.randomBytes(32);
+    const iv = webEngine.randomBytes(12);
+    const aad = utf8Encode('empty-plaintext-split-parity');
+    const empty = new Uint8Array(0);
+
+    const webOut = await webEngine.aeadEncrypt(key, iv, empty, aad);
+    const nodeOut = await nodeEngine.aeadEncrypt(key, iv, empty, aad);
+
+    // The split lands exactly at 0: everything Web Crypto returned is tag.
+    expect(webOut.ciphertext.length).toBe(0);
+    expect(webOut.tag.length).toBe(16);
+    // Byte-identical to Node's GMAC-over-AAD tag — one wire format, both
+    // runtimes, even with nothing to encrypt.
+    expect(bytesToHex(webOut.tag)).toBe(bytesToHex(nodeOut.tag));
+    expect(nodeOut.ciphertext.length).toBe(0);
+
+    // NEGATIVE: the tag must NOT have been left inside the ciphertext. A split
+    // at `combined.length` (rather than `combined.length - 16`) yields a
+    // 16-byte "ciphertext" and an empty tag, and every round-trip below would
+    // still be reversible within a single engine — only these two assertions
+    // and the cross-engine comparison catch it.
+    expect(webOut.ciphertext.length).not.toBe(16);
+    expect(webOut.tag.length).not.toBe(0);
+
+    // Both engines accept each other's empty-plaintext output.
+    const webFromWeb = await webEngine.aeadDecrypt(
+      key,
+      iv,
+      webOut.ciphertext,
+      webOut.tag,
+      aad
+    );
+    const nodeFromWeb = await nodeEngine.aeadDecrypt(
+      key,
+      iv,
+      webOut.ciphertext,
+      webOut.tag,
+      aad
+    );
+    const webFromNode = await webEngine.aeadDecrypt(
+      key,
+      iv,
+      nodeOut.ciphertext,
+      nodeOut.tag,
+      aad
+    );
+    expect(webFromWeb.length).toBe(0);
+    expect(nodeFromWeb.length).toBe(0);
+    expect(webFromNode.length).toBe(0);
+  });
+
+  it('still binds the AAD when there is no plaintext to authenticate', async () => {
+    // With an empty plaintext the tag is a pure GMAC over the AAD, so this is
+    // the case where a dropped `additionalData` would go completely unnoticed
+    // by a round-trip test.
+    const key = webEngine.randomBytes(32);
+    const iv = webEngine.randomBytes(12);
+    const empty = new Uint8Array(0);
+
+    const boundToA = await webEngine.aeadEncrypt(
+      key,
+      iv,
+      empty,
+      utf8Encode('context-a')
+    );
+    const boundToB = await webEngine.aeadEncrypt(
+      key,
+      iv,
+      empty,
+      utf8Encode('context-b')
+    );
+
+    // Different AAD, same key+iv, empty plaintext => different tags.
+    expect(bytesToHex(boundToA.tag)).not.toBe(bytesToHex(boundToB.tag));
+
+    await expect(
+      webEngine.aeadDecrypt(
+        key,
+        iv,
+        boundToA.ciphertext,
+        boundToA.tag,
+        utf8Encode('context-b')
+      )
+    ).rejects.toThrow(CryptoError);
+
+    try {
+      await webEngine.aeadDecrypt(
+        key,
+        iv,
+        boundToA.ciphertext,
+        boundToA.tag,
+        utf8Encode('context-b')
+      );
+      throw new Error('Expected aeadDecrypt to reject on AAD mismatch');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CryptoError);
+      const e = err as InstanceType<typeof CryptoError>;
+      expect(e.type).toBe(CryptoErrorType.DECRYPTION_FAILED);
+      expect(e.code).toBe('DECRYPTION_FAILED');
+    }
   });
 });

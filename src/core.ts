@@ -56,6 +56,7 @@ import {
   MAX_ARGON2_TIME_COST,
   MAX_ARGON2_PARALLELISM,
   MAX_PBKDF2_ITERATIONS,
+  assertGcmPlaintextLimit,
 } from './format-core.js';
 import {
   utf8Encode,
@@ -148,6 +149,54 @@ const PASSWORD_MIN_LENGTH = 8;
 const ARGON2_ID = 2;
 
 /**
+ * Number of leading base64url characters {@link CryptoCore.inspectHeader}
+ * decodes from a string input.
+ *
+ * **Why a prefix is enough.** A v1 header is {@link HEADER_LENGTH} = 22 bytes
+ * and sits at the very front of the record, so reading it never requires the
+ * body. `inspectHeader` used to decode the WHOLE string — on a multi-megabyte
+ * ciphertext that allocates (and immediately discards) a plaintext-sized byte
+ * array to read 22 bytes.
+ *
+ * **Why 32 specifically.** `ceil(22 * 4 / 3) = 30` characters already carry
+ * the 22 header bytes, but 30 is not a multiple of 4. Rounding up to the next
+ * multiple of 4 makes the slice a whole number of base64 quanta, which is the
+ * load-bearing property: a quantum-aligned prefix of a *canonical* string is
+ * itself a canonical string, and its decode is a byte-exact prefix of the full
+ * decode — no partial-sextet tail to reconstruct and no dependence on the
+ * decoder's leniency rules. 32 characters decode to exactly 24 bytes: two more
+ * than {@link parseHeader}'s 22 and twenty more than {@link hasMagic}'s 4. The
+ * width is therefore `ceil(HEADER_LENGTH / 3) * 4`; it is spelled as a literal
+ * because it is a fixed property of a frozen wire format, and
+ * `inspect-prefix.test.ts` asserts the decode yields at least `HEADER_LENGTH`
+ * bytes, so a future header growth past 24 bytes fails loudly rather than
+ * silently truncating.
+ *
+ * **Why the canonical precondition holds.** The slice happens only AFTER
+ * `isValidBase64url` has accepted the ENTIRE string, so by then the input is
+ * known to be the exact form {@link bytesToBase64url} emits: URL-safe
+ * alphabet only, unpadded, no whitespace, no standard-alphabet aliases. That
+ * whole-string check deliberately does NOT narrow along with the decode —
+ * narrowing it would silently start accepting a malformed tail.
+ *
+ * **Why the short-input branches are unaffected.** The smallest canonical
+ * length above 32 is 34 — 33 is impossible, since `length % 4 === 1` carries
+ * no whole byte — and it decodes to 25 bytes, so a sliced input always has the
+ * full 24 bytes to work with. Every record too short to reach that width is
+ * therefore decoded in its entirety, and the branches that depend on a short
+ * decode (`null` for a non-magic record, `TRUNCATED_HEADER` for a
+ * magic-bearing record under 22 bytes) see exactly the bytes they saw before.
+ * Note the `length >` guard at the call site is a pure allocation saving, NOT
+ * a correctness condition: `String.prototype.slice` already clamps its `end`
+ * to the string length, so removing the guard would be behaviourally
+ * identical — it would just copy a substring that is already the whole string.
+ *
+ * `src/__tests__/inspect-prefix.test.ts` pins the equivalence, the bound, and
+ * every branch above.
+ */
+const HEADER_B64URL_PREFIX_CHARS = 32;
+
+/**
  * Pure (static) password-strength validator. Does NOT depend on any
  * `CryptoCore` instance state — it is a deterministic function of the
  * password string alone. Extracted to module scope so that the
@@ -229,7 +278,7 @@ export function isValidPassword(password: string): boolean {
 
 /**
  * Container format version byte (v1 text/file ciphertext uses
- * {@link FORMAT_VERSION} = 0x01). Feeding a v2 blob to the v1
+ * `FORMAT_VERSION` = 0x01). Feeding a v2 blob to the v1
  * `decryptBytes`/`decryptText` path is rejected — in `auto` mode the v1
  * `parseHeader` throws `UNSUPPORTED_VERSION`, which the v0 fallback cannot
  * rescue, so a `CryptoError` is thrown either way — and {@link parseV2Container}
@@ -1094,6 +1143,91 @@ export abstract class CryptoCore {
   }
 
   /**
+   * **Base64url encode seam.** Encode ciphertext bytes as a canonical,
+   * unpadded, URL-safe base64 string.
+   *
+   * The default implementation is the pure {@link bytesToBase64url} from
+   * `./codec.js`, which is the **reference implementation** of this project's
+   * text encoding and the one the browser build runs. A runtime whose host
+   * offers a faster native encoder may override this method — the Node
+   * `CryptoManager` does, with `Buffer.prototype.toString('base64url')` — but
+   * an override is an *implementation swap behind an identical byte
+   * contract*, never a fork of the logic:
+   *
+   * - It MUST return, for every input, exactly the string
+   *   `bytesToBase64url(bytes)` returns — same characters, same length, no
+   *   padding, no line breaks, URL-safe alphabet only. This is a wire-format
+   *   guarantee: the returned string IS the ciphertext a caller stores, and a
+   *   single differing character would make text encrypted on one runtime
+   *   undecryptable on another.
+   *   (The one verified exception is a `Uint8Array` whose `ArrayBuffer` has
+   *   been detached: it reports `length === 0`, so the pure encoder returns
+   *   `''`, while a host encoder built on a buffer view may throw. That input
+   *   cannot reach this method — it is `protected`, and its only call site
+   *   hands it the freshly allocated buffer from {@link encryptBytes} — so it
+   *   is recorded as a known limit rather than guarded against.)
+   * - It MUST NOT mutate `bytes`. The caller still owns that buffer and
+   *   scrubs it after encoding.
+   * - It MUST tolerate a `bytes` that is a view at a non-zero `byteOffset`
+   *   into a larger backing store (`encryptBytes` returns a freshly
+   *   allocated array today, but subarray views are the norm elsewhere in
+   *   this codebase).
+   *
+   * `src/__tests__/codec-seam.test.ts` pins all three properties against the
+   * pure encoder for every override in the tree.
+   *
+   * @param bytes - bytes to encode (not mutated)
+   * @returns the canonical unpadded base64url encoding of `bytes`
+   */
+  protected encodeBase64url(bytes: Uint8Array): string {
+    return bytesToBase64url(bytes);
+  }
+
+  /**
+   * **Base64url decode seam.** Decode a base64url (or standard-alphabet,
+   * padded, or whitespace-wrapped) string into bytes.
+   *
+   * The default implementation is the pure {@link base64urlToBytes} from
+   * `./codec.js` — the reference decoder, and the one the browser build runs.
+   * The Node `CryptoManager` overrides it with `Buffer.from(s, 'base64url')`.
+   * As with {@link encodeBase64url}, an override is an implementation swap
+   * behind an identical byte contract, never a fork:
+   *
+   * - It MUST return, for every input string, exactly the bytes
+   *   `base64urlToBytes(s)` returns — including the **leniency contract**
+   *   that lets `decryptText` accept a line-wrapped or standard-alphabet
+   *   ciphertext: `=` terminates, non-alphabet code units are skipped rather
+   *   than fatal, `+`/`/` are accepted as aliases of `-`/`_`, each UTF-16
+   *   code unit is truncated to its low 8 bits before classification, and a
+   *   trailing sextet that does not complete a byte is discarded.
+   * - It MAY return a view at a non-zero `byteOffset` into a larger backing
+   *   store (the Node override returns a **pooled** `Buffer` for any result
+   *   Node's allocator decides to serve from its shared internal pool, which
+   *   is sized by `Buffer.poolSize` and has differed across releases). Every
+   *   consumer of the result is offset-safe: the
+   *   `viewOf` helpers in this file and in `./format-core.js` bind
+   *   `byteOffset`/`byteLength` explicitly, and {@link decryptBytes} reads
+   *   the components with `subarray`.
+   *
+   * One consequence of overriding this seam is worth stating plainly, because
+   * it is a change in the risk model rather than in behaviour: while both
+   * runtimes ran the pure decoder, a host upgrade could not by itself create a
+   * Node/browser split. With a host decoder in the wire path it could. The
+   * exposure is narrow — canonical strings (everything this library emits)
+   * have exactly one decoding, so a divergence could only appear on malformed
+   * or lenient input, which fails GCM authentication anyway — and it is
+   * guarded: the codec suite runs its leniency properties against the host
+   * decoder as an oracle on whatever runtime the test tier uses, so a host
+   * behaviour change surfaces there rather than in production.
+   *
+   * @param s - the encoded string
+   * @returns the decoded bytes
+   */
+  protected decodeBase64url(s: string): Uint8Array {
+    return base64urlToBytes(s);
+  }
+
+  /**
    * Derive a raw AES key from a password using Argon2id via the injected
    * engine. Isomorphic counterpart of the Node subclass's `deriveKey`:
    * validates inputs, NFC-normalises the password, and applies embedded
@@ -1182,6 +1316,9 @@ export abstract class CryptoCore {
    *   is configured)
    * @returns the v1 ciphertext bytes
    * @throws CryptoError on invalid input, weak password, or an engine failure
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if
+   *   `data.length` exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1). Checked before any key derivation; no opt-out.
    */
   public async encryptBytes(
     data: Uint8Array,
@@ -1194,6 +1331,11 @@ export abstract class CryptoCore {
         'INVALID_DATA'
       );
     }
+
+    // Refuse anything past the AES-GCM per-invocation bound BEFORE deriving a
+    // key: past it the 32-bit block counter wraps and the ciphertext has
+    // neither confidentiality nor authenticity. There is no opt-out.
+    assertGcmPlaintextLimit(data.length, 'DATA_TOO_LARGE_FOR_GCM');
 
     // Use provided password or default passphrase.
     const finalPassword = password || this.defaultPassphrase;
@@ -1277,6 +1419,10 @@ export abstract class CryptoCore {
    * @throws CryptoError on invalid input, wrong password, tampering, or an
    *   unsupported/mismatched format (all confidentiality-relevant failures
    *   surface as the generic `DECRYPTION_FAILED`).
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   ciphertext body exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1) — such a body could only come from a counter-wrapped,
+   *   already-broken encryption. Checked before any key derivation.
    */
   public async decryptBytes(
     data: Uint8Array,
@@ -1375,6 +1521,15 @@ export abstract class CryptoCore {
           'INVALID_ENCRYPTED_DATA_SIZE'
         );
       }
+
+      // Refuse a ciphertext body past the AES-GCM per-invocation bound before
+      // deriving a key. GCM decryption is the same keystream construction as
+      // encryption, so a body this large could only have been produced by a
+      // counter-wrapped (i.e. already broken) encryption.
+      assertGcmPlaintextLimit(
+        combined.length - (bodyOffset + minBodySize),
+        'DATA_TOO_LARGE_FOR_GCM'
+      );
 
       // Extract components. Each is a subarray view over `combined`.
       const saltStart = bodyOffset;
@@ -1476,7 +1631,10 @@ export abstract class CryptoCore {
     try {
       plaintextBytes = utf8Encode(text);
       ciphertext = await this.encryptBytes(plaintextBytes, password);
-      const encoded = bytesToBase64url(ciphertext);
+      // Encoded through the {@link encodeBase64url} seam so a runtime with a
+      // faster native encoder (Node's `Buffer`) can supply it without forking
+      // the format; the seam's byte contract makes the two indistinguishable.
+      const encoded = this.encodeBase64url(ciphertext);
       this.secureClear(plaintextBytes);
       this.secureClear(ciphertext);
       return encoded;
@@ -1543,7 +1701,13 @@ export abstract class CryptoCore {
     let combinedBytes: Uint8Array | null = null;
     let plaintext: Uint8Array | null = null;
     try {
-      combinedBytes = base64urlToBytes(encryptedText);
+      // Decoded through the {@link decodeBase64url} seam. The Node override
+      // returns a POOLED `Buffer` (a view at a non-zero `byteOffset`) for any
+      // result up to half of `Buffer.poolSize`; every consumer below is
+      // offset-safe, and
+      // `secureClear` zeroes only this view's own range, never the rest of
+      // the pool.
+      combinedBytes = this.decodeBase64url(encryptedText);
       plaintext = await this.decryptBytes(combinedBytes, password);
       const result = utf8Decode(plaintext);
       this.secureClear(plaintext);
@@ -1572,19 +1736,45 @@ export abstract class CryptoCore {
    * decrypting. Returns `null` for legacy v0 ciphertexts that do not carry a
    * header. Useful for tooling and tests.
    *
+   * **This is a v1 inspector, not a format sniffer.** A v2 container
+   * ({@link encryptContainer}) reuses the same 22-byte header SHAPE and the
+   * same "HPCR" magic, so it passes {@link hasMagic} and reaches
+   * {@link parseHeader}, which rejects its `0x02` version byte: inspecting a
+   * container **throws** `CryptoError(DECRYPTION_FAILED,
+   * 'UNSUPPORTED_VERSION')` — it does not return `null`, and there is no
+   * input for which this method reports "v2". Classify first when the input
+   * may be either format: the byte at offset {@link MAGIC_LENGTH} is
+   * `FORMAT_VERSION` (0x01) for v1 and {@link CONTAINER_VERSION} (0x02) for a
+   * container. Both constants are re-exported from the package's Node and
+   * browser entry points; `FORMAT_VERSION` lives in `./format-core.js`, which
+   * this module does not import, hence the plain reference.
+   *
    * String inputs are validated as well-formed base64url BEFORE decoding —
    * a base64url decode silently coerces invalid characters, which would make
    * a malformed input look like a v0 ciphertext (returning `null`) rather
    * than surfacing the encoding error. Failing fast matches the documented
    * contract. `Uint8Array` inputs (including Node `Buffer`s) are read as-is.
    *
+   * Only the first {@link HEADER_B64URL_PREFIX_CHARS} characters of a string
+   * are decoded, so inspecting a multi-megabyte ciphertext costs the same as
+   * inspecting a tiny one. The returned value is identical to what decoding
+   * the whole string produces — see that constant for why.
+   *
    * @param input - either a base64url string (text format) or byte array
    *   (file contents). Strings are validated as base64url and decoded; byte
    *   arrays are read as-is.
    * @returns the parsed header, or `null` when the input lacks the v1 magic
+   * @throws CryptoError (`INVALID_INPUT` / `INVALID_INPUT`) if the input is an
+   *   empty string, or is neither a string nor a `Uint8Array`.
    * @throws CryptoError (`INVALID_INPUT` / `INVALID_BASE64URL`) if the input
-   *   string is not well-formed base64url, or if the input begins with the
-   *   v1 magic but is otherwise malformed.
+   *   string is not well-formed base64url.
+   * @throws CryptoError (`DECRYPTION_FAILED` / `UNSUPPORTED_VERSION`) if the
+   *   input carries the "HPCR" magic but a version byte other than 0x01 —
+   *   most commonly a v2 container, whose version byte is
+   *   {@link CONTAINER_VERSION}.
+   * @throws CryptoError if the input begins with the v1 magic but is
+   *   otherwise malformed (`TRUNCATED_HEADER`, `UNSUPPORTED_KDF`,
+   *   `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`).
    */
   public inspectHeader(input: string | Uint8Array): ParsedHeader | null {
     let buf: Uint8Array;
@@ -1608,7 +1798,24 @@ export abstract class CryptoCore {
           'INVALID_BASE64URL'
         );
       }
-      buf = base64urlToBytes(input);
+      // Note: the canonical-form predicate above is deliberately NOT part of
+      // the seam — it is a pure structural scan with no native equivalent
+      // worth overriding, and keeping one implementation of "is this
+      // canonical base64url" keeps the accept/reject boundary identical on
+      // every runtime. Only the decode itself is swappable.
+      //
+      // Decode only the header prefix. The whole string has just been proven
+      // canonical, so a slice at a multiple of 4 is a whole number of base64
+      // quanta and decodes to a byte-exact prefix of the full decode — which
+      // is all `hasMagic` (bytes 0-3) and `parseHeader` (bytes 0-21) ever
+      // read. See {@link HEADER_B64URL_PREFIX_CHARS} for why 32 is the right
+      // width. The length guard only avoids copying a substring that would
+      // already be the whole string; `slice` clamps, so it is not load-bearing.
+      buf = this.decodeBase64url(
+        input.length > HEADER_B64URL_PREFIX_CHARS
+          ? input.slice(0, HEADER_B64URL_PREFIX_CHARS)
+          : input
+      );
     } else if (input instanceof Uint8Array) {
       buf = input;
     } else {
@@ -1847,6 +2054,11 @@ export abstract class CryptoCore {
         'WEAK_PASSWORD'
       );
     }
+    // No separate AES-GCM size guard is needed here: the container's own
+    // MAX_CONTAINER_DATA_SIZE (0xffffffff, 4 GiB — the width of the u32 size
+    // field in the metadata block) sits far below the NIST SP 800-38D
+    // per-invocation bound (MAX_GCM_PLAINTEXT_BYTES, ~64 GiB), so anything
+    // this check accepts is already within the GCM limit.
     if (data.length > MAX_CONTAINER_DATA_SIZE) {
       throw new CryptoError(
         `Container payload is too large (max ${MAX_CONTAINER_DATA_SIZE} bytes)`,

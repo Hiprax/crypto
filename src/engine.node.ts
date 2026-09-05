@@ -197,21 +197,39 @@ export async function __peekArgon2ProviderForTesting(): Promise<Argon2Provider |
  * {@link Argon2Hasher} interface.
  *
  * Returns a hasher tagged `provider: 'native'` on success; rejects with a
- * raw `Error` on import failure (the caller composes the friendly error
- * after deciding whether the WASM fallback also fails).
+ * raw `Error` on import failure OR on a module that loads but exposes no
+ * callable `hash` (the caller composes the friendly error after deciding
+ * whether the WASM fallback also fails).
  */
 async function importNativeArgon2(): Promise<Argon2Hasher> {
   // Dynamic ESM import. argon2 ships as CJS, so the imported namespace's
   // `default` property is the actual module object (Node's CJS-ESM
   // interop). Fall back to the namespace itself in case a future argon2
   // release ships native ESM.
-  const mod = (await import('argon2')) as
-    | { default: Argon2Module }
-    | Argon2Module;
+  const mod = (await import('argon2')) as {
+    hash?: Argon2Module['hash'];
+    default?: { hash?: Argon2Module['hash'] };
+  };
+  // `.default` FIRST — that is the shape the real, CJS-published package has,
+  // so the happy path is byte-for-byte what it always was. But select it only
+  // when its `hash` is genuinely CALLABLE: a truthiness test alone accepts a
+  // `.default` that is a re-export shim or an empty object, and the resulting
+  // hasher would resolve, be tagged `'native'`, and be CACHED FOREVER by
+  // `loadArgon2` — after which every call fails with a misleading
+  // `KEY_DERIVATION_FAILED` and `hash-wasm` is never tried, even when it is
+  // installed and working. Throwing instead lets `importArgon2Hasher`'s
+  // try/catch fall through to the WASM provider. This mirrors
+  // `engine.web.ts`'s `loadArgon2id`, so the two engines report the same
+  // condition the same way.
   const resolved =
-    'default' in mod && (mod as { default: Argon2Module }).default
-      ? (mod as { default: Argon2Module }).default
-      : (mod as Argon2Module);
+    typeof mod.default?.hash === 'function'
+      ? (mod.default as Argon2Module)
+      : typeof mod.hash === 'function'
+        ? (mod as Argon2Module)
+        : null;
+  if (resolved === null) {
+    throw new Error('`argon2` loaded but exposes no `hash` function');
+  }
   return {
     provider: 'native',
     hash: async (password, options): Promise<Buffer> => {
@@ -240,21 +258,33 @@ async function importNativeArgon2(): Promise<Argon2Hasher> {
  * a Buffer to match the native-provider return type.
  *
  * Returns a hasher tagged `provider: 'wasm'`; rejects with a raw `Error`
- * on import failure.
+ * on import failure OR on a module that loads but exposes no callable
+ * `argon2id`.
  */
 async function importHashWasmArgon2(): Promise<Argon2Hasher> {
-  const mod = (await import('hash-wasm')) as
-    | { default: HashWasmModule }
-    | HashWasmModule;
+  const mod = (await import('hash-wasm')) as {
+    argon2id?: HashWasmModule['argon2id'];
+    default?: { argon2id?: HashWasmModule['argon2id'] };
+  };
   // hash-wasm ships ESM with `argon2id` as a named export. Some bundlers
   // (and Jest's CJS-ESM interop) may surface it under `.default`; handle
-  // both shapes the same way as we do for native argon2.
+  // both shapes the same way as we do for native argon2. The candidate
+  // selection is unchanged; what is new is the refusal below, which is the
+  // symmetric half of `importNativeArgon2`'s: without it a module that loads
+  // with no callable `argon2id` resolves an unusable hasher, which then fails
+  // at CALL time as `KEY_DERIVATION_FAILED` instead of the actionable
+  // `ARGON2_NOT_AVAILABLE` that `engine.web.ts` reports for the same shape.
   const resolved =
-    'default' in mod &&
-    (mod as { default: HashWasmModule }).default &&
-    typeof (mod as { default: HashWasmModule }).default.argon2id === 'function'
-      ? (mod as { default: HashWasmModule }).default
-      : (mod as HashWasmModule);
+    typeof mod.default?.argon2id === 'function'
+      ? (mod.default as HashWasmModule)
+      : typeof mod.argon2id === 'function'
+        ? (mod as HashWasmModule)
+        : null;
+  if (resolved === null) {
+    // Same wording as `engine.web.ts`'s `loadArgon2id`, deliberately: one
+    // condition, one message, whichever engine hits it.
+    throw new Error('`hash-wasm` loaded but exposes no `argon2id` export');
+  }
   return {
     provider: 'wasm',
     hash: async (password, options): Promise<Buffer> => {

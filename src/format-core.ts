@@ -116,6 +116,76 @@ export const MAX_ARGON2_PARALLELISM = 64;
 export const MAX_PBKDF2_ITERATIONS = 10_000_000;
 
 /**
+ * Maximum plaintext length, in bytes, that may be processed by a SINGLE
+ * AES-GCM invocation: `2 ** 36 - 32` == 68 719 476 704 bytes (~64 GiB).
+ *
+ * NIST SP 800-38D §5.2.1.1 ("Input Data") caps the plaintext of one GCM
+ * invocation at `2 ** 39 - 256` **bits**, which is `2 ** 36 - 32` bytes. The
+ * bound is structural, not conservative padding, and follows directly from
+ * the counter block: only its low 32 bits vary. With the standard 96-bit IV,
+ * SP 800-38D §7.1 (Algorithm 4) sets the pre-counter block to
+ * `J0 = IV ‖ 0^31 ‖ 1` — so `J0` itself occupies counter value 1, and it is
+ * `E_K(J0)` that masks the authentication tag. Plaintext is encrypted with
+ * `GCTR(inc32(J0), P)`, i.e. starting at counter value 2, which leaves at
+ * most `2 ** 32 - 2` sixteen-byte plaintext blocks before the 32-bit field
+ * wraps. `16 * (2 ** 32 - 2)` is exactly `2 ** 36 - 32`.
+ *
+ * Past that point the counter wraps and repeats values already used, which
+ * destroys BOTH confidentiality (two plaintext blocks share a keystream
+ * block — a two-time pad) and authenticity (the wrap eventually reaches
+ * `J0`'s own counter value, handing the attacker the tag mask and with it
+ * the ability to forge).
+ *
+ * Neither OpenSSL's EVP layer nor Node's `crypto.createCipheriv` enforces
+ * this limit — an oversized call "succeeds" and returns ciphertext that is
+ * simply broken. This library therefore refuses such input up front, with
+ * no opt-out: an opt-out would be an opt-in to a broken construction.
+ *
+ * @see https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38d.pdf
+ */
+export const MAX_GCM_PLAINTEXT_BYTES = 2 ** 36 - 32;
+
+/**
+ * Throw unless `byteLength` fits within a single AES-GCM invocation.
+ *
+ * Applied at every AES-GCM entry point in the library (in-memory bytes, the
+ * low-level `Buffer` primitives, and all four streaming file paths) so an
+ * oversized payload is refused BEFORE any key derivation, temp-file creation
+ * or cipher construction happens. Values at exactly
+ * {@link MAX_GCM_PLAINTEXT_BYTES} are accepted; only strictly larger ones
+ * are refused.
+ *
+ * This is a bound check, not an input validator: `byteLength` is a
+ * PRECONDITION of the caller and must be a non-negative finite integer (in
+ * this library it is always a `Uint8Array`/`Buffer` `.length` or an
+ * `fs.Stats.size`, both of which satisfy that by construction). A `NaN`,
+ * negative or fractional argument is not diagnosed — it simply compares
+ * false and returns — so do not use this function to sanitise untrusted
+ * numbers.
+ *
+ * @param byteLength - plaintext (or ciphertext body) length in bytes; must be
+ *   a non-negative finite integer (see above)
+ * @param code - `CryptoError` code to report; defaults to
+ *   `'DATA_TOO_LARGE_FOR_GCM'`, the code every call site in this library uses
+ * @throws CryptoError `INVALID_INPUT` when `byteLength` exceeds the bound
+ */
+export function assertGcmPlaintextLimit(
+  byteLength: number,
+  code: string = 'DATA_TOO_LARGE_FOR_GCM'
+): void {
+  if (byteLength > MAX_GCM_PLAINTEXT_BYTES) {
+    throw new CryptoError(
+      `Data is too large for a single AES-GCM invocation: ${byteLength} bytes ` +
+        `exceeds the ${MAX_GCM_PLAINTEXT_BYTES}-byte limit set by NIST SP 800-38D ` +
+        'section 5.2.1.1. Beyond it the 32-bit GCM block counter wraps and the ' +
+        'ciphertext loses both confidentiality and authenticity.',
+      CryptoErrorType.INVALID_INPUT,
+      code
+    );
+  }
+}
+
+/**
  * KDF identifier as it appears in the v1 header.
  */
 export type KdfId = typeof KDF_ID_ARGON2ID | typeof KDF_ID_PBKDF2_SHA256;

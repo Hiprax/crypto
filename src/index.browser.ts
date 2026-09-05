@@ -28,6 +28,11 @@ export {
   CryptoManager,
   SECURITY_THRESHOLDS,
   isValidPassword,
+  // v2 container version byte (0x02), mirroring `./index.ts`. `FORMAT_VERSION`
+  // (0x01) arrives below via `./format-core.js`; this is its container-format
+  // counterpart. Container mode lives on the isomorphic core, so the browser
+  // build produces v2 blobs and must be able to name their version too.
+  CONTAINER_VERSION,
 } from './crypto-manager.browser.js';
 export * from './types.js';
 export * from './format-core.js';

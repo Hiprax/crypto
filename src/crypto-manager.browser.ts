@@ -45,6 +45,14 @@ import { webEngine } from './engine.web.js';
 // `./crypto-manager.js`.
 export { SECURITY_THRESHOLDS, isValidPassword };
 
+// The v2 container version byte, mirroring the identical re-export in
+// `./crypto-manager.js`. `encryptContainer` is part of the isomorphic core, so
+// the browser produces v2 blobs too and must be able to name their version;
+// keeping the two managers symmetrical is what stops the constant from
+// reaching only half the audience. Value only (a `number`), so it adds nothing
+// Node-typed to the browser declaration graph.
+export { CONTAINER_VERSION } from './core.js';
+
 /**
  * Browser default Argon2id cost profile: 32 MiB (`memoryCost = 2 ** 15`) /
  * `timeCost = 3` / `parallelism = 1`.

@@ -38,7 +38,7 @@ bench
   });
 
 console.log(
-  `Running ${bench.name} benchmarks (Argon2id default: ~150-300 ms per call)...\n`
+  `Running ${bench.name} benchmarks (Argon2id default: ~100-400 ms per call)...\n`
 );
 
 await bench.run();

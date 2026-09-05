@@ -140,13 +140,16 @@ export interface EncryptionParameters {
   argon2Options: Argon2Options;
 }
 
-/**
- * Result of encryption operation
- */
-export interface EncryptionResult {
-  encrypted: Buffer;
-  tag: Buffer;
-}
+// `EncryptionResult` (the `Buffer`-typed result of the low-level
+// `CryptoManager.encryptData`) deliberately does NOT live here. This module is
+// isomorphic: it is re-exported by `./index.browser.js` and therefore sits in
+// the browser declaration graph, where the Node `Buffer` global does not exist.
+// A browser-only consumer (`"types": []`, `"skipLibCheck": false`) got two hard
+// `TS2591 Cannot find name 'Buffer'` errors from those two fields. The type now
+// lives beside its only producer in `./crypto-manager.js` — the Node-only
+// module — and is re-exported from `./index.js`, so both public Node import
+// paths (`@hiprax/crypto` and `@hiprax/crypto/crypto-manager`) are unchanged.
+// `npm run check:types:browser` is the gate that keeps this module Node-free.
 
 /**
  * File encryption progress callback

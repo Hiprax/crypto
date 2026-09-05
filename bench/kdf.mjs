@@ -9,7 +9,8 @@
 // usage — each encrypt call generates a fresh random salt) so we measure
 // steady-state KDF cost rather than a degenerate cached-input case.
 //
-// Expected runtime: ~2-3 minutes total. Argon2id dominates.
+// Expected runtime: ~70 s total — two cases at the 30 s budget set below,
+// plus warmup. Argon2id dominates the per-call cost.
 
 import { Bench } from 'tinybench';
 import { CryptoManager } from '../dist/index.js';
@@ -30,7 +31,8 @@ const nextSalt = () => salts[saltIdx++ % SALT_POOL];
 // tinybench v6: pass options as second argument to constructor.
 //   - time: total time budget per case in ms (default 500)
 //   - iterations: minimum iteration count (default 10)
-// Argon2id at 128 MiB takes ~150-300 ms per call, so we widen the budget so
+// Argon2id at 128 MiB takes ~100-400 ms per call depending on the host, so we
+// widen the budget so
 // tinybench has enough samples to compute a stable mean. PBKDF2 inherits
 // the same budget for symmetry; it's faster so it samples more.
 const bench = new Bench({
@@ -47,7 +49,7 @@ bench
     cm.deriveKeySync(password, nextSalt());
   });
 
-console.log(`Running ${bench.name} benchmarks (this can take 2-5 minutes)...`);
+console.log(`Running ${bench.name} benchmarks (this takes ~70 s)...`);
 console.log(`  - Argon2id default profile: 128 MiB, 3 passes, 1 lane`);
 console.log(`  - PBKDF2-SHA256 default: 600,000 iterations\n`);
 

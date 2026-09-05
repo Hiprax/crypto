@@ -48,7 +48,8 @@
     "check:browser": "node scripts/check-browser.mjs",
     "check:types:browser": "node scripts/check-browser-types.mjs",
     "check:exports": "publint && attw --pack --profile esm-only",
-    "verify": "npm run lint && npm run type-check && npm run build && npm test && npm run check:browser && npm run check:types:browser && npm run check:exports",
+    "check:tarball": "node scripts/check-tarball.mjs",
+    "verify": "npm run lint && npm run type-check && npm run build && npm test && npm run check:browser && npm run check:types:browser && npm run check:exports && npm run check:tarball",
     "bench": "node bench/index.mjs",
     "prepublishOnly": "npm run verify",
     "prepare": "npm run build"

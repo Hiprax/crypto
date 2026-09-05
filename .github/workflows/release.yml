@@ -105,19 +105,53 @@ jobs:
             exit 1
           fi
 
-      - name: Verify tarball contents (dry run)
-        # Catches accidental inclusion of source maps, .env files, fixtures,
-        # etc. before the artifact reaches the registry. The `.npmignore`
-        # and the `"files"` field in package.json govern the result.
-        run: npm pack --dry-run
+      - name: Verify tarball contents
+        # `npm pack --dry-run` on its own asserts NOTHING — it exits 0 for any
+        # contents and fails only if packing itself errors, so as a gate it
+        # checked that npm works rather than that the artifact is right.
+        # `check:tarball` turns that same listing into a real gate in both
+        # directions: every path the `exports` map resolves to (plus the docs
+        # named in `files`) must be present, and sources, tests, benchmarks,
+        # source maps, env files, lockfiles, credential material and
+        # scratch/backup files must be absent. It deliberately does NOT pin a
+        # file count, which would go red on every legitimate new dist/ module.
+        #
+        # The same command is part of `npm run verify`, so this is a re-check
+        # at release time rather than the only place the rule lives.
+        run: npm run check:tarball
 
       # Trusted publishing (OIDC) requires npm >= 11.5.1 to understand the
       # credential-exchange flow; Node 22 ships npm 10, so upgrade first. No
       # NPM_TOKEN is used — short-lived publish credentials are minted
       # automatically from the `id-token: write` grant when the package's
       # trusted-publisher config on npmjs.com matches this repo + workflow.
+      #
+      # The range is caret-bounded to the current major rather than `latest`,
+      # for exactly the reason the `overrides` block in package.json is: an
+      # unbounded floor pulls in an untested major, and here that lands on the
+      # critical path one step before publish. An npm major that drops this
+      # workflow's Node line would break every release with no change on our
+      # side, so the bump is made deliberately rather than by npm's release
+      # schedule.
+      #
+      # The check afterwards is not ceremony. If the global install resolves
+      # somewhere off PATH the runner's original npm 10 stays active, and that
+      # failure would otherwise surface as an opaque OIDC error from
+      # `npm publish`, after every gate has already passed.
+      #
+      # It asserts the 11.5.1 floor itself rather than the pinned major, so it
+      # keeps testing the property that actually matters and needs no edit when
+      # the pin above is bumped. `sort -V` does the version comparison: if the
+      # lower of {11.5.1, installed} is not 11.5.1, the installed npm is older.
       - name: Upgrade npm to an OIDC-capable version
-        run: npm install -g npm@latest
+        run: |
+          npm install -g "npm@^12"
+          installed="$(npm --version)"
+          echo "npm $installed"
+          if [ "$(printf '%s\n%s\n' "11.5.1" "$installed" | sort -V | head -n1)" != "11.5.1" ]; then
+            echo "::error::npm $installed is older than the 11.5.1 that trusted publishing requires - the global npm upgrade did not take effect."
+            exit 1
+          fi
 
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public
@@ -129,11 +163,25 @@ jobs:
           VERSION="${REF#v}"
           # CHANGELOG entries are written either as `## [X.Y.Z] - DATE` (the
           # Keep-a-Changelog convention assumed by softprops/action-gh-release
-          # tooling) OR as `## DATE (vX.Y.Z — title)` (this project's existing
+          # tooling) OR as `## DATE (vX.Y.Z — title)` (this project's older
           # style). The awk script accepts both shapes so notes are populated
           # regardless of which heading style a release ships with.
+          #
+          # BOTH alternatives are anchored to a heading. The legacy one used
+          # to match `(vX.Y.Z ` anywhere in any line, so an ordinary prose
+          # mention of an old version — the kind a changelog entry about the
+          # release tooling naturally contains — started a capture mid-file and
+          # truncated that version's notes to nothing. Requiring `^## ` first
+          # makes the pattern structural rather than textual.
+          #
+          # In the legacy shape the version is followed by a space or by the
+          # closing paren, which covers both title and bare forms. An earlier
+          # revision also listed a `\u2014` alternative: awk has no such
+          # escape, so it collapsed to the literal text `u2014` and matched
+          # nothing. It was redundant as well as dead, since the plain-space
+          # alternative already covers an em-dashed title.
           notes="$(awk -v ver="$VERSION" '
-            $0 ~ "^## \\["ver"\\]" || $0 ~ "\\(v"ver"( |\\)|\\u2014| - )" { capture = 1; next }
+            $0 ~ "^## \\["ver"\\]" || $0 ~ "^## .*\\(v"ver"( |\\))" { capture = 1; next }
             capture && /^## / { exit }
             capture { print }
           ' CHANGELOG.md)"

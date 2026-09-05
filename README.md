@@ -1335,7 +1335,7 @@ npm run build          # the browser suite imports dist/index.browser.js
 npm run test:browser   # headless Chromium via Playwright
 ```
 
-Three static gates back the browser build and the published package, and all three run in CI on every push: `npm run check:browser` (an esbuild `platform:'browser'` bundle that fails on any `node:` specifier reaching the browser graph), `npm run check:types:browser` (type-checks a browser-only consumer against `dist/` with no Node types available, so a Node type in the browser declaration graph fails the build), and `npm run check:exports` (`publint` + `@arethetypeswrong/cli`).
+Four static gates back the browser build and the published package, and all four run in CI on every push: `npm run check:browser` (an esbuild `platform:'browser'` bundle that fails on any `node:` specifier reaching the browser graph), `npm run check:types:browser` (type-checks a browser-only consumer against `dist/` with no Node types available, so a Node type in the browser declaration graph fails the build), `npm run check:exports` (`publint` + `@arethetypeswrong/cli`), and `npm run check:tarball` (asks npm what it would actually pack, then requires every path the `exports` map resolves to and forbids anything that must never ship — sources, tests, source maps, lockfiles, env files, credential material and editor/backup scratch files). The last one exists because `npm pack --dry-run` asserts nothing on its own, and because npm force-includes any root file whose name stem is `readme`, `license`, `licence` or `copying` regardless of `.npmignore`, so a stray `README.md.tmp` would otherwise be published. It deliberately pins no file count, which would go red on every legitimate new `dist/` module.
 
 Everything above is chained into a single command, which stops at the first failure:
 
@@ -1343,7 +1343,7 @@ Everything above is chained into a single command, which stops at the first fail
 npm run verify
 ```
 
-It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports`, and takes roughly 2.5 minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
+It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball`, and takes roughly 2.5 minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
 
 Those commands form three tiers. Durations were measured on Node v24.19.0 at 25 suites / 1,113 tests; the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
 
@@ -1434,7 +1434,7 @@ In practice this is a bound on a *single* call, not on how much data the library
 npm run verify
 ```
 
-The single gate. It chains `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` and stops at the first failure (~2.5 minutes). `prepublishOnly` is defined as exactly this command, so a change cannot pass a working session and then fail a release. Run it before opening a pull request; the individual steps below are for iterating.
+The single gate. It chains `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball` and stops at the first failure (~2.5 minutes). `prepublishOnly` is defined as exactly this command, so a change cannot pass a working session and then fail a release. Run it before opening a pull request; the individual steps below are for iterating.
 
 ### Building
 

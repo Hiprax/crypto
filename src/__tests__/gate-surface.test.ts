@@ -36,7 +36,7 @@ const REPO_ROOT = process.cwd();
  * Order is asserted, not just membership, and it is load-bearing:
  * `lint`/`type-check` run before `build` so a syntactically broken `src/` is
  * reported by the tools that explain it rather than by `tsc`'s emit, and the
- * three `check:*` gates run last because all three read the freshly built
+ * four `check:*` gates run last because all four read the freshly built
  * `dist/`. A `verify` that ran `check:browser` before `build` would be
  * validating the PREVIOUS build's output.
  */
@@ -48,6 +48,7 @@ const VERIFY_GATES = [
   'check:browser',
   'check:types:browser',
   'check:exports',
+  'check:tarball',
 ] as const;
 
 /**
@@ -97,7 +98,7 @@ const parseNpmRunChain = (command: string): string[] =>
     .filter(name => name.length > 0);
 
 describe('gate surface: npm scripts', () => {
-  it('defines `verify` as exactly the seven gates, in the order that keeps them meaningful', () => {
+  it('defines `verify` as exactly the eight gates, in the order that keeps them meaningful', () => {
     const scripts = readPackageJson().scripts ?? {};
     const verify = scripts['verify'];
     expect(typeof verify).toBe('string');
@@ -173,19 +174,21 @@ describe('gate surface: npm scripts', () => {
     }
   });
 
-  it('keeps the three static packaging gates in the chain', () => {
+  it('keeps the four static packaging gates in the chain', () => {
     // This is NOT redundant with the exact-chain assertion above, and it must
     // not be "simplified" away. That one compares against the VERIFY_GATES
     // constant declared in THIS file, so an edit that drops a gate from
-    // `package.json` AND from the constant keeps it green. These three names
-    // are literals, so the same edit fails here. They are also the three gates
-    // with no local developer habit behind them — nobody runs `attw` by hand —
-    // so if one quietly leaves `verify`, nothing else in the repo notices.
+    // `package.json` AND from the constant keeps it green. These four names
+    // are literals, so the same edit fails here. They are also the four gates
+    // with no local developer habit behind them — nobody runs `attw` or packs
+    // a tarball by hand — so if one quietly leaves `verify`, nothing else in
+    // the repo notices.
     const verify = readPackageJson().scripts?.['verify'] ?? '';
     const chain = parseNpmRunChain(verify);
     expect(chain).toContain('check:browser');
     expect(chain).toContain('check:types:browser');
     expect(chain).toContain('check:exports');
+    expect(chain).toContain('check:tarball');
   });
 });
 

@@ -94,6 +94,17 @@ jobs:
       - name: Check package exports and types
         run: npm run check:exports
 
+      # Published-artifact gate. `npm pack --dry-run` asserts nothing on its
+      # own, so this asks npm what it would actually pack and then checks it
+      # both ways: every path the `exports` map resolves to must be present,
+      # and nothing that must never ship may be — sources, tests, benchmarks,
+      # source maps, lockfiles, env files, credential material or backup
+      # scratch. It runs on the Windows legs too, which is deliberate: the
+      # script invokes npm as `node <npm_execpath>` precisely so it needs no
+      # `npm.cmd` shim and no shell, and this matrix is what proves that.
+      - name: Check published tarball contents
+        run: npm run check:tarball
+
       # Collect coverage on the Ubuntu / Node 22 leg only — uploading from
       # every (os, node) cell would clutter the Codecov UI and double-count
       # lines that are identical across runners. Other matrix legs still

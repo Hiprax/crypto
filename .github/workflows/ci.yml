@@ -74,6 +74,18 @@ jobs:
       - name: Check browser isolation (no Node builtins in browser graph)
         run: npm run check:browser
 
+      # Browser DECLARATION-purity gate. The step above erases types (esbuild)
+      # and the ESLint `no-restricted-globals` override does not fire on a
+      # TYPE-position `Buffer`, so neither can see a Node type that has leaked
+      # into `dist/index.browser.d.ts` or anything it re-exports. This step
+      # type-checks a throwaway browser-only consumer (resolved through the
+      # `browser` export condition, `"types": []`, `"skipLibCheck": false`)
+      # against the built `dist/`, so such a leak fails the build instead of
+      # reaching a front-end consumer. Pure Node + TypeScript JS APIs, so it
+      # runs on the Windows leg too.
+      - name: Check browser declaration purity (no Node types)
+        run: npm run check:types:browser
+
       # Package-exports + published-types gate. publint validates the exports
       # map; attw verifies the shipped .d.ts resolve for ESM and bundler
       # consumers. CJS/node10 resolutions are intentionally ESM-only, so attw

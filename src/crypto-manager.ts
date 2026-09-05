@@ -22,11 +22,7 @@ import {
 import { createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { dirname } from 'node:path';
-import type {
-  CryptoManagerOptions,
-  EncryptionResult,
-  ProgressCallback,
-} from './types.js';
+import type { CryptoManagerOptions, ProgressCallback } from './types.js';
 import { CryptoError, CryptoErrorType } from './types.js';
 import {
   HEADER_LENGTH,
@@ -117,6 +113,23 @@ function isProgressThrow(thrown: unknown): boolean {
     typeof thrown === 'object' &&
     (thrown as { [PROGRESS_THROW]?: true })[PROGRESS_THROW] === true
   );
+}
+
+/**
+ * Result of encryption operation
+ *
+ * Declared here rather than in `./types.js` because it names the Node
+ * `Buffer` global and `./types.js` is isomorphic — it is re-exported by
+ * `./index.browser.js`, so a `Buffer` in it lands in the browser declaration
+ * graph and breaks any browser-only consumer compiled without `@types/node`.
+ * {@link CryptoManager.encryptData} is its only producer and lives in this
+ * Node-only module, so this is where it belongs. It is re-exported from
+ * `./index.js`, keeping both public Node import paths
+ * (`@hiprax/crypto` and `@hiprax/crypto/crypto-manager`) working unchanged.
+ */
+export interface EncryptionResult {
+  encrypted: Buffer;
+  tag: Buffer;
 }
 
 /**

@@ -31,7 +31,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -53,6 +55,112 @@ const DIST_BROWSER_INDEX = path.join(DIST_DIR, 'index.browser.js');
 const TEST_DIR = mkdtempSync(
   path.join(os.tmpdir(), 'hiprax-crypto-esm-smoke-')
 );
+
+/**
+ * Every `.d.ts` a browser consumer's compiler reaches from the `browser`
+ * export condition: `dist/index.browser.d.ts` plus everything it (transitively)
+ * re-exports. Verified against the real resolution graph — a fixture resolving
+ * `@hiprax/crypto` with `customConditions: ["browser"]` pulls in exactly these
+ * seven files, while the Node condition pulls in `index.d.ts`,
+ * `crypto-manager.d.ts`, `format.d.ts`, `utils.d.ts` and `engine.node.d.ts`
+ * instead (those may reference `Buffer` freely and are deliberately NOT listed).
+ */
+const BROWSER_DECLARATION_GRAPH = [
+  'index.browser.d.ts',
+  'crypto-manager.browser.d.ts',
+  'core.d.ts',
+  'types.d.ts',
+  'format-core.d.ts',
+  'codec.d.ts',
+  'engine.d.ts',
+];
+
+// Word-boundary identifier matches, NOT substring matches: `ArrayBuffer`,
+// `SharedArrayBuffer` and `BufferSource` are Web/ES globals that are perfectly
+// legal in the browser graph, and a blunt `includes('Buffer')` would reject
+// them. `\bBuffer\b` matches `Buffer` and `Buffer.from` but not `ArrayBuffer`
+// (no word boundary between `y` and `B`) and not `BufferSource` (none between
+// `r` and `S`). Non-global so `lastIndex` cannot make `test()` stateful.
+const NODE_BUFFER_RE = /\bBuffer\b/;
+const NODE_NAMESPACE_RE = /\bNodeJS\s*\./;
+
+/**
+ * Remove TypeScript comments from declaration source, preserving one output
+ * entry per input line so offenders can be reported with a real line number.
+ *
+ * String and template literals are *tracked* but not removed: their contents
+ * are code and stay in the scanned text; the tracking exists only so a `//`
+ * or `/*` sequence inside a literal cannot be mistaken for the start of a
+ * comment (which would silently truncate the rest of the line and weaken the
+ * scan into a false pass).
+ */
+function stripTsComments(source: string): string[] {
+  const lines: string[] = [];
+  let current = '';
+  let inBlockComment = false;
+  let inLineComment = false;
+  let quote: string | null = null;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i] as string;
+    const next = source[i + 1];
+
+    if (ch === '\n') {
+      lines.push(current);
+      current = '';
+      inLineComment = false;
+      // A block comment survives a newline; a string literal cannot legally
+      // span one in a `.d.ts`, so reset it defensively rather than letting a
+      // stray quote swallow the remainder of the file.
+      quote = null;
+      continue;
+    }
+
+    if (inLineComment) continue;
+
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote !== null) {
+      current += ch;
+      if (ch === '\\') {
+        const escaped = source[i + 1];
+        if (escaped !== undefined && escaped !== '\n') {
+          current += escaped;
+          i += 1;
+        }
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    current += ch;
+  }
+
+  lines.push(current);
+  return lines;
+}
 
 describe('ESM smoke (Task 31)', () => {
   beforeAll(() => {
@@ -448,5 +556,265 @@ process.stdout.write(ok ? 'OK' : 'BAD');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Browser DECLARATION-purity regression guard.
+ *
+ * Pins the invariant: **no `.d.ts` a browser consumer resolves may name a
+ * Node-only type.** A single `Buffer` field anywhere in
+ * `dist/index.browser.d.ts` or anything it re-exports is a hard
+ * `TS2591 Cannot find name 'Buffer'` for every browser-only TypeScript project
+ * (no `@types/node`, `"types": []`, `"skipLibCheck": false`) — which is exactly
+ * what shipped in 1.5.0 via `types.ts`'s `EncryptionResult`.
+ *
+ * WHY THIS EXISTS ALONGSIDE `npm run check:types:browser`. That script is the
+ * authoritative gate: it actually compiles a browser-condition consumer. This
+ * test is the fast, in-suite tripwire that runs on every `npm test`, needs no
+ * temp package fixture, and — unlike the compile gate — reports the offending
+ * file and line directly. Neither of the other two static gates can see this
+ * defect class at all:
+ *   - ESLint's `no-restricted-globals` override on the isomorphic files does
+ *     NOT fire on a TYPE-position `Buffer` (it only inspects value references),
+ *     so `export interface X { y: Buffer }` lints clean.
+ *   - `npm run check:browser` bundles with esbuild, which erases types before
+ *     it ever resolves them.
+ *
+ * To see this test fail: add `foo: Buffer;` to any interface in `src/types.ts`,
+ * `src/core.ts`, `src/codec.ts`, `src/format-core.ts`, `src/engine.ts`,
+ * `src/engine.web.ts` or `src/crypto-manager.browser.ts` and rebuild.
+ */
+describe('browser declaration purity (dist/*.d.ts)', () => {
+  beforeAll(() => {
+    for (const name of BROWSER_DECLARATION_GRAPH) {
+      const file = path.join(DIST_DIR, name);
+      if (!existsSync(file)) {
+        throw new Error(
+          `Browser declaration not found at ${file}. ` +
+            'Run `npm run build` before running the ESM smoke test.'
+        );
+      }
+    }
+  });
+
+  it('covers the ENTIRE graph reachable from the browser entry, with nothing extra', () => {
+    // Guards against the one way the scan below could silently under-cover: a
+    // future module joining the browser graph while `BROWSER_DECLARATION_GRAPH`
+    // stays a stale hand-written list. Walk the real re-export closure from
+    // `index.browser.d.ts` and require it to equal the declared list exactly.
+    // (The `check:types:browser` compile gate follows resolution itself and so
+    // never goes stale; this keeps the fast in-suite tripwire honest too.)
+    const seen = new Set<string>();
+    const queue = ['index.browser.d.ts'];
+    while (queue.length > 0) {
+      const name = queue.shift() as string;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const file = path.join(DIST_DIR, name);
+      if (!existsSync(file)) {
+        throw new Error(
+          `Browser declaration not found at ${file}. ` +
+            'Run `npm run build` before running the ESM smoke test.'
+        );
+      }
+      // Comments are stripped first, so a JSDoc line mentioning `./format.js`
+      // (the Node-only wrapper, deliberately NOT in the browser graph) cannot
+      // pull a Node module into the walk.
+      const code = stripTsComments(readFileSync(file, 'utf8')).join('\n');
+      for (const match of code.matchAll(/from\s+['"]\.\/([\w.-]+)\.js['"]/g)) {
+        queue.push(`${match[1]}.d.ts`);
+      }
+    }
+
+    expect([...seen].sort()).toEqual([...BROWSER_DECLARATION_GRAPH].sort());
+    // Negative: the Node-only modules must NOT be reachable from the browser
+    // entry. If `index.browser.ts` ever re-exported `./format.js` or
+    // `./utils.js` again, the equality above would fail — this states why.
+    for (const nodeOnly of [
+      'index.d.ts',
+      'crypto-manager.d.ts',
+      'format.d.ts',
+      'utils.d.ts',
+      'engine.node.d.ts',
+    ]) {
+      expect(seen.has(nodeOnly)).toBe(false);
+    }
+  });
+
+  it('names no Node-only type (`Buffer`, `NodeJS.*`) on any code line of the browser declaration graph', () => {
+    const offenders: string[] = [];
+    const codeLineCounts = new Map<string, number>();
+
+    for (const name of BROWSER_DECLARATION_GRAPH) {
+      const file = path.join(DIST_DIR, name);
+      const lines = stripTsComments(readFileSync(file, 'utf8'));
+
+      codeLineCounts.set(
+        name,
+        lines.filter(line => line.trim().length > 0).length
+      );
+
+      lines.forEach((line, index) => {
+        if (NODE_BUFFER_RE.test(line) || NODE_NAMESPACE_RE.test(line)) {
+          offenders.push(`${name}:${index + 1}: ${line.trim()}`);
+        }
+      });
+    }
+
+    // The primary assertion, reported as the offending lines themselves so a
+    // failure names the file and line rather than just flipping a boolean.
+    expect(offenders).toEqual([]);
+
+    // Anti-vacuity: a stripper bug that ate whole files would make the check
+    // above pass trivially. Every declaration in the graph must have left real
+    // code behind, and the graph as a whole must be substantial.
+    for (const name of BROWSER_DECLARATION_GRAPH) {
+      expect(codeLineCounts.get(name)).toBeGreaterThan(0);
+    }
+    const total = [...codeLineCounts.values()].reduce((a, b) => a + b, 0);
+    expect(total).toBeGreaterThan(100);
+  });
+
+  it('keeps `EncryptionResult` on the Node surface only, out of the browser graph', () => {
+    // The 1.5.0 defect and its fix, pinned from both sides. `EncryptionResult`
+    // is `Buffer`-typed and is produced ONLY by the Node `encryptData`, so it
+    // must be declared in (and re-exported from) the Node declarations and be
+    // absent from the browser entry. The browser build's own throwing
+    // `encryptData` stub returns a local, unexported `Uint8Array`-shaped type,
+    // so nothing on the browser surface needs the name.
+    // Comments are stripped on BOTH halves of this test, so neither a doc
+    // comment quoting the declaration (false pass) nor one explaining the move
+    // (false fail) can decide the outcome. Only real code counts.
+    const nodeIndex = stripTsComments(
+      readFileSync(path.join(DIST_DIR, 'index.d.ts'), 'utf8')
+    ).join('\n');
+    const nodeManager = stripTsComments(
+      readFileSync(path.join(DIST_DIR, 'crypto-manager.d.ts'), 'utf8')
+    ).join('\n');
+    expect(nodeManager).toMatch(/export interface EncryptionResult\b/);
+    expect(nodeIndex).toMatch(
+      /export type \{ EncryptionResult \} from '\.\/crypto-manager\.js';/
+    );
+
+    // The negative half: it must NOT be reachable from the browser entry, and
+    // `types.d.ts` (which the browser entry re-exports wholesale) must no
+    // longer declare it.
+    //
+    // Comments are stripped first, deliberately. The point of this assertion is
+    // that no browser-facing DECLARATION names the type; prose that *explains
+    // why it is absent* is legitimate and must not red the suite. Scanning raw
+    // text would make the test hostage to documentation: turning the comment at
+    // the top of `src/types.ts` into a JSDoc attached to the next declaration
+    // would make `tsc` emit it into `dist/types.d.ts` and fail this line over a
+    // sentence.
+    const browserFacing = ['index.browser.d.ts', 'types.d.ts'];
+    for (const name of browserFacing) {
+      const code = stripTsComments(
+        readFileSync(path.join(DIST_DIR, name), 'utf8')
+      ).join('\n');
+      expect(code).not.toMatch(/\bEncryptionResult\b/);
+    }
+  });
+
+  it('check:types:browser passes when the temp directory is not its own realpath', () => {
+    // Regression pin for a real defect in `scripts/check-browser-types.mjs`:
+    // its "did we resolve the browser graph?" guard compared TypeScript's
+    // reported file names against the raw fixture root. TypeScript REALPATHS
+    // every `node_modules` resolution, so whenever the temp directory is not
+    // already its own realpath the two never share a prefix, the guard sees
+    // zero package files and throws — a false RED on a perfectly clean package.
+    //
+    // That is not hypothetical: GitHub's `windows-latest` runners set `TEMP` to
+    // the 8.3 short form `C:\Users\RUNNER~1\AppData\Local\Temp`, which is what
+    // `os.tmpdir()` returns, while TypeScript reports the expanded
+    // `C:/Users/runneradmin/...`. Both Windows CI legs would have gone red.
+    //
+    // A symlinked `TMPDIR` reproduces the identical mismatch on POSIX, which is
+    // what this test does. It is NOT skipped: on Windows (where creating a
+    // symlink needs Developer Mode or elevation) it still runs the gate, just
+    // through the platform's ordinary temp directory, so the gate is executed
+    // as a subprocess on every platform and only the symlink hop is
+    // POSIX-only.
+    const scratch = path.join(
+      TEST_DIR,
+      `realpath-${crypto.randomBytes(8).toString('hex')}`
+    );
+    const realTmp = path.join(scratch, 'real');
+    mkdirSync(realTmp, { recursive: true });
+
+    let tmpForChild = realTmp;
+    if (process.platform !== 'win32') {
+      const linkedTmp = path.join(scratch, 'linked');
+      symlinkSync(realTmp, linkedTmp, 'dir');
+      // Precondition: the path we hand the child really is NOT its own
+      // realpath. Without this the test could pass while proving nothing.
+      expect(realpathSync(linkedTmp)).not.toBe(linkedTmp);
+      tmpForChild = linkedTmp;
+    }
+
+    const result = spawnSync(
+      process.execPath,
+      [path.join(REPO_ROOT, 'scripts', 'check-browser-types.mjs')],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 120_000,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          TMPDIR: tmpForChild,
+          TMP: tmpForChild,
+          TEMP: tmpForChild,
+        },
+      }
+    );
+
+    // The full observable outcome: clean exit, the OK line, and — the negative
+    // — no trace of the guard having misfired.
+    expect(result.stdout + result.stderr).not.toMatch(
+      /WRONG declaration graph|No package declarations were resolved/
+    );
+    expect(result.stdout).toContain('[check:types:browser] OK');
+    expect(result.status).toBe(0);
+  });
+
+  it('comment stripper distinguishes prose, code and Web `*Buffer*` identifiers', () => {
+    // Guards the guard: if `stripTsComments` were broken, the scan above would
+    // pass vacuously. This pins the three discriminations it must make.
+    const sample = [
+      '/**',
+      ' * Prose mentioning Buffer and NodeJS.Timeout must be ignored.',
+      ' */',
+      "export declare const url: 'https://example.test/a//b';",
+      '/** One-line block comment naming Buffer. */',
+      'export interface Keep {',
+      '  a: ArrayBuffer;',
+      '  b: BufferSource;',
+      '  c: SharedArrayBuffer;',
+      '}',
+      'export interface Leak { d: Buffer; } // trailing comment: Buffer',
+      'export interface Ns { e: NodeJS.Timeout; }',
+    ].join('\n');
+
+    const lines = stripTsComments(sample);
+    const flagged = lines
+      .map((line, index) => ({ line, number: index + 1 }))
+      .filter(
+        ({ line }) => NODE_BUFFER_RE.test(line) || NODE_NAMESPACE_RE.test(line)
+      )
+      .map(({ number }) => number);
+
+    // Exactly the two genuine leaks — the comment-only mentions (lines 2 and
+    // 5, and the trailing comment on line 11) and the three Web `*Buffer*`
+    // globals (lines 7-9) are all correctly left alone.
+    expect(flagged).toEqual([11, 12]);
+
+    // The string literal survives intact, proving the `//` inside it did not
+    // start a line comment and swallow the rest of the line.
+    expect(lines[3]).toContain("'https://example.test/a//b';");
+    // And the prose lines really were emptied, not merely unmatched.
+    expect(lines[1]?.trim()).toBe('');
+    expect(lines[4]?.trim()).toBe('');
   });
 });

@@ -46,9 +46,10 @@
     "format": "prettier --write src/**/*.ts",
     "type-check": "tsc --noEmit",
     "check:browser": "node scripts/check-browser.mjs",
+    "check:types:browser": "node scripts/check-browser-types.mjs",
     "check:exports": "publint && attw --pack --profile esm-only",
     "bench": "node bench/index.mjs",
-    "prepublishOnly": "npm run lint && npm run type-check && npm run build && npm test && npm run check:browser && npm run check:exports",
+    "prepublishOnly": "npm run lint && npm run type-check && npm run build && npm test && npm run check:browser && npm run check:types:browser && npm run check:exports",
     "prepare": "npm run build"
   },
   "keywords": [

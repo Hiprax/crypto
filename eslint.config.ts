@@ -126,14 +126,28 @@ export default [
   // browser bundle would `ReferenceError` on a bare `Buffer` or fail to
   // resolve a `node:crypto`. The esbuild `platform:'browser'` gate (Phase 7)
   // catches `node:` SPECIFIERS but NOT a bare `Buffer`/`process` GLOBAL, so
-  // this static ESLint gate covers that gap. The glob is extended in later
-  // phases to the remaining browser entry files.
+  // this static ESLint gate covers that gap.
+  //
+  // SCOPE LIMIT, stated honestly: this override catches a VALUE-position
+  // `Buffer`/`process` and a `node:*` import — nothing more. It does NOT fire
+  // on a TYPE-position `Buffer` (verified: `export interface P { x: Buffer }`
+  // lints clean under `@typescript-eslint/parser`, because `no-restricted-
+  // globals` only inspects value references), and esbuild's `check:browser`
+  // gate erases types before it ever sees them. The guard for the type-
+  // position case is therefore neither of those: it is the compile gate
+  // `npm run check:types:browser` (`scripts/check-browser-types.mjs`), which
+  // type-checks a browser-condition consumer against `dist/` with no Node
+  // types available at all. Keep all three; they cover disjoint defect classes.
   {
     files: [
       'src/core.ts',
       'src/codec.ts',
       'src/format-core.ts',
       'src/engine.ts',
+      // `types.ts` is re-exported by `index.browser.ts`, so it is part of the
+      // browser graph and must stay Node-free (this is why `EncryptionResult`
+      // now lives in `crypto-manager.ts`).
+      'src/types.ts',
       // Phase 5: the Web engine (SubtleCrypto + hash-wasm) is in the browser
       // graph — it may reference no Node global and import no `node:*`.
       'src/engine.web.ts',

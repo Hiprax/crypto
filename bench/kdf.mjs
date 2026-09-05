@@ -9,7 +9,8 @@
 // usage — each encrypt call generates a fresh random salt) so we measure
 // steady-state KDF cost rather than a degenerate cached-input case.
 //
-// Expected runtime: ~2-3 minutes total. Argon2id dominates.
+// Expected runtime: ~70 s total — two cases at the 30 s budget set below,
+// plus warmup. Argon2id dominates the per-call cost.
 
 import { Bench } from 'tinybench';
 import { CryptoManager } from '../dist/index.js';
@@ -47,7 +48,7 @@ bench
     cm.deriveKeySync(password, nextSalt());
   });
 
-console.log(`Running ${bench.name} benchmarks (this can take 2-5 minutes)...`);
+console.log(`Running ${bench.name} benchmarks (this takes ~70 s)...`);
 console.log(`  - Argon2id default profile: 128 MiB, 3 passes, 1 lane`);
 console.log(`  - PBKDF2-SHA256 default: 600,000 iterations\n`);
 

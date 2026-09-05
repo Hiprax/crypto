@@ -1329,16 +1329,17 @@ Two static isolation gates back the browser build and run in CI on every push: `
 
 ## ⚡ Benchmarks
 
-A [tinybench](https://github.com/tinylibs/tinybench)-driven benchmark suite lives in [`bench/`](bench/). It measures the four end-to-end paths that are most representative of real workloads — Argon2id and PBKDF2 key derivation, `encryptText` at 1 KiB and 1 MiB, and `encryptFile` / `decryptFile` streaming on a 10 MiB payload — against the compiled `dist/` output, so build first:
+A [tinybench](https://github.com/tinylibs/tinybench)-driven benchmark suite lives in [`bench/`](bench/). It measures the paths that are most representative of real workloads — the base64url codec and `inspectHeader` on their own, Argon2id and PBKDF2 key derivation, `encryptText` at 1 KiB and 1 MiB, and `encryptFile` / `decryptFile` streaming on a 10 MiB payload — against the compiled `dist/` output, so build first:
 
 ```bash
 npm run build
 npm run bench
 ```
 
-The full suite takes roughly **2-5 minutes** on a modern laptop. Argon2id at the default 128 MiB / `t=3` / `p=1` profile dominates the wall time (each derivation takes ~150-300 ms), and every encrypt path performs one derivation per call. To run a single bench file in isolation:
+The full suite takes roughly **2.5-5.5 minutes** on a modern laptop. Argon2id at the default 128 MiB / `t=3` / `p=1` profile dominates the wall time (each derivation takes ~150-300 ms), and every encrypt path performs one derivation per call. The codec group is the exception: it performs no key derivation in any measured case, which is the point of it — the KDF is large enough to hide a codec regression entirely. It runs first and takes ~30 s. To run a single bench file in isolation:
 
 ```bash
+node bench/codec.mjs          # base64url codec + inspectHeader, no KDF
 node bench/kdf.mjs            # Argon2id + PBKDF2 only
 node bench/encrypt-text.mjs   # 1 KiB and 1 MiB text encrypt
 node bench/encrypt-file.mjs   # 10 MiB encrypt + decrypt streaming

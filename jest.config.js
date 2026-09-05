@@ -41,12 +41,19 @@ export default {
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
+  // One-way ratchet. These are the measured `All files` values floored to
+  // integers (2026-09-05: statements 95.93, branches 87.16, functions 97.98,
+  // lines 95.95 over 25 suites / 1106 tests). `gate-surface.test.ts` asserts
+  // that none of them ever falls below that floor. They move UP only: when a run
+  // measures higher, raise them; when a run measures lower, the cause is a
+  // missing test and that is what gets fixed. Never lower a number and never
+  // add a `collectCoverageFrom` exclusion to make a number look better.
   coverageThreshold: {
     global: {
-      branches: 80,
-      functions: 80,
-      lines: 80,
-      statements: 80,
+      branches: 87,
+      functions: 97,
+      lines: 95,
+      statements: 95,
     },
   },
   // Exclude the real-browser Vitest suite from the Jest run. The specs under

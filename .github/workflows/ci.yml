@@ -122,9 +122,10 @@ jobs:
           files: ./coverage/lcov.info
           flags: unittests
           # `fail_ci_if_error: false` means a transient Codecov outage cannot
-          # fail an otherwise-green CI run. The local Jest threshold (80%
-          # across all four metrics) already enforces the floor; Codecov is
-          # the visualization layer, not the gate.
+          # fail an otherwise-green CI run. The local Jest thresholds in
+          # `jest.config.js` (a one-way ratchet, currently statements 95,
+          # branches 87, functions 97, lines 95) already enforce the floor;
+          # Codecov is the visualization layer, not the gate.
           fail_ci_if_error: false
           slug: Hiprax/crypto
 

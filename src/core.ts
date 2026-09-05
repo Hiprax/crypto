@@ -1094,6 +1094,91 @@ export abstract class CryptoCore {
   }
 
   /**
+   * **Base64url encode seam.** Encode ciphertext bytes as a canonical,
+   * unpadded, URL-safe base64 string.
+   *
+   * The default implementation is the pure {@link bytesToBase64url} from
+   * `./codec.js`, which is the **reference implementation** of this project's
+   * text encoding and the one the browser build runs. A runtime whose host
+   * offers a faster native encoder may override this method — the Node
+   * `CryptoManager` does, with `Buffer.prototype.toString('base64url')` — but
+   * an override is an *implementation swap behind an identical byte
+   * contract*, never a fork of the logic:
+   *
+   * - It MUST return, for every input, exactly the string
+   *   `bytesToBase64url(bytes)` returns — same characters, same length, no
+   *   padding, no line breaks, URL-safe alphabet only. This is a wire-format
+   *   guarantee: the returned string IS the ciphertext a caller stores, and a
+   *   single differing character would make text encrypted on one runtime
+   *   undecryptable on another.
+   *   (The one verified exception is a `Uint8Array` whose `ArrayBuffer` has
+   *   been detached: it reports `length === 0`, so the pure encoder returns
+   *   `''`, while a host encoder built on a buffer view may throw. That input
+   *   cannot reach this method — it is `protected`, and its only call site
+   *   hands it the freshly allocated buffer from {@link encryptBytes} — so it
+   *   is recorded as a known limit rather than guarded against.)
+   * - It MUST NOT mutate `bytes`. The caller still owns that buffer and
+   *   scrubs it after encoding.
+   * - It MUST tolerate a `bytes` that is a view at a non-zero `byteOffset`
+   *   into a larger backing store (`encryptBytes` returns a freshly
+   *   allocated array today, but subarray views are the norm elsewhere in
+   *   this codebase).
+   *
+   * `src/__tests__/codec-seam.test.ts` pins all three properties against the
+   * pure encoder for every override in the tree.
+   *
+   * @param bytes - bytes to encode (not mutated)
+   * @returns the canonical unpadded base64url encoding of `bytes`
+   */
+  protected encodeBase64url(bytes: Uint8Array): string {
+    return bytesToBase64url(bytes);
+  }
+
+  /**
+   * **Base64url decode seam.** Decode a base64url (or standard-alphabet,
+   * padded, or whitespace-wrapped) string into bytes.
+   *
+   * The default implementation is the pure {@link base64urlToBytes} from
+   * `./codec.js` — the reference decoder, and the one the browser build runs.
+   * The Node `CryptoManager` overrides it with `Buffer.from(s, 'base64url')`.
+   * As with {@link encodeBase64url}, an override is an implementation swap
+   * behind an identical byte contract, never a fork:
+   *
+   * - It MUST return, for every input string, exactly the bytes
+   *   `base64urlToBytes(s)` returns — including the **leniency contract**
+   *   that lets `decryptText` accept a line-wrapped or standard-alphabet
+   *   ciphertext: `=` terminates, non-alphabet code units are skipped rather
+   *   than fatal, `+`/`/` are accepted as aliases of `-`/`_`, each UTF-16
+   *   code unit is truncated to its low 8 bits before classification, and a
+   *   trailing sextet that does not complete a byte is discarded.
+   * - It MAY return a view at a non-zero `byteOffset` into a larger backing
+   *   store (the Node override returns a **pooled** `Buffer` for any result
+   *   Node's allocator decides to serve from its shared internal pool, which
+   *   is sized by `Buffer.poolSize` and has differed across releases). Every
+   *   consumer of the result is offset-safe: the
+   *   `viewOf` helpers in this file and in `./format-core.js` bind
+   *   `byteOffset`/`byteLength` explicitly, and {@link decryptBytes} reads
+   *   the components with `subarray`.
+   *
+   * One consequence of overriding this seam is worth stating plainly, because
+   * it is a change in the risk model rather than in behaviour: while both
+   * runtimes ran the pure decoder, a host upgrade could not by itself create a
+   * Node/browser split. With a host decoder in the wire path it could. The
+   * exposure is narrow — canonical strings (everything this library emits)
+   * have exactly one decoding, so a divergence could only appear on malformed
+   * or lenient input, which fails GCM authentication anyway — and it is
+   * guarded: the codec suite runs its leniency properties against the host
+   * decoder as an oracle on whatever runtime the test tier uses, so a host
+   * behaviour change surfaces there rather than in production.
+   *
+   * @param s - the encoded string
+   * @returns the decoded bytes
+   */
+  protected decodeBase64url(s: string): Uint8Array {
+    return base64urlToBytes(s);
+  }
+
+  /**
    * Derive a raw AES key from a password using Argon2id via the injected
    * engine. Isomorphic counterpart of the Node subclass's `deriveKey`:
    * validates inputs, NFC-normalises the password, and applies embedded
@@ -1476,7 +1561,10 @@ export abstract class CryptoCore {
     try {
       plaintextBytes = utf8Encode(text);
       ciphertext = await this.encryptBytes(plaintextBytes, password);
-      const encoded = bytesToBase64url(ciphertext);
+      // Encoded through the {@link encodeBase64url} seam so a runtime with a
+      // faster native encoder (Node's `Buffer`) can supply it without forking
+      // the format; the seam's byte contract makes the two indistinguishable.
+      const encoded = this.encodeBase64url(ciphertext);
       this.secureClear(plaintextBytes);
       this.secureClear(ciphertext);
       return encoded;
@@ -1543,7 +1631,13 @@ export abstract class CryptoCore {
     let combinedBytes: Uint8Array | null = null;
     let plaintext: Uint8Array | null = null;
     try {
-      combinedBytes = base64urlToBytes(encryptedText);
+      // Decoded through the {@link decodeBase64url} seam. The Node override
+      // returns a POOLED `Buffer` (a view at a non-zero `byteOffset`) for any
+      // result up to half of `Buffer.poolSize`; every consumer below is
+      // offset-safe, and
+      // `secureClear` zeroes only this view's own range, never the rest of
+      // the pool.
+      combinedBytes = this.decodeBase64url(encryptedText);
       plaintext = await this.decryptBytes(combinedBytes, password);
       const result = utf8Decode(plaintext);
       this.secureClear(plaintext);
@@ -1608,7 +1702,12 @@ export abstract class CryptoCore {
           'INVALID_BASE64URL'
         );
       }
-      buf = base64urlToBytes(input);
+      // Note: the canonical-form predicate above is deliberately NOT part of
+      // the seam — it is a pure structural scan with no native equivalent
+      // worth overriding, and keeping one implementation of "is this
+      // canonical base64url" keeps the accept/reject boundary identical on
+      // every runtime. Only the decode itself is swappable.
+      buf = this.decodeBase64url(input);
     } else if (input instanceof Uint8Array) {
       buf = input;
     } else {

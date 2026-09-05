@@ -141,6 +141,71 @@ export class CryptoManager extends CryptoCore {
   }
 
   /**
+   * Node override of the {@link CryptoCore.encodeBase64url} seam: encode with
+   * `Buffer.prototype.toString('base64url')` instead of the pure codec.
+   *
+   * This is an implementation swap behind an identical byte contract, not a
+   * fork — `Buffer`'s base64url encoder emits the same canonical, unpadded,
+   * URL-safe string the pure `bytesToBase64url` (`./codec.js`) does, for every input
+   * (pinned byte-for-byte in `src/__tests__/codec-seam.test.ts`, and pinned
+   * against `Buffer` as an oracle inside `src/__tests__/codec.test.ts`). It is
+   * used because the native encoder is roughly two orders of magnitude faster
+   * on large payloads, which is what `encryptText` spends most of its
+   * non-KDF time on. The browser build deliberately does NOT override this
+   * and keeps running the pure reference implementation.
+   *
+   * The non-`Buffer` branch wraps the input as a **view** — `Buffer.from(ab,
+   * byteOffset, byteLength)` — rather than `Buffer.from(bytes)`, which would
+   * copy. It is the hot branch: `encryptText` encodes the plain `Uint8Array`
+   * that `CryptoCore.encryptBytes` assembles via `concatBytes`. The view is
+   * read-only here and dies with the call, so the caller's buffer is neither
+   * mutated nor retained (`encryptText` scrubs it immediately afterwards, and
+   * `toString` has already materialised the string by then).
+   *
+   * @param bytes - bytes to encode (not mutated)
+   * @returns the canonical unpadded base64url encoding of `bytes`
+   */
+  protected override encodeBase64url(bytes: Uint8Array): string {
+    return Buffer.isBuffer(bytes)
+      ? bytes.toString('base64url')
+      : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString(
+          'base64url'
+        );
+  }
+
+  /**
+   * Node override of the {@link CryptoCore.decodeBase64url} seam: decode with
+   * `Buffer.from(s, 'base64url')` instead of the pure codec.
+   *
+   * `Buffer`'s base64 decoder is the exact oracle the pure
+   * `base64urlToBytes` (`./codec.js`) was written against, leniency included (`=`
+   * terminates, non-alphabet code units are skipped, `+`/`/` are accepted,
+   * each UTF-16 code unit is truncated to its low 8 bits, an incomplete
+   * trailing sextet is discarded), so swapping it in changes no accepted
+   * input and no decoded byte.
+   *
+   * The returned `Buffer` is a **pooled** view — into a shared backing store,
+   * at a possibly non-zero `byteOffset` — for any decode small enough that
+   * Node serves it from its shared internal pool. Deliberately not stated as a
+   * fixed byte count: the pool is sized by `Buffer.poolSize`, whose default
+   * has differed across releases, and the decision is made on an ESTIMATE of
+   * the decoded length rather than on the length itself, so the real crossover
+   * does not sit on `Buffer.poolSize >>> 1`. The seam test discovers it at run
+   * time instead of assuming it. That is safe for every
+   * consumer: `format-core.ts`'s `viewOf` and `core.ts`'s `viewOf` bind
+   * `byteOffset`/`byteLength` explicitly, `CryptoCore.decryptBytes` extracts
+   * its components with `subarray`, and `secureClear`'s `fill(0)` zeroes only
+   * this view's own range rather than the shared pool. `decryptTextSync` has
+   * always fed the same pooled buffer to the same parsing code.
+   *
+   * @param s - the encoded string
+   * @returns the decoded bytes (a pooled `Buffer` view for small results)
+   */
+  protected override decodeBase64url(s: string): Uint8Array {
+    return Buffer.from(s, 'base64url');
+  }
+
+  /**
    * Generate cryptographically secure random bytes
    * @param length - Number of bytes to generate
    * @returns Random bytes

@@ -30,6 +30,7 @@ import {
   KDF_ID_PBKDF2_SHA256,
   hasMagic,
   parseHeader,
+  assertGcmPlaintextLimit,
 } from './format.js';
 import { CryptoCore, SECURITY_THRESHOLDS, isValidPassword } from './core.js';
 import { loadArgon2, nodeEngine } from './engine.node.js';
@@ -435,6 +436,10 @@ export class CryptoManager extends CryptoCore {
    *   {@link decryptData} or decryption will throw `DECRYPTION_FAILED`.
    * @returns Encrypted data with auth tag
    * @throws CryptoError if encryption fails
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   plaintext exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D section
+   *   5.2.1.1). There is no opt-out; past that bound AES-GCM's block counter
+   *   wraps and the ciphertext has neither confidentiality nor authenticity.
    */
   public encryptData(
     data: Buffer,
@@ -473,6 +478,12 @@ export class CryptoManager extends CryptoCore {
         'INVALID_AAD'
       );
     }
+
+    // Outside the try below on purpose: that catch rewrites every exception
+    // into the generic `ENCRYPTION_FAILED`, which would erase the typed
+    // `DATA_TOO_LARGE_FOR_GCM` code callers need to distinguish "your input
+    // is too big for GCM" from "the cipher blew up".
+    assertGcmPlaintextLimit(data.length, 'DATA_TOO_LARGE_FOR_GCM');
 
     try {
       const cipher = crypto.createCipheriv(
@@ -527,6 +538,10 @@ export class CryptoManager extends CryptoCore {
    * @throws CryptoError if decryption fails (wrong key/IV/AAD, tampered
    *   ciphertext, or tag mismatch — all surfaced as the same generic
    *   `DECRYPTION_FAILED` code).
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   ciphertext body exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1) — such a body could only come from a counter-wrapped,
+   *   already-broken encryption.
    */
   public decryptData(
     encryptedData: Buffer,
@@ -574,6 +589,12 @@ export class CryptoManager extends CryptoCore {
         'INVALID_AAD'
       );
     }
+
+    // Outside the try below on purpose (see encryptData): that catch rewrites
+    // every exception into the generic `DECRYPTION_FAILED`. A ciphertext this
+    // large could only have come from a counter-wrapped encryption, so it is
+    // refused rather than fed to the decipher.
+    assertGcmPlaintextLimit(encryptedData.length, 'DATA_TOO_LARGE_FOR_GCM');
 
     try {
       const decipher = crypto.createDecipheriv(
@@ -1059,6 +1080,10 @@ export class CryptoManager extends CryptoCore {
    * @param password - Encryption password (optional if default passphrase is set)
    * @param progress - Optional progress callback. Throws propagate and abort.
    * @throws CryptoError if encryption fails
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   plaintext exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D section
+   *   5.2.1.1). There is no opt-out; past that bound AES-GCM's block counter
+   *   wraps and the ciphertext has neither confidentiality nor authenticity.
    */
   public async encryptFile(
     inputPath: string,
@@ -1117,6 +1142,13 @@ export class CryptoManager extends CryptoCore {
         // inode, no intervening rename/replace. The progress callback then
         // receives a stable `totalBytes` for every event.
         totalBytes = (await fileHandle.stat()).size;
+
+        // Refuse an oversized input the moment its size is known — before the
+        // output directory is created, before the temp path is built, before
+        // the KDF runs and before any cipher exists. The whole file is one
+        // AES-GCM invocation, so the NIST SP 800-38D bound applies to it as a
+        // whole; past it the block counter wraps. No opt-out.
+        assertGcmPlaintextLimit(totalBytes, 'DATA_TOO_LARGE_FOR_GCM');
 
         // Ensure output directory exists
         const outputDir = dirname(outputPath);
@@ -1452,6 +1484,10 @@ export class CryptoManager extends CryptoCore {
    * @param password - Decryption password (optional if default passphrase is set)
    * @param progress - Optional progress callback. Throws propagate and abort.
    * @throws CryptoError if decryption fails
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   ciphertext body exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1) — such a body could only come from a counter-wrapped,
+   *   already-broken encryption. Checked before any key derivation.
    */
   public async decryptFile(
     inputPath: string,
@@ -1650,6 +1686,12 @@ export class CryptoManager extends CryptoCore {
         const bodyStart = formatHeaderLen + this.saltLength + this.ivLength;
         const bodyEnd = totalSize - this.tagLength; // exclusive
         const bodyLen = bodyEnd - bodyStart;
+
+        // Refuse an oversized ciphertext body. This sits ahead of `deriveKey`,
+        // `buildTempOutputPath` and `createDecipheriv`, so nothing expensive or
+        // observable has happened yet. A body this large could only have been
+        // produced by a counter-wrapped (already broken) encryption.
+        assertGcmPlaintextLimit(bodyLen, 'DATA_TOO_LARGE_FOR_GCM');
 
         // Derive key from password (use embedded params if v1). Re-type any
         // KDF failure to DECRYPTION_FAILED — this is a decrypt op.
@@ -1908,6 +1950,10 @@ export class CryptoManager extends CryptoCore {
    * @param password - Encryption password (optional if default passphrase is set)
    * @param progress - Optional progress callback. Throws propagate and abort.
    * @throws CryptoError if encryption fails
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   plaintext exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D section
+   *   5.2.1.1). There is no opt-out; past that bound AES-GCM's block counter
+   *   wraps and the ciphertext has neither confidentiality nor authenticity.
    */
   public encryptFileSync(
     inputPath: string,
@@ -1975,6 +2021,12 @@ export class CryptoManager extends CryptoCore {
 
       // Use the open fd for size — same inode, no intervening name lookup.
       const totalBytes = fstatSync(inputFd as number).size;
+
+      // Refuse an oversized input the moment its size is known — before the
+      // output directory is created, before the temp path is built, before the
+      // PBKDF2 KDF runs and before any cipher exists. See
+      // {@link assertGcmPlaintextLimit}. No opt-out.
+      assertGcmPlaintextLimit(totalBytes, 'DATA_TOO_LARGE_FOR_GCM');
 
       // Ensure output directory exists
       const outputDir = dirname(outputPath);
@@ -2196,6 +2248,10 @@ export class CryptoManager extends CryptoCore {
    * @param password - Decryption password (optional if default passphrase is set)
    * @param progress - Optional progress callback. Throws propagate and abort.
    * @throws CryptoError if decryption fails
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   ciphertext body exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1) — such a body could only come from a counter-wrapped,
+   *   already-broken encryption. Checked before any key derivation.
    */
   public decryptFileSync(
     inputPath: string,
@@ -2339,6 +2395,18 @@ export class CryptoManager extends CryptoCore {
         );
       }
 
+      // Byte range of the ciphertext body. Computed HERE — the earliest point
+      // at which both `totalSize` and `formatHeaderLen` are known — rather
+      // than next to the read loop below, so the AES-GCM bound can be enforced
+      // before `deriveKeySync` burns hundreds of thousands of PBKDF2
+      // iterations and before `openSync(tempPath, 'w')` puts a `.tmp` file on
+      // disk. Refusing after either of those would still be correct, but it
+      // would do irreversible work on input we are about to reject.
+      const bodyStart = formatHeaderLen + this.saltLength + this.ivLength;
+      const bodyEnd = totalSize - this.tagLength; // exclusive
+      const bodyLen = bodyEnd - bodyStart;
+      assertGcmPlaintextLimit(bodyLen, 'DATA_TOO_LARGE_FOR_GCM');
+
       // Slice salt/iv from the front buffer. Copy into independent Buffers
       // so we own the memory and can scrub it later.
       const salt = Buffer.from(
@@ -2394,10 +2462,10 @@ export class CryptoManager extends CryptoCore {
 
       // Stream the body in fixed-size chunks. We read [bodyStart, bodyEnd)
       // and stop once we hit the tag region. The chunk buffer is reused
-      // across iterations to keep allocations bounded.
-      const bodyStart = formatHeaderLen + this.saltLength + this.ivLength;
-      const bodyEnd = totalSize - this.tagLength; // exclusive
-      const bodyLen = bodyEnd - bodyStart;
+      // across iterations to keep allocations bounded. (`bodyStart` /
+      // `bodyEnd` / `bodyLen` were computed earlier, right after the
+      // minimum-size check, so the AES-GCM bound could be enforced before the
+      // KDF and the temp file — see the comment there.)
       let bodyConsumed = 0;
       const chunk = Buffer.alloc(this.SYNC_DECRYPT_CHUNK_SIZE);
 

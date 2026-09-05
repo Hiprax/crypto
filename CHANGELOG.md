@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **AES-GCM per-invocation size bound is now enforced** (`src/format-core.ts`, `src/format.ts`, `src/core.ts`, `src/crypto-manager.ts`). New exports `MAX_GCM_PLAINTEXT_BYTES` (`2 ** 36 - 32` = 68 719 476 704 bytes, ~64 GiB) and `assertGcmPlaintextLimit(byteLength, code?)`, available from both the Node and the browser entry points. NIST SP 800-38D section 5.2.1.1 caps a single AES-GCM invocation at `2 ** 39 - 256` bits; beyond it the 32-bit block counter wraps, keystream is reused, and the ciphertext loses **both** confidentiality and authenticity. Neither OpenSSL's EVP layer nor Node's `crypto.createCipheriv` enforces this, so oversized input previously "succeeded" and produced broken ciphertext.
+
+### Changed
+
+- **Oversized payloads are now refused instead of silently mis-encrypted** (`src/core.ts`, `src/crypto-manager.ts`). `encryptBytes`, `decryptBytes`, `encryptData`, `decryptData`, `encryptFile`, `encryptFileSync`, `decryptFile` and `decryptFileSync` throw `CryptoError(INVALID_INPUT, 'DATA_TOO_LARGE_FOR_GCM')` for anything past `MAX_GCM_PLAINTEXT_BYTES`. There is deliberately **no opt-out**: an opt-out would be an opt-in to a broken construction. The check runs before any key derivation, before any temp file is created and before any cipher is constructed, so a refused call writes no `.tmp` file, writes no output file, and wastes no key derivation. (The two decrypt file paths still create a missing output *directory* before the check, as they always have; that ordering is unchanged.) Payloads at exactly the limit are still accepted, and no existing valid ciphertext is affected (v2 containers were already capped at 4 GiB by `MAX_CONTAINER_DATA_SIZE`, well below the GCM bound).
+- **`decryptFileSync` computes the ciphertext body range earlier** (`src/crypto-manager.ts`). `bodyStart` / `bodyEnd` / `bodyLen` are now derived immediately after the minimum-size check instead of just before the read loop, so the size guard fires before the PBKDF2 key derivation runs and before the temp output file is opened. Behavior on every valid input is unchanged.
+
 ## [1.5.0] - 2026-07-11
 
 Isomorphic (Node + browser) support. The library now encrypts and decrypts in **both** Node and the browser over **one** tested wire format: a zero-knowledge web app can encrypt entirely client-side and a Node service can decrypt the result (and vice-versa). This release is **purely additive** — every existing Node export, method signature, and behavior is preserved, and every existing v0/v1 ciphertext still decrypts — so it is a SemVer MINOR.

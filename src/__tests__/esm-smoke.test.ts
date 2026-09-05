@@ -409,6 +409,91 @@ process.stdout.write(
     }
   });
 
+  it('publishes the AES-GCM bound symmetrically from the Node AND browser entries', () => {
+    // Asymmetry tripwire. `src/index.ts` re-exports `./format.js` (an explicit
+    // NAMED re-export list) while `src/index.browser.ts` re-exports
+    // `./format-core.js` with `export *`. Anything added to `format-core.ts`
+    // therefore reaches browser consumers automatically and Node consumers
+    // only if someone remembers to extend the named list. A missing entry
+    // there type-checks, lints, bundles and passes every other test — the
+    // symbol is simply invisible to half the audience. This test is the only
+    // thing that would catch it, so it checks BOTH entries in one probe and
+    // requires the two constants to be identical.
+    //
+    // Both entries are loaded through Node's real ESM resolver (not ts-jest's
+    // transformer) against the built `dist/`, so it is the shipped artefacts
+    // that are asserted.
+    const tmpDir = path.join(
+      TEST_DIR,
+      `gcm-export-${crypto.randomBytes(8).toString('hex')}`
+    );
+    mkdirSync(tmpDir, { recursive: true });
+    const probeFile = path.join(tmpDir, 'probe.mjs');
+
+    const nodeUrl = pathToFileURL(DIST_INDEX).href;
+    const browserUrl = pathToFileURL(DIST_BROWSER_INDEX).href;
+
+    writeFileSync(
+      probeFile,
+      `
+import * as node from ${JSON.stringify(nodeUrl)};
+import * as browser from ${JSON.stringify(browserUrl)};
+
+const EXPECTED = 2 ** 36 - 32;
+const problems = [];
+
+for (const [label, mod] of [['node', node], ['browser', browser]]) {
+  if (mod.MAX_GCM_PLAINTEXT_BYTES !== EXPECTED) {
+    problems.push(label + '.MAX_GCM_PLAINTEXT_BYTES=' + mod.MAX_GCM_PLAINTEXT_BYTES);
+  }
+  if (typeof mod.assertGcmPlaintextLimit !== 'function') {
+    problems.push(label + '.assertGcmPlaintextLimit=' + typeof mod.assertGcmPlaintextLimit);
+  } else {
+    // The helper must be live and enforcing, not a stub that resolved to
+    // something callable: the boundary passes, boundary+1 throws the typed
+    // error, and both entries agree on the code.
+    try {
+      mod.assertGcmPlaintextLimit(EXPECTED);
+    } catch {
+      problems.push(label + ': rejected the exact boundary');
+    }
+    let code = null;
+    try {
+      mod.assertGcmPlaintextLimit(EXPECTED + 1);
+    } catch (err) {
+      code = err && err.code;
+    }
+    if (code !== 'DATA_TOO_LARGE_FOR_GCM') {
+      problems.push(label + ': boundary+1 code=' + code);
+    }
+  }
+}
+
+if (node.MAX_GCM_PLAINTEXT_BYTES !== browser.MAX_GCM_PLAINTEXT_BYTES) {
+  problems.push('entries disagree on the bound');
+}
+
+process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(problems));
+`,
+      'utf8'
+    );
+
+    try {
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
+
+      expect(result.stdout).toContain('OK');
+      expect(result.stdout).not.toContain('BAD');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('Node refuses to load dist/index.js via require() (ESM-only contract)', () => {
     // We don't have a CJS build, so a `require()` call from a CJS
     // worker MUST fail. This locks in the ESM-only contract: if a

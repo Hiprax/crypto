@@ -38,6 +38,15 @@ export {
   MAX_ARGON2_TIME_COST,
   MAX_ARGON2_PARALLELISM,
   MAX_PBKDF2_ITERATIONS,
+  // The AES-GCM per-invocation bound and its assertion helper. These MUST be
+  // listed here explicitly: this block is a named re-export list, not an
+  // `export *`, and `src/index.ts` re-exports this module rather than
+  // `format-core.js`. Omitting them would publish both symbols to browser
+  // consumers (via `index.browser.ts`'s `export * from './format-core.js'`)
+  // while hiding them from Node consumers — an asymmetric public API that
+  // type-checks, lints, bundles and tests completely green.
+  MAX_GCM_PLAINTEXT_BYTES,
+  assertGcmPlaintextLimit,
 } from './format-core.js';
 
 // Re-export all types unchanged.

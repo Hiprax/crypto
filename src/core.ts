@@ -56,6 +56,7 @@ import {
   MAX_ARGON2_TIME_COST,
   MAX_ARGON2_PARALLELISM,
   MAX_PBKDF2_ITERATIONS,
+  assertGcmPlaintextLimit,
 } from './format-core.js';
 import {
   utf8Encode,
@@ -1315,6 +1316,9 @@ export abstract class CryptoCore {
    *   is configured)
    * @returns the v1 ciphertext bytes
    * @throws CryptoError on invalid input, weak password, or an engine failure
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if
+   *   `data.length` exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1). Checked before any key derivation; no opt-out.
    */
   public async encryptBytes(
     data: Uint8Array,
@@ -1327,6 +1331,11 @@ export abstract class CryptoCore {
         'INVALID_DATA'
       );
     }
+
+    // Refuse anything past the AES-GCM per-invocation bound BEFORE deriving a
+    // key: past it the 32-bit block counter wraps and the ciphertext has
+    // neither confidentiality nor authenticity. There is no opt-out.
+    assertGcmPlaintextLimit(data.length, 'DATA_TOO_LARGE_FOR_GCM');
 
     // Use provided password or default passphrase.
     const finalPassword = password || this.defaultPassphrase;
@@ -1410,6 +1419,10 @@ export abstract class CryptoCore {
    * @throws CryptoError on invalid input, wrong password, tampering, or an
    *   unsupported/mismatched format (all confidentiality-relevant failures
    *   surface as the generic `DECRYPTION_FAILED`).
+   * @throws CryptoError `INVALID_INPUT` / `DATA_TOO_LARGE_FOR_GCM` if the
+   *   ciphertext body exceeds `MAX_GCM_PLAINTEXT_BYTES` (NIST SP 800-38D
+   *   section 5.2.1.1) — such a body could only come from a counter-wrapped,
+   *   already-broken encryption. Checked before any key derivation.
    */
   public async decryptBytes(
     data: Uint8Array,
@@ -1508,6 +1521,15 @@ export abstract class CryptoCore {
           'INVALID_ENCRYPTED_DATA_SIZE'
         );
       }
+
+      // Refuse a ciphertext body past the AES-GCM per-invocation bound before
+      // deriving a key. GCM decryption is the same keystream construction as
+      // encryption, so a body this large could only have been produced by a
+      // counter-wrapped (i.e. already broken) encryption.
+      assertGcmPlaintextLimit(
+        combined.length - (bodyOffset + minBodySize),
+        'DATA_TOO_LARGE_FOR_GCM'
+      );
 
       // Extract components. Each is a subarray view over `combined`.
       const saltStart = bodyOffset;
@@ -2011,6 +2033,11 @@ export abstract class CryptoCore {
         'WEAK_PASSWORD'
       );
     }
+    // No separate AES-GCM size guard is needed here: the container's own
+    // MAX_CONTAINER_DATA_SIZE (0xffffffff, 4 GiB — the width of the u32 size
+    // field in the metadata block) sits far below the NIST SP 800-38D
+    // per-invocation bound (MAX_GCM_PLAINTEXT_BYTES, ~64 GiB), so anything
+    // this check accepts is already within the GCM limit.
     if (data.length > MAX_CONTAINER_DATA_SIZE) {
       throw new CryptoError(
         `Container payload is too large (max ${MAX_CONTAINER_DATA_SIZE} bytes)`,

@@ -3,7 +3,9 @@
 // Why this file exists
 // --------------------
 // Every other bench in this directory is gated by Argon2id at the default
-// 128 MiB / t=3 / p=1 profile, which costs ~150-300 ms per derivation. That
+// 128 MiB / t=3 / p=1 profile, which costs ~100-400 ms per derivation
+// depending on the host (395 ms on the machine these figures were taken on;
+// see `bench/README.md`). That
 // single number dwarfs everything else in `encrypt-text.mjs`: even at the two
 // orders of magnitude the pure codec once trailed the platform's own encoder
 // by, a 1 MiB `encryptText` total moved by only a few percent, which is inside

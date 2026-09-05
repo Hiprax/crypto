@@ -42,8 +42,8 @@ export default {
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
   // One-way ratchet. These are the measured `All files` values floored to
-  // integers (2026-09-05: statements 95.93, branches 87.16, functions 97.98,
-  // lines 95.95 over 25 suites / 1106 tests). `gate-surface.test.ts` asserts
+  // integers (2026-09-05: statements 95.94, branches 87.20, functions 97.98,
+  // lines 95.96 over 25 suites / 1113 tests). `gate-surface.test.ts` asserts
   // that none of them ever falls below that floor. They move UP only: when a run
   // measures higher, raise them; when a run measures lower, the cause is a
   // missing test and that is what gets fixed. Never lower a number and never

@@ -119,7 +119,18 @@ azure-pipelines.yml
 .husky/
 .lintstagedrc*
 
-# Temporary and backup files
+# Temporary and backup files.
+#
+# CAVEAT, measured 2026-09-05: `*.tmp` below CANNOT exclude a ROOT file whose
+# name stem is `readme`, `license`, `licence` or `copying` (case-insensitive,
+# any extension). npm's packlist force-includes those, overriding both this
+# file and the `files` allowlist in package.json, so a scratch `README.md.tmp`
+# — or, since this package ships `LICENSE`, a `LICENSE.tmp` — WOULD be
+# published. Probes: `README.junk` was included, `READMEXYZ.junk` was not, and
+# `CHANGELOG.md.tmp` / `SECURITY.md.tmp` were correctly excluded. The globs are
+# root-anchored, so a backup under a subdirectory is unaffected. No
+# configuration suppresses the rule — delete any such file before packing, and
+# treat an `npm pack --dry-run` count other than 31 files as a failure.
 *.tmp
 *.bak
 *.backup

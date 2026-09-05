@@ -73,8 +73,23 @@ export const MAGIC_BYTES: Buffer = Buffer.from(CORE_MAGIC_BYTES);
  * Performs a bounds-checked, O(MAGIC_LENGTH) compare and never reads past
  * the end of the buffer, so it is safe to call on arbitrarily small inputs.
  *
- * @param buf - candidate ciphertext buffer
- * @returns true if `buf` starts with the v1 magic, false otherwise
+ * **It accepts only a real `Buffer`, and that is a trap worth knowing about.**
+ * This overload keeps its original contract (`Buffer.isBuffer` or `false`),
+ * but since v1.5.0 the in-memory API returns a plain `Uint8Array` in BOTH
+ * runtimes: `encryptBytes` and `encryptContainer` assemble their output with
+ * `concatBytes`, which allocates a `new Uint8Array`. So
+ * `hasMagic(await cm.encryptBytes(...))` is `false` on the Node entry even
+ * though those bytes genuinely begin with "HPCR". Wrap the value
+ * (`hasMagic(Buffer.from(bytes))`) if you want this helper specifically, or
+ * compare against {@link MAGIC_BYTES} element-wise, which behaves identically
+ * on the Node and browser entry points — that is what README's "Telling the
+ * formats apart" example does, and why. The browser entry re-exports the
+ * isomorphic `format-core` version, which accepts any `Uint8Array`.
+ *
+ * @param buf - candidate ciphertext buffer; a non-`Buffer` yields `false`
+ *   rather than an error, including a `Uint8Array` that does carry the magic
+ * @returns true if `buf` is a `Buffer` starting with the v1 magic, false
+ *   otherwise
  */
 export function hasMagic(buf: Buffer): boolean {
   // Preserve the original public contract: only a real Node Buffer is

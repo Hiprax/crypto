@@ -1304,7 +1304,7 @@ Because it would be security theater. ML-KEM (Kyber) protects **key exchange**; 
 
 ### Crypto-agility, just in case
 
-Every v1 ciphertext embeds its own KDF identifier and full KDF parameters in the [versioned header](#ciphertext-format-v1), so stronger defaults or an additional KDF can ship in a **minor release** while every old ciphertext remains decryptable forever — they are self-describing. The header's version byte (`0x01`) reserves a clean, well-defined escape hatch (`0x02`) for a cipher change if cryptographic guidance ever demands one; none is needed or foreseen. One layer is deliberately out of this library's hands: the distribution channel (npm provenance signatures, registry TLS) relies on the ecosystem's classical public-key infrastructure. That layer is npm's and Sigstore's to migrate, is a real-time integrity check rather than harvestable ciphertext, and has no bearing on the confidentiality of anything you encrypt.
+Every v1 ciphertext embeds its own KDF identifier and full KDF parameters in the [versioned header](#ciphertext-format-v1), so stronger defaults or an additional KDF can ship in a **minor release** while every old ciphertext remains decryptable forever — they are self-describing. The header's version byte reserves a clean, well-defined escape hatch for a cipher change if cryptographic guidance ever demands one — `0x01` is this v1 ciphertext format and `0x02` is the additive [v2 container](#container-format-v2), so `0x03` onward remain unallocated; none is needed or foreseen. One layer is deliberately out of this library's hands: the distribution channel (npm provenance signatures, registry TLS) relies on the ecosystem's classical public-key infrastructure. That layer is npm's and Sigstore's to migrate, is a real-time integrity check rather than harvestable ciphertext, and has no bearing on the confidentiality of anything you encrypt.
 
 The formal, audit-facing version of this posture lives in [SECURITY.md](SECURITY.md#post-quantum-posture).
 
@@ -1344,6 +1344,16 @@ npm run verify
 ```
 
 It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports`, and takes roughly 2.5 minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
+
+Those commands form three tiers. Durations were measured on Node v24.19.0 at 25 suites / 1,113 tests; the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
+
+| Tier | Command | Measured | When |
+| --- | --- | --- | --- |
+| FAST | `npm run lint && npm run type-check && npm run build && npm test` | ~2 min | every change |
+| FULL | `npm run verify` | ~2.5 min | before every push; also `prepublishOnly` |
+| BROWSER | `npm run build && npm run test:browser` | ~7 s, after a one-time `npx playwright install --with-deps chromium` | when the browser graph, the wire format or the container format changes, and before every release |
+
+FAST is a strict prefix of FULL, so there is no reason to run FAST when FULL is affordable. The coverage ratchet is enforced by `npm run test:coverage`, which CI runs in its equivalent form (`npm test -- --coverage`) on its Ubuntu / Node 22 leg; note that `npm run verify` runs Jest without `--coverage`, so a green `verify` does not by itself assert the coverage floor.
 
 ## ⚡ Benchmarks
 

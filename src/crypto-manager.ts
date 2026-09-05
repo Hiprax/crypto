@@ -177,10 +177,14 @@ export class CryptoManager extends CryptoCore {
    * URL-safe string the pure `bytesToBase64url` (`./codec.js`) does, for every input
    * (pinned byte-for-byte in `src/__tests__/codec-seam.test.ts`, and pinned
    * against `Buffer` as an oracle inside `src/__tests__/codec.test.ts`). It is
-   * used because the native encoder is roughly two orders of magnitude faster
-   * on large payloads, which is what `encryptText` spends most of its
-   * non-KDF time on. The browser build deliberately does NOT override this
-   * and keeps running the pure reference implementation.
+   * used because the native encoder is still substantially faster — roughly
+   * 15-60x, the spread depending on payload size and on whether average or
+   * median latency is compared; read the current ratio off the paired rows in
+   * `bench/codec.mjs` rather than trusting a number quoted in prose. (It was
+   * 71-137x before the pure codec was rewritten in v1.6.0.) That gap is what
+   * `encryptText` spends most of its non-KDF time on. The browser build
+   * deliberately does NOT override this and keeps running the pure reference
+   * implementation.
    *
    * The non-`Buffer` branch wraps the input as a **view** — `Buffer.from(ab,
    * byteOffset, byteLength)` — rather than `Buffer.from(bytes)`, which would

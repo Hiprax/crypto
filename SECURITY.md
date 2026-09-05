@@ -177,8 +177,9 @@ reports and audits can reference it directly.
    embeds its KDF identifier and full KDF parameters, so defaults can be
    raised (or a KDF added) in a minor release while old ciphertexts remain
    decryptable; the header's version byte reserves a clean escape hatch
-   (`0x02`) should guidance ever require a cipher change. None is needed or
-   foreseen.
+   should guidance ever require a cipher change — `0x01` is the v1
+   ciphertext and `0x02` the additive v2 container, leaving `0x03` onward
+   free. None is needed or foreseen.
 5. **Hybrid PQC modes (ML-KEM/ML-DSA) are deliberately absent** because the
    library performs no key exchange and no signing; there is nothing to
    hybridize, and adding those primitives would add attack surface without

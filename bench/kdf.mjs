@@ -31,7 +31,8 @@ const nextSalt = () => salts[saltIdx++ % SALT_POOL];
 // tinybench v6: pass options as second argument to constructor.
 //   - time: total time budget per case in ms (default 500)
 //   - iterations: minimum iteration count (default 10)
-// Argon2id at 128 MiB takes ~150-300 ms per call, so we widen the budget so
+// Argon2id at 128 MiB takes ~100-400 ms per call depending on the host, so we
+// widen the budget so
 // tinybench has enough samples to compute a stable mean. PBKDF2 inherits
 // the same budget for symmetry; it's faster so it samples more.
 const bench = new Bench({

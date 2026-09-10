@@ -44,6 +44,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { parsePackListing, selectPackEntry } from './pack-listing.mjs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -157,27 +158,16 @@ try {
   process.exit();
 }
 
-// npm prints its notices to stderr, but be tolerant of a stray leading line.
-const parseListing = text => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const start = text.indexOf('[');
-    if (start === -1) return null;
-    try {
-      return JSON.parse(text.slice(start));
-    } catch {
-      return null;
-    }
-  }
-};
+// Parsing and shape-normalisation live in `./pack-listing.mjs` so they can be
+// unit-tested without invoking npm. npm 12 changed this output from an array to
+// an object keyed by package name; both are accepted. See that file for why.
+const parsed = parsePackListing(raw);
+const entry = selectPackEntry(parsed);
 
-const parsed = parseListing(raw);
-const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-
-if (!entry || !Array.isArray(entry.files)) {
+if (!entry) {
   console.error(
-    `${TAG} FAILED — \`npm pack --dry-run --json\` returned no file list. ` +
+    `${TAG} FAILED — \`npm pack --dry-run --json\` returned no file list ` +
+      `(npm ${process.env['npm_config_user_agent'] || 'version unknown'}). ` +
       'This gate cannot verify the artifact, so it fails closed rather than ' +
       'reporting a tarball it never inspected.'
   );

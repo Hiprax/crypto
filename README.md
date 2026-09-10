@@ -41,7 +41,7 @@
 - ✅ **Strong password** validation with detailed feedback
 - 🔄 **Cross-platform** compatibility
 - 📝 **Full TypeScript** support with strict typing
-- 🧪 **Comprehensive testing** — 1,147 tests: 1,113 in the Node suite (25 files, Jest) plus 34 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
+- 🧪 **Comprehensive testing** — 1,160 tests: 1,126 in the Node suite (26 files, Jest) plus 34 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
 - 🚀 **Modern ES modules** with tree-shaking support
 - 🔒 **Security-focused** with constant-time comparisons
 - 🔑 **Default passphrase** support for simplified usage
@@ -1539,7 +1539,7 @@ npm run verify
 
 It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball`, and takes roughly 2.5 minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
 
-Those commands form three tiers. Durations were measured on Node v24.19.0 at 25 suites / 1,113 tests; the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
+Those commands form three tiers. Durations were measured on Node v24.19.0 at 25 suites / 1,113 tests (the suite is now 26 / 1,126; the added file is a pure-function unit test that runs in well under a second and does not move the tier timings); the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
 
 | Tier | Command | Measured | When |
 | --- | --- | --- | --- |

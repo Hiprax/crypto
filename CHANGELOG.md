@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [1.6.1] - 2026-09-10
+## [1.6.2] - 2026-09-10
 
 Documentation accuracy, plus the release tooling that had been waiting under Unreleased.
 **No runtime behaviour changed, no wire byte moved, and no public signature changed**: every
@@ -33,7 +33,7 @@ recorded here because the artifact it gates is the thing being published.
 
 ### Fixed
 
-- **`check:tarball` could not read `npm pack --json` under npm 12, which blocked the v1.6.1 publish itself.** npm changed that output at its 12.0.0 major, silently: both forms are valid JSON carrying the same data, so a parser written against one simply finds no `files` array in the other.
+- **`check:tarball` could not read `npm pack --json` under npm 12, which blocked the first publish attempt of this release (tagged v1.6.1).** npm changed that output at its 12.0.0 major, silently: both forms are valid JSON carrying the same data, so a parser written against one simply finds no `files` array in the other.
 
   ```text
   npm <= 11:  [ { id, name, version, files: [...] } ]               // array
@@ -65,6 +65,16 @@ recorded here because the artifact it gates is the thing being published.
 - **The `Buffer`-only contract on the Node entry's `parseHeader`.** The README already warned that `hasMagic` returns `false` for a plain `Uint8Array`; the same contract makes `parseHeader` **throw** `INVALID_HEADER_INPUT` for one. Both traps fire on this library's own output, since `encryptBytes` and `encryptContainer` return a plain `Uint8Array` in both runtimes. The `inspectHeader` method accepts `Uint8Array` and works on both entry points, and is the runtime-agnostic answer.
 - **The wire-format constants and pure codecs as a documented public surface.** `bytesToBase64url`, `base64urlToBytes`, `isValidBase64url`, `bytesToHex`, `utf8Encode`, `utf8Decode`, `concatBytes`, the header helpers and the DoS caps were all exported and all undocumented. The README now covers them, along with a full export-surface table (53 runtime bindings on the Node entry, 34 on the browser entry) and a note on the two spellings that differ only in one letter's case: `isValidBase64Url` from the Node-only utilities delegates to the isomorphic `isValidBase64url`, and only the second exists in the browser build.
 - **A table of contents, a constructor-validation table** mapping every rejected option to its `code` and `type`, and clarification that `CryptoError.code` — not `.type` — is the stable discriminator, including the two codes that carry different types depending on the call site.
+
+## [1.6.1] - never published
+
+Tagged, then abandoned. The tag exists on the repository but **no artifact was ever
+published under it**: `npm publish` refused during `prepublishOnly`, because
+`check:tarball` could not read `npm pack --json` under the npm 12 that `release.yml`
+installs immediately beforehand. The gate failed closed, so the registry was never
+touched. The repository's `release-tags` ruleset makes tags immutable, so rather than
+force a tag that consumers might already have fetched, the fix and everything that was
+staged with it ship as 1.6.2. **Consumers go 1.6.0 -> 1.6.2**; there is no 1.6.1 on npm.
 
 ## [1.6.0] - 2026-09-05
 

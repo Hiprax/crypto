@@ -82,16 +82,33 @@ import type { CryptoEngine } from './engine.js';
  * thresholds and trick the classifier into reporting a higher tier than
  * the configuration deserves.
  *
- * Tier rationale (OWASP 2026 guidance for Argon2id):
+ * Tier rationale. **These labels are this library's own, not quotations from
+ * a standards body.** For calibration (verified against the cheat sheet's raw
+ * source, 2026-09-10): OWASP states a MINIMUM configuration — "Use Argon2id
+ * with a minimum configuration of 19 MiB of memory, an iteration count of 2,
+ * and 1 degree of parallelism" — and separately LISTS five configurations that
+ * "provide an equal level of defense, and the only difference is a trade off
+ * between CPU and RAM usage": `m=47104` (46 MiB) `t=1`, `m=19456` (19 MiB)
+ * `t=2`, `m=12288` (12 MiB) `t=3`, `m=9216` (9 MiB) `t=4`, `m=7168` (7 MiB)
+ * `t=5`, all at `p=1`. It designates none of them a "first choice": the
+ * ordering is a CPU/RAM trade-off, not a ranking. The lower-memory rows are
+ * not below the minimum either, because each RAISES `t` as `m` falls.
  *
- *  - **HIGH**   `memoryCost = 2 ** 17` (128 MiB), `timeCost = 3` — the
- *    "first choice" tier for high-security applications. This is the
- *    Node library default.
+ *  - **HIGH**   `memoryCost = 2 ** 17` (128 MiB), `timeCost = 3` — the Node
+ *    library default. Roughly 2.8x the memory of the highest-memory
+ *    configuration OWASP lists, and far above its stated minimum on both
+ *    axes. Deliberately conservative rather than a quotation from that list.
  *  - **ULTRA**  `memoryCost = 2 ** 19` (512 MiB), `timeCost = 4` — the
  *    "paranoid" tier; meaningful for offline/asymmetric workloads where the
  *    extra latency and memory pressure are tolerable.
- *  - **MEDIUM** `memoryCost = 2 ** 14` (16 MiB), `timeCost = 2` — minimum
- *    acceptable threshold; suitable only for resource-constrained devices.
+ *  - **MEDIUM** `memoryCost = 2 ** 14` (16 MiB), `timeCost = 2` — the lowest
+ *    tier this library labels acceptable, and **it sits below OWASP's stated
+ *    minimum**: the same `t=2`, but 16 MiB against the 19 MiB OWASP asks for.
+ *    It is this library's own floor, NOT an OWASP-endorsed configuration, and
+ *    is appropriate only for resource-constrained devices whose operator has
+ *    accepted that trade. Do not cite the 12/9/7 MiB rows as cover for it:
+ *    those pair less memory with MORE iterations, which `MEDIUM` does not.
+ *    Compare on the (memory, iteration) pair, never on memory alone.
  *
  * Anything below `MEDIUM` is reported as `LOW` with no fixed threshold of
  * its own.

@@ -22,7 +22,8 @@
  *
  * Why a low-cost CryptoManager instance: the default Argon2id
  * configuration was raised to `m=2^17 (128 MiB), t=3, p=1` in v0.15.0
- * (Task 18) to match OWASP 2026 first-choice. That default is wonderful
+ * (Task 18), well above OWASP's stated Argon2id minimum of 19 MiB / t=2
+ * (OWASP designates no "first choice"). That default is wonderful
  * for production but punishing for property tests — at ~700ms per
  * derivation, even 50 random cases would take 35+ seconds per property.
  * Argon2 is *deliberately* expensive; the property tests only need

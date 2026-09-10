@@ -1,6 +1,6 @@
-# Crypto
+# @hiprax/crypto
 
-🔐 **High-security encryption/decryption library** using AES-256-GCM and Argon2id for Node.js applications with full TypeScript support.
+🔐 **High-security encryption/decryption library** using AES-256-GCM and Argon2id, for **Node.js and the browser**, with full TypeScript support.
 
 [![CI](https://github.com/Hiprax/crypto/actions/workflows/ci.yml/badge.svg)](https://github.com/Hiprax/crypto/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Hiprax/crypto/branch/main/graph/badge.svg)](https://codecov.io/gh/Hiprax/crypto)
@@ -11,6 +11,23 @@
 [![npm version](https://img.shields.io/npm/v/@hiprax/crypto)](https://www.npmjs.com/package/@hiprax/crypto)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0.3-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22+-green.svg)](https://nodejs.org/)
+
+---
+
+## Contents
+
+| | |
+| --- | --- |
+| **Getting started** | [Features](#-features) · [Installation](#-installation) · [Module system](#module-system) · [Argon2 providers](#argon2-native-dependency-optional-with-wasm-fallback) · [Browser build](#browser-build) · [CommonJS interop](#commonjs-interop) · [Quick Start](#-quick-start) |
+| **Reference** | [API Reference](#-api-reference) · [Constructor options](#constructor) · [Methods](#methods) · [Types and enums](#types-and-enums) · [Utility functions](#utility-functions) · [Wire-format and codec exports](#wire-format-and-codec-exports) · [Full export surface](#full-export-surface-at-a-glance) |
+| **Runtimes** | [Isomorphic API & browser support](#-isomorphic-api--browser-support) · [Cross-runtime interop](#cross-runtime-interop) · [Browser Argon2id profile](#browser-argon2id-profile-32-mib-default-and-the-128-mib-decrypt-caveat) · [CSP for WASM](#content-security-policy-wasm) · [Node-only methods in the browser](#node-only-methods-throw-in-the-browser) |
+| **Formats** | [Ciphertext format (v1)](#ciphertext-format-v1) · [Container mode (v2)](#-container-mode-v2-envelope) · [Container format (v2)](#container-format-v2) · [Telling the formats apart](#telling-the-formats-apart) |
+| **Configuration** | [Sync vs async](#asynchronous-vs-synchronous-operations) · [Progress callbacks](#progress-callbacks-for-file-ops) · [Security levels](#security-levels) · [Password requirements](#password-requirements) |
+| **Security** | [Security features](#-security-features) · [(key, IV) reuse boundary](#aes-gcm-key-iv-reuse--security-boundary-for-the-low-level-api) · [Post-quantum security](#-post-quantum-security) · [Threat model](#-threat-model) · [SECURITY.md](SECURITY.md) |
+| **Errors** | [Error handling](#-error-handling) · [Error types](#error-types) · [AES-GCM size limit](#the-aes-gcm-per-invocation-size-limit) · [Container error codes](#container-error-codes) |
+| **Project** | [Testing](#-testing) · [Benchmarks](#-benchmarks) · [Development](#-development) · [Contributing](#-contributing) · [Changelog](CHANGELOG.md) · [License](#-license) |
+
+---
 
 ## ✨ Features
 
@@ -24,7 +41,7 @@
 - ✅ **Strong password** validation with detailed feedback
 - 🔄 **Cross-platform** compatibility
 - 📝 **Full TypeScript** support with strict typing
-- 🧪 **Comprehensive testing** — 1,100+ tests across Node and real Chromium, with a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
+- 🧪 **Comprehensive testing** — 1,147 tests: 1,113 in the Node suite (25 files, Jest) plus 34 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
 - 🚀 **Modern ES modules** with tree-shaking support
 - 🔒 **Security-focused** with constant-time comparisons
 - 🔑 **Default passphrase** support for simplified usage
@@ -46,11 +63,13 @@ The main entry (`.`) is an **[isomorphic](#-isomorphic-api--browser-support)** c
 The async key-derivation paths (`encryptText`, `decryptText`, `encryptFile`, `decryptFile`, `deriveKey`) use Argon2id — the gold standard for password hashing. Two providers are supported and tried in order:
 
 1. **Native [`argon2`](https://www.npmjs.com/package/argon2)** — fastest, but requires a working C++ toolchain (Python + node-gyp) at install time on platforms without a prebuilt binary.
-2. **WASM [`hash-wasm`](https://www.npmjs.com/package/hash-wasm)** — pure WebAssembly, zero native deps, works everywhere Node.js runs. Roughly 2-3× slower than native at the default 128 MiB profile, but the same RFC 9106 Argon2id reference, so the derived keys are bit-identical between providers and v1 ciphertexts produced by either round-trip across both.
+2. **WASM [`hash-wasm`](https://www.npmjs.com/package/hash-wasm)** — pure WebAssembly, zero native deps, works everywhere Node.js runs. Slower than native at the default 128 MiB profile, but only by a small constant factor and the gap is host-dependent (measured at **1.8x** on the maintainer's Linux machine on 2026-09-10: ~357 ms native vs ~631 ms WASM per derivation, the native side sampled ten times across a 352-363 ms range; budget for up to ~3x on weaker hardware. A single Argon2id derivation is not a stable constant, and this repo records more than one figure for it: `bench/README.md` and `CLAUDE.md` both cite 395 ms for the same operation from an earlier session on the same machine. Treat any absolute number here as an order of magnitude and run `npm run bench` for a current one). It is the same RFC 9106 Argon2id reference, so the derived keys are **bit-identical** between providers, and v1 ciphertexts produced by either round-trip across both. Verify it yourself with `bench/kdf.mjs`, or by hashing the same `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple through each and comparing the bytes.
 
 Both packages are declared as **optional dependencies**. The library tries native first (highest performance) and transparently falls back to WASM if native is unavailable. If BOTH are unavailable, async encryption throws `CryptoError(MEMORY_ERROR, 'ARGON2_NOT_AVAILABLE')` with the message:
 
-> `argon2 native module unavailable. Install build tools (Python + node-gyp) or install the optional 'hash-wasm' package for a pure-WASM Argon2id fallback (slower than native but works everywhere). Alternatively, use *Sync methods (PBKDF2). Native error: <msg>. WASM error: <msg>.`
+```text
+argon2 native module unavailable. Install build tools (Python + node-gyp) or install the optional `hash-wasm` package for a pure-WASM Argon2id fallback (slower than native but works everywhere). Alternatively, use *Sync methods (PBKDF2). Native error: <msg>. WASM error: <msg>.
+```
 
 (the trailing `Native error: … WASM error: …` carries the concrete failure reason from each provider.)
 
@@ -109,7 +128,7 @@ If you need pure-CJS interop, the recommended path is to migrate the calling mod
 
 ### Basic Usage
 
-#### Asynchronous Operations (Recommended)
+#### Text: asynchronous operations (recommended)
 
 ```typescript
 import { CryptoManager } from '@hiprax/crypto';
@@ -128,7 +147,7 @@ const decrypted = await crypto.decryptText(encrypted, 'MySecureP@ssw0rd123!');
 console.log('Decrypted:', decrypted);
 ```
 
-#### Synchronous Operations
+#### Text: synchronous operations
 
 For scenarios where you need synchronous operations (note: uses PBKDF2 instead of Argon2id for key derivation):
 
@@ -209,7 +228,7 @@ crypto.decryptFileSync('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
 
 ### File Encryption with Default Passphrase
 
-#### Asynchronous Operations
+#### Files with a default passphrase: asynchronous
 
 ```typescript
 import { CryptoManager } from '@hiprax/crypto';
@@ -229,7 +248,7 @@ await crypto.decryptFile('output.enc', 'decrypted.txt');
 await crypto.encryptFile('input.txt', 'output.enc', 'CustomP@ssw0rd456!');
 ```
 
-#### Synchronous Operations
+#### Files with a default passphrase: synchronous
 
 ```typescript
 import { CryptoManager } from '@hiprax/crypto';
@@ -255,7 +274,7 @@ crypto.encryptFileSync('input.txt', 'output.enc', 'CustomP@ssw0rd456!');
 import { CryptoManager } from '@hiprax/crypto';
 
 const crypto = new CryptoManager({
-  memoryCost: 2 ** 19, // 512MB (post-Task-18 ULTRA tier)
+  memoryCost: 2 ** 19, // 512 MiB — the ULTRA tier floor
   timeCost: 4, // Higher time cost
   parallelism: 2, // Use 2 threads
   aad: 'my-app-v1', // Custom AAD
@@ -280,7 +299,7 @@ const crypto = new CryptoManager(options?: CryptoManagerOptions);
 
 **Options:**
 
-- `memoryCost` (number): Argon2 memory cost (default: **131072** — `2 ** 17`, 128 MiB; OWASP 2026 first-choice tier for Argon2id, see [Security Levels](#security-levels)). Resource-constrained callers (mobile, embedded, low-memory containers) can opt back into the previous 64 MiB profile by passing `memoryCost: 65536` (`2 ** 16`).
+- `memoryCost` (number): Argon2 memory cost in KiB (default: **131072** — `2 ** 17`, 128 MiB, the `HIGH` tier; see [Security Levels](#security-levels)). This is deliberately **above** every configuration OWASP lists. OWASP's [Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) does two separate things. It **states a minimum** — "Use Argon2id with a minimum configuration of 19 MiB of memory, an iteration count of 2, and 1 degree of parallelism" — and it separately **lists five configurations** that "provide an equal level of defense, and the only difference is a trade off between CPU and RAM usage": `m=47104` (46 MiB) `t=1`, `m=19456` (19 MiB) `t=2`, `m=12288` (12 MiB) `t=3`, `m=9216` (9 MiB) `t=4`, `m=7168` (7 MiB) `t=5`, all at `p=1`. It designates none of them a "first choice" — the ordering is a CPU/RAM trade-off, not a ranking — and the lower-memory rows are not below the minimum, because each raises `t` as `m` falls. At 128 MiB the library's default carries roughly 2.8x the memory of the highest-memory entry on that list and clears the stated minimum on both axes, so it is a conservative choice rather than a quotation from it. Resource-constrained callers (mobile, embedded, low-memory containers) can opt back into the previous 64 MiB profile by passing `memoryCost: 65536` (`2 ** 16`).
 - `timeCost` (number): Argon2 time cost (default: 3)
 - `parallelism` (number): Argon2 parallelism (default: 1)
 - `aad` (string): Custom Additional Authenticated Data (default: 'secure-crypto-tool-v2')
@@ -290,6 +309,21 @@ const crypto = new CryptoManager(options?: CryptoManagerOptions);
 - `legacyPbkdf2Iterations` (number): PBKDF2 iteration count assumed when decrypting **legacy v0** sync ciphertexts (those produced before the versioned ciphertext format and which carry no embedded iteration count). Default: 100000 — the value baked into every v0 sync ciphertext produced by versions of this library prior to 0.11.0. Override only if you have legacy data that was produced with a non-default iteration count. Has no effect on v1 ciphertexts.
 - `skipPasswordValidation` (boolean): When `true`, the constructor skips strength validation of `defaultPassphrase` only (default: `false`). This does **not** disable encryption-time password validation, and does **not** disable Unicode NFC normalisation — use it solely to construct a manager for decrypting legacy data whose password predates the current strength rules. See [Password Requirements](#password-requirements).
 - `legacyHeaderAad` (boolean): Backward-compat shim for v1 ciphertexts produced by **v1.0.0** (default: `false`). When `true`, v1 ciphertext AAD reverts to the v1.0.0 format (just `aad`, header bytes not bound) so v1.0.0-produced ciphertexts still decrypt; the default `false` binds the header bytes into the AAD. Affects v1 ciphertexts only (v0 always uses `aad` alone). Leave `false` for new code; use only as a temporary migration aid. See [Migration: v1.0.0 → v1.1.0](#migration-v100--v110).
+
+**Every option is validated in the constructor, so a misconfiguration fails at construction rather than at first use.** Each rejection is a `CryptoError` with a specific `code`:
+
+| Rejected value | `code` | `type` |
+| --- | --- | --- |
+| `memoryCost` not a positive integer / above `2 ** 22` / below `8 * parallelism` | `INVALID_MEMORY_COST` / `MEMORY_COST_TOO_LARGE` / `MEMORY_COST_TOO_SMALL` | `INVALID_INPUT` |
+| `timeCost` not a positive integer / above `100` | `INVALID_TIME_COST` / `TIME_COST_TOO_LARGE` | `INVALID_INPUT` |
+| `parallelism` not a positive integer / above `64` | `INVALID_PARALLELISM` / `PARALLELISM_TOO_LARGE` | `INVALID_INPUT` |
+| `pbkdf2Iterations` not a positive integer / above `10_000_000` | `INVALID_PBKDF2_ITERATIONS` / `PBKDF2_ITERATIONS_TOO_LARGE` | `INVALID_INPUT` |
+| `legacyPbkdf2Iterations` not a positive integer / above `10_000_000` | `INVALID_LEGACY_PBKDF2_ITERATIONS` / `LEGACY_PBKDF2_ITERATIONS_TOO_LARGE` | `INVALID_INPUT` |
+| `legacyMode` not one of `'auto'`/`'strict'`/`'reject'` | `INVALID_LEGACY_MODE` | `INVALID_INPUT` |
+| `aad` not a string | `INVALID_AAD` | `INVALID_INPUT` |
+| `defaultPassphrase` too weak (unless `skipPasswordValidation: true`) | `WEAK_PASSWORD` | `INVALID_PASSWORD` |
+
+The `memoryCost >= 8 * parallelism` floor is RFC 9106 §3.1 and is checked on the *resolved* values, after defaults are applied — so `new CryptoManager({ memoryCost: 256, parallelism: 64 })` is rejected with `MEMORY_COST_TOO_SMALL` (256 < 512), while raising `parallelism` alone is fine because the 128 MiB default clears the floor for every legal `parallelism`. The three upper bounds mirror the wire-format DoS caps enforced by `parseHeader`: a value above them would produce a ciphertext this library then refuses to decrypt.
 
 #### Methods
 
@@ -432,7 +466,7 @@ crypto.encryptFileSync(
 
 ##### `decryptFileSync(inputPath: string, outputPath: string, password?: string, progress?: ProgressCallback): void`
 
-Synchronous version of file decryption. **Streams** the ciphertext through `crypto.createDecipheriv()` in fixed 64 KiB chunks via `fs.readSync`/`fs.writeSync`, so peak memory is bounded regardless of input size. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation. Both v0 (legacy) and v1 (preferred) ciphertext layouts are supported (subject to `legacyMode`). Output is staged to a sibling temp file and atomically renamed only after `decipher.final()` validates the GCM auth tag. The optional `progress` callback fires once before the body loop, once per body chunk, and once after the rename succeeds — see [Progress callbacks for file ops](#progress-callbacks-for-file-ops).
+Synchronous version of file decryption. **Streams** the ciphertext through `crypto.createDecipheriv()` in fixed 64 KiB chunks, read with `fs.readSync` and written with `fs.writeFileSync(fd, chunk)`, so peak memory is bounded regardless of input size. Uses PBKDF2 for key derivation instead of Argon2id for synchronous operation. Both v0 (legacy) and v1 (preferred) ciphertext layouts are supported (subject to `legacyMode`). Output is staged to a sibling temp file and atomically renamed only after `decipher.final()` validates the GCM auth tag. The optional `progress` callback fires once before the body loop, once per body chunk, and once after the rename succeeds — see [Progress callbacks for file ops](#progress-callbacks-for-file-ops).
 
 ```typescript
 crypto.decryptFileSync('output.enc', 'decrypted.txt', 'MySecureP@ssw0rd123!');
@@ -472,7 +506,7 @@ const { data, meta } = await crypto.decryptContainer(
   container,
   'MySecureP@ssw0rd123!'
 );
-console.log(meta); // { filename: 'report.txt', mime: 'text/plain', size: 15 }
+console.log(meta); // { size: 15, filename: 'report.txt', mime: 'text/plain' }
 console.log(new TextDecoder().decode(data)); // 'report contents'
 ```
 
@@ -494,14 +528,26 @@ const random = crypto.generateSecureRandom(32);
 // Returns: Buffer
 ```
 
-##### `deriveKey(password: string, salt: Buffer): Promise<Buffer>`
+##### `deriveKey(password: string, salt: Buffer, overrides?: { memoryCost: number; timeCost: number; parallelism: number }): Promise<Buffer>`
 
-Derives an encryption key from a password using Argon2id.
+Derives an encryption key from a password using Argon2id. The salt must be a 32-byte `Buffer` (`INVALID_SALT` otherwise). `overrides` replaces this instance's Argon2id parameters for a single call — it is how the decrypt paths honour the parameters embedded in a v1 header rather than the constructor's defaults; omit it for normal use.
 
 ```typescript
 const salt = crypto.generateSecureRandom(32);
 const key = await crypto.deriveKey('MySecureP@ssw0rd123!', salt);
 // Returns: 32-byte Buffer
+
+// Reproduce the key of an existing ciphertext: read its embedded parameters,
+// and pair them with THAT ciphertext's own salt (bytes 22..54 of a v1 record).
+const header = crypto.inspectHeader(ciphertext);
+if (header !== null && header.params.kind === 'argon2id') {
+  const embeddedSalt = Buffer.from(ciphertextBytes.subarray(22, 54));
+  const sameKey = await crypto.deriveKey(
+    'MySecureP@ssw0rd123!',
+    embeddedSalt,
+    header.params
+  );
+}
 ```
 
 ##### `deriveKeySync(password: string, salt: Buffer, iterations?: number): Buffer`
@@ -518,9 +564,11 @@ const key = crypto.deriveKeySync('MySecureP@ssw0rd123!', salt);
 const customKey = crypto.deriveKeySync('MySecureP@ssw0rd123!', salt, 250000);
 ```
 
-##### `encryptData(data: Buffer, key: Buffer, iv: Buffer): EncryptionResult`
+##### `encryptData(data: Buffer, key: Buffer, iv: Buffer, aadOverride?: Buffer): EncryptionResult`
 
-Low-level AES-256-GCM encryption. Returns `{ encrypted: Buffer, tag: Buffer }`.
+Low-level AES-256-GCM encryption. Returns `{ encrypted: Buffer, tag: Buffer }`. Every argument is type- and length-checked: `INVALID_DATA`, `INVALID_KEY` (32 bytes), `INVALID_IV` (12 bytes), `INVALID_AAD` (must be a `Buffer` when supplied).
+
+`aadOverride` replaces the instance's configured `aad` for this one call. It is how the high-level v1 paths bind the on-disk header bytes into the auth tag. If you pass it, you must pass the byte-identical value to `decryptData`, or authentication fails.
 
 > **Security:** the caller is responsible for ensuring each `(key, iv)` pair is used at most once. See [AES-GCM (key, IV) reuse](#aes-gcm-key-iv-reuse--security-boundary-for-the-low-level-api) for the full explanation and recommended pattern. Prefer `encryptText` / `encryptFile` for any code that does not have a specific reason to manage IVs by hand.
 
@@ -532,11 +580,11 @@ const iv = crypto.generateSecureRandom(12); // fresh random IV per message
 const { encrypted, tag } = crypto.encryptData(Buffer.from('data'), key, iv);
 ```
 
-##### `decryptData(encryptedData: Buffer, key: Buffer, iv: Buffer, tag: Buffer): Buffer`
+##### `decryptData(encryptedData: Buffer, key: Buffer, iv: Buffer, tag: Buffer, aadOverride?: Buffer): Buffer`
 
 Low-level AES-256-GCM decryption. Returns the decrypted data as a Buffer.
 
-The caller must supply the exact `(key, iv, tag)` that were produced by `encryptData` (and the matching `aad`, configured on the `CryptoManager` instance). Tag-check failure surfaces as `CryptoError` with code `DECRYPTION_FAILED` regardless of which condition failed (wrong key, wrong IV, wrong AAD, or tampered ciphertext) — the generic message is intentional, to avoid leaking which case applied. A ciphertext past the AES-GCM per-invocation bound is rejected up front with `DATA_TOO_LARGE_FOR_GCM`, since no such input could have been produced correctly.
+The caller must supply the exact `(key, iv, tag)` that were produced by `encryptData`, plus the matching AAD — either the instance's configured `aad` (the default) or, if `encryptData` was given an `aadOverride`, that same override. Tag-check failure surfaces as `CryptoError` with code `DECRYPTION_FAILED` regardless of which condition failed (wrong key, wrong IV, wrong AAD, or tampered ciphertext) — the generic message is intentional, to avoid leaking which case applied. A ciphertext past the AES-GCM per-invocation bound is rejected up front with `DATA_TOO_LARGE_FOR_GCM`, since no such input could have been produced correctly.
 
 ```typescript
 const decrypted = crypto.decryptData(encrypted, key, iv, tag);
@@ -588,7 +636,7 @@ const mode = crypto.getLegacyMode();
 
 ##### `inspectHeader(input: string | Uint8Array): ParsedHeader | null`
 
-Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Uint8Array` (file contents — a Node `Buffer` is a `Uint8Array`, so `Buffer` inputs keep working). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; byte inputs are read as-is. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_KDF`, `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
+Parses the v1 ciphertext header **without decrypting**. Returns a `ParsedHeader` (`{ version, kdfId, params, headerLen }`) for a v1 ciphertext, or `null` when the input lacks the v1 magic bytes (i.e. a legacy v0 ciphertext). Accepts either a base64url string (text-format output) or a `Uint8Array` (file contents — a Node `Buffer` is a `Uint8Array`, so `Buffer` inputs keep working). String inputs are validated as well-formed base64url **before** decoding and throw `CryptoError` with code `INVALID_BASE64URL` on malformed input — so an invalid string fails fast instead of being mistaken for a v0 ciphertext; byte inputs are read as-is. An empty string, or an argument that is neither a string nor a `Uint8Array`, throws code `INVALID_INPUT` instead. A buffer that begins with the v1 magic but is otherwise malformed throws a specific parser `CryptoError` (e.g. `TRUNCATED_HEADER`, `UNSUPPORTED_KDF`, `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`). See the worked example under [Ciphertext Format (v1)](#ciphertext-format-v1).
 
 Inspecting a large ciphertext is cheap: since v1.6.0 only the first 32 base64url characters of a string input are decoded — enough for the 22-byte header with two bytes to spare — so the call allocates 24 bytes rather than a copy of the whole payload, whatever its size. The well-formedness check still scans the entire string (narrowing it would stop rejecting a malformed tail), but it does so in one allocation-free pass.
 
@@ -608,18 +656,30 @@ import {
   EncryptionAlgorithm,
   // Interfaces
   type CryptoManagerOptions,
-  type EncryptionResult,
+  type EncryptionResult, // Node only — names `Buffer`; see the note below
   type EncryptionParameters,
   type ValidationResult,
   type FileInfo,
   type RetryConfig,
   type ProgressCallback,
+  // Type alias for the `legacyMode` option and `getLegacyMode()`
+  type LegacyMode,
   // Container mode (v2 envelope)
   type ContainerMetadataInput,
   type ContainerMetadata,
   type DecryptedContainer,
+  // Wire-format header types (returned by `inspectHeader` / `parseHeader`)
+  type ParsedHeader,
+  type KdfId,
+  type KdfHeaderParams,
+  type Argon2idHeaderParams,
+  type Pbkdf2HeaderParams,
+  // Options bag for `validatePath` (Node only — declared in the Node-only utils)
+  type ValidatePathOptions,
 } from '@hiprax/crypto';
 ```
+
+`ParsedHeader` is `{ version, kdfId, params, headerLen }`, and `params` is the discriminated union `KdfHeaderParams = Argon2idHeaderParams | Pbkdf2HeaderParams` — narrow on `params.kind` (`'argon2id'` or `'pbkdf2-sha256'`) before reading `memoryCost` / `iterations`.
 
 > **`EncryptionResult` is Node-only.** It describes the `{ encrypted: Buffer, tag: Buffer }` return of the low-level `encryptData`, so it names the Node `Buffer` global. As of v1.6.0 it lives in `crypto-manager.ts` rather than `types.ts` and is exported from `@hiprax/crypto` (unchanged) and, additionally, from `@hiprax/crypto/crypto-manager`. It is **not** part of the browser type surface — nothing on the browser build can produce one (`encryptData` there throws `UNSUPPORTED_IN_BROWSER`), and a browser-only TypeScript project would previously have failed to compile on the two `Buffer` references it carried. Every other name in the list above is available in both runtimes.
 
@@ -673,10 +733,15 @@ const inProject = validatePath('/home/user/project/data/file.txt', {
 });
 // inProject.isValid === true
 
+// NOTE: this example is Windows-specific. Both drive-letter accommodations
+// (stripping `C:` before the invalid-character scan, and before the `..`
+// segment scan) are gated on `process.platform === 'win32'`.
 const escape = validatePath('C:\\Users\\..\\Windows', {
   allowedRoot: 'C:\\Users',
 });
-// escape.isValid === false, escape.error === 'Path is outside the allowed root'
+// On Windows: isValid === false, error === 'Path is outside the allowed root'
+// On POSIX:   isValid === false, error === 'File path contains invalid characters'
+//             (the `:` is never stripped there, so the earlier scan rejects it)
 
 // Generate secure random string
 // (default 32 chars ≈ 190 bits of entropy; request >= 44 chars for a full
@@ -701,7 +766,9 @@ const hex = generateRandomHex(16);
 // Secure string comparison (constant time)
 const isEqual = secureStringCompare('secret', 'secret');
 
-// Format file size
+// Format file size. Throws rather than guessing: NEGATIVE_FILE_SIZE for a negative
+// count, INVALID_FILE_SIZE for NaN/Infinity/non-number, FILE_SIZE_TOO_LARGE above
+// Number.MAX_SAFE_INTEGER. The unit ladder caps at TB.
 const size = formatFileSize(1024 * 1024); // "1 MB"
 
 // Get file extension (lowercase)
@@ -719,11 +786,15 @@ const backupPath = createBackupPath('file.txt'); // "file_2026-06-30T12-00-00_a1
 // Validate base64
 const isValid = isValidBase64('SGVsbG8gV29ybGQ=');
 
-// Validate base64url (the format used by this library's encrypted output)
+// Validate base64url (the format used by this library's encrypted output).
+// Careful: `isValidBase64Url` (capital U, Node-only, from utils) is a thin
+// delegate to `isValidBase64url` (lowercase u, isomorphic, from the codec).
+// Identical behaviour, but only the lowercase spelling exists in the browser build.
 const isValidUrl = isValidBase64Url('SGVsbG8gV29ybGQ');
 
-// Create progress bar
-const progress = createProgressBar(50, 100); // "[████████████████░░░░░░░░░░░░░░] 50%"
+// Create progress bar (width defaults to 30; out-of-range inputs are clamped,
+// a non-positive/non-integer width falls back to 30, and total <= 0 yields 0%)
+const progress = createProgressBar(50, 100); // "[███████████████░░░░░░░░░░░░░░░] 50%"
 
 // Sleep for specified time
 await sleep(1000); // Sleep for 1 second
@@ -745,6 +816,106 @@ console.log('Is Text:', fileInfo.isTextFile);
 ```
 
 > **Sizing random secrets for a post-quantum margin.** `generateRandomString` and `generateRandomHex` draw from the OS CSPRNG, so their strength is purely a function of length. Grover's algorithm halves the effective entropy of a random secret against a quantum adversary, so to preserve a 128-bit post-quantum margin, size bearer secrets (API keys, session tokens, capability URLs) at **256 bits**: `generateRandomHex(64)` (64 hex chars) or `generateRandomString(44)` (≈262 bits). The defaults (32 chars) are ample for identifiers and classical threat models. `generateUUID` output carries 122 random bits and is designed as a collision-resistant *identifier* — do not use it as an unguessable bearer token where post-quantum unpredictability matters. See [Post-Quantum Security](#-post-quantum-security).
+
+### Wire-format and codec exports
+
+Beyond `CryptoManager` and the utility helpers, both entry points re-export the wire-format
+constants and the pure byte codecs. They exist so that tooling can classify, inspect and
+transcode this library's output without decrypting it, and they are covered by the same
+compatibility promise as the rest of the public API.
+
+```typescript
+import {
+  // Password policy, shared with the manager
+  isValidPassword,
+  SECURITY_THRESHOLDS,
+
+  // Format identity
+  MAGIC_BYTES,
+  MAGIC_LENGTH,
+  VERSION_LENGTH,
+  KDF_ID_LENGTH,
+  KDF_PARAMS_LENGTH,
+  HEADER_LENGTH, // 22
+  FORMAT_VERSION, // 0x01 — v1 text/file ciphertext
+  CONTAINER_VERSION, // 0x02 — v2 container
+  KDF_ID_ARGON2ID, // 0x00
+  KDF_ID_PBKDF2_SHA256, // 0x01
+
+  // Header helpers
+  hasMagic,
+  packHeader,
+  parseHeader,
+
+  // Parser DoS caps (see Threat Model)
+  MAX_ARGON2_MEMORY_COST, // 2 ** 22
+  MAX_ARGON2_TIME_COST, // 100
+  MAX_ARGON2_PARALLELISM, // 64
+  MAX_PBKDF2_ITERATIONS, // 10_000_000
+
+  // AES-GCM per-invocation bound
+  MAX_GCM_PLAINTEXT_BYTES, // 2 ** 36 - 32
+  assertGcmPlaintextLimit,
+
+  // Pure, isomorphic byte codecs
+  bytesToBase64url,
+  base64urlToBytes,
+  isValidBase64url,
+  bytesToHex,
+  utf8Encode,
+  utf8Decode,
+  concatBytes,
+} from '@hiprax/crypto';
+```
+
+Three notes that decide whether code written against these behaves the same in both runtimes:
+
+- **`MAGIC_BYTES` and the header helpers are typed per runtime**, and on the Node entry two
+  of them are **`Buffer`-only by contract**. `hasMagic` returns `false` for a plain
+  `Uint8Array`, and `parseHeader` throws `CryptoError(INVALID_INPUT, 'INVALID_HEADER_INPUT')`
+  for one. That is a trap, because `encryptBytes` and `encryptContainer` return a plain
+  `Uint8Array` in **both** runtimes even though those bytes genuinely begin with `HPCR`:
+
+  ```typescript
+  const bytes = await cm.encryptBytes(plaintext, password); // Uint8Array, starts "HPCR"
+
+  hasMagic(bytes);                 // Node entry: false (!)   Browser entry: true
+  parseHeader(bytes);              // Node entry: THROWS INVALID_HEADER_INPUT
+  hasMagic(Buffer.from(bytes));    // Node entry: true
+  parseHeader(Buffer.from(bytes)); // Node entry: the parsed header
+  cm.inspectHeader(bytes);         // works on BOTH entries — prefer this
+  ```
+
+  The contract is preserved on purpose (these two were `Buffer`-typed long before the
+  browser build existed). For code that must behave identically in both runtimes, use the
+  `inspectHeader` **method**, or compare against `MAGIC_BYTES` element-wise; see
+  [Telling the formats apart](#telling-the-formats-apart).
+- **The codecs are byte-for-byte compatible with the Node `Buffer` equivalents**, leniency
+  included: `base64urlToBytes` terminates at `=`, skips non-alphabet code units (so
+  line-wrapped input decodes), accepts the standard `+`/`/` alphabet as aliases, and
+  discards an incomplete trailing sextet. `isValidBase64url`, by contrast, is a strict
+  **canonical** check: it returns `true` for exactly the strings `bytesToBase64url` emits.
+- **`packHeader` / `parseHeader` run the same logic the library runs on itself**, DoS caps
+  and RFC 9106 floor included, so a header `parseHeader` rejects is one no decrypt path
+  would have honoured.
+
+### Full export surface at a glance
+
+| | Node entry | Browser entry |
+| --- | --- | --- |
+| Runtime bindings | **53** (52 named + `default`) | **34** (33 named + `default`) |
+| `CryptoManager`, `SECURITY_THRESHOLDS`, `isValidPassword`, `CONTAINER_VERSION` | ✅ | ✅ |
+| `CryptoError`, `CryptoErrorType`, `SecurityLevel`, `EncryptionAlgorithm` | ✅ | ✅ |
+| Wire-format constants + `hasMagic`/`packHeader`/`parseHeader` | ✅ (`Buffer`-typed) | ✅ (`Uint8Array`-typed) |
+| Codecs (`bytesToBase64url`, …) | ✅ | ✅ |
+| The 19 `utils` helpers (`validatePath`, `sha256`, `sleep`, …) | ✅ | ❌ Node-only (`node:fs`/`node:path`) |
+| `EncryptionResult`, `ValidatePathOptions` (types) | ✅ | ❌ Node-only |
+
+Count them yourself against a build:
+
+```bash
+node -e "import('@hiprax/crypto').then(m => console.log(Object.keys(m).sort().join('\n')))"
+```
 
 ## 🌐 Isomorphic API & Browser Support
 
@@ -812,7 +983,7 @@ Browser large-file handling is **in-memory** (read the file, `encryptBytes`/`dec
 
 ### Browser Argon2id profile (32 MiB default) and the 128 MiB-decrypt caveat
 
-The Node default is 128 MiB Argon2id (`memoryCost = 2 ** 17`, classified `HIGH`). The **browser default is a lighter 32 MiB** profile (`memoryCost = 2 ** 15`, `timeCost = 3`, `parallelism = 1`) — still ≈1.68× the OWASP 2025/2026 Argon2id memory minimum (19 MiB), but classified `MEDIUM` by `getSecurityLevel()` because 32 MiB is below the `HIGH` threshold. This is a runtime-specific **default**, not a format change; you can pass an explicit `memoryCost`, and every ciphertext carries its own KDF parameters on the wire.
+The Node default is 128 MiB Argon2id (`memoryCost = 2 ** 17`, classified `HIGH`). The **browser default is a lighter 32 MiB** profile (`memoryCost = 2 ** 15`, `timeCost = 3`, `parallelism = 1`) — which still **strictly exceeds OWASP's stated minimum configuration on both axes**: 32 MiB against its 19 MiB, at `t=3` against its `t=2`. That is ≈1.68x the minimum's memory with an extra iteration on top. It is nevertheless classified `MEDIUM` by `getSecurityLevel()`, because 32 MiB is below this library's own `HIGH` threshold. This is a runtime-specific **default**, not a format change; you can pass an explicit `memoryCost`, and every ciphertext carries its own KDF parameters on the wire.
 
 > **⚠️ Decrypt-side memory caveat.** Because each ciphertext header embeds the *exact* `memoryCost` used to derive its key, decrypting a ciphertext produced at 128 MiB requires allocating 128 MiB — which can OOM a memory-constrained mobile browser tab (iOS Safari WASM ceilings are as low as ~64–120 MB). **Data intended to be decrypted in browsers should be encrypted at ≤ the browser memory profile** (e.g. the 32 MiB browser default). The wire format is identical across runtimes; only the affordable KDF cost differs. Node → browser interop is only reliable when the Node side encrypts within the browser's memory budget.
 
@@ -832,11 +1003,13 @@ The browser build is honest about weaker memory hygiene than Node:
 
 - **Opaque `CryptoKey`.** Web Crypto `importKey` copies the raw key bytes into a `CryptoKey` object the library can no longer reach — so `secureClear` cannot scrub it. The engine zeroes the transient raw-key copy it owns immediately after import, but the `CryptoKey` itself lives until GC.
 - **Immutable V8 strings.** As in Node, passwords and decrypted text are JavaScript strings; they are GC-managed and cannot be zeroed (see [Threat Model](#-threat-model)).
-- **Secure context required.** `crypto.subtle` is only available in a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (HTTPS or `localhost`). On an insecure origin, `globalThis.crypto.subtle` is `undefined` and the engine throws.
+- **Secure context required.** `crypto.subtle` is only available in a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (HTTPS or `localhost`). On an insecure origin, `globalThis.crypto.subtle` is `undefined` and the key import raises a `TypeError`. What you catch differs by direction: on the encrypt path that `TypeError` propagates unchanged, while on the decrypt path it is converted to `CryptoError` with code `DECRYPTION_FAILED`, because the decrypt engine wraps the whole operation.
 
 ### Node-only methods throw in the browser
 
-The synchronous (PBKDF2) paths, the streaming file paths, and the `Buffer`-typed low-level primitives cannot be expressed with one-shot, async Web Crypto, so in the browser build they are present as throwing stubs that raise `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')`: `encryptTextSync`, `decryptTextSync`, `encryptFile`, `decryptFile`, `encryptFileSync`, `decryptFileSync`, `encryptData`, `decryptData`, `deriveKey`, `deriveKeySync`, and `generateSecureRandom`. Use the in-memory async API (`encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` / `encryptContainer` / `decryptContainer`) instead. The `./utils` file helpers are Node-only and are not exported from the browser build.
+The synchronous (PBKDF2) paths, the streaming file paths, and the `Buffer`-typed low-level primitives cannot be expressed with one-shot, async Web Crypto, so in the browser build all eleven are present as stubs that raise `CryptoError(INVALID_INPUT, 'UNSUPPORTED_IN_BROWSER')`: `encryptTextSync`, `decryptTextSync`, `encryptFile`, `decryptFile`, `encryptFileSync`, `decryptFileSync`, `encryptData`, `decryptData`, `deriveKey`, `deriveKeySync`, and `generateSecureRandom`.
+
+**Each stub fails the way its Node counterpart's signature promises**, which matters for error handling: the eight synchronous ones throw synchronously, while the three declared `async` (`deriveKey`, `encryptFile`, `decryptFile`) **reject** rather than throw, so a `.catch()` or a `try`/`await`/`catch` written against the Node build keeps working unchanged against the browser build. Use the in-memory async API (`encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` / `encryptContainer` / `decryptContainer`) instead. The `./utils` file helpers are Node-only and are not exported from the browser build.
 
 ## 📦 Container Mode (v2 envelope)
 
@@ -865,7 +1038,7 @@ const { data: back, meta } = await cm.decryptContainer(
   container,
   'MySecureP@ssw0rd123!'
 );
-console.log(meta); // { filename: 'report.txt', mime: 'text/plain', size: 15 }
+console.log(meta); // { size: 15, filename: 'report.txt', mime: 'text/plain' }
 ```
 
 Container mode is an **in-memory** format (no streaming). Persist or transmit the bytes with the idioms natural to each runtime:
@@ -896,7 +1069,15 @@ Container mode and the v1 ciphertext path reject each other's blobs:
 
 ### Container error codes
 
-`CONTAINER_INTEGRITY_FAILED` (decrypted payload does not match its embedded SHA-256), `CONTAINER_METADATA_MALFORMED`, `CONTAINER_METADATA_TOO_LARGE` / `CONTAINER_DATA_TOO_LARGE` (field/payload exceeds its wire cap), `INVALID_CONTAINER_META` (non-string `filename`/`mime`), plus the pre-authentication parser codes `TRUNCATED_CONTAINER`, `CONTAINER_INVALID_MAGIC`, `CONTAINER_UNSUPPORTED_VERSION`, `CONTAINER_UNSUPPORTED_KDF`, `CONTAINER_INVALID_HEADER_PARAM`, and `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`. The byte layout is documented under [Container Format (v2)](#container-format-v2).
+The complete set, grouped by when it can fire:
+
+- **Argument type**: a `container` that is not a `Uint8Array` throws `INVALID_ENCRYPTED_DATA`, not a container-specific code — `decryptContainer` type-checks its own argument before it reaches the parser. (The parser has its own `INVALID_CONTAINER_INPUT` for the same condition, but the internal parser is not exported, so that code is unreachable through the public API.)
+- **Pre-authentication structural parse** (before any key derivation): `TRUNCATED_CONTAINER` (shorter than the 174-byte fixed overhead, or a `metaLen` that overruns the buffer), `CONTAINER_INVALID_MAGIC`, `CONTAINER_UNSUPPORTED_VERSION` (version byte ≠ `0x02`), `CONTAINER_UNSUPPORTED_KDF`, `CONTAINER_INVALID_HEADER_PARAM` (a non-positive parameter, or `memoryCost < 8 * parallelism`), `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`.
+- **Input validation on the seal side**: `INVALID_CONTAINER_META` (non-string `filename`/`mime`), `CONTAINER_METADATA_TOO_LARGE` (a field over 65535 UTF-8 bytes), `CONTAINER_DATA_TOO_LARGE` (payload over `0xffffffff`).
+- **Post-authentication**: `CONTAINER_METADATA_MALFORMED` (the decrypted metadata block has an unknown flag bit, a length prefix that overruns, or trailing bytes), `CONTAINER_INTEGRITY_FAILED` (the decrypted payload does not match its embedded SHA-256, or its length does not match the sealed `size`).
+- **Operation wrappers**, for a non-`CryptoError` that escapes the engine: `CONTAINER_ENCRYPTION_FAILED` (type `ENCRYPTION_FAILED`) and `CONTAINER_DECRYPTION_FAILED` (type `DECRYPTION_FAILED`).
+
+Every code above carries type `DECRYPTION_FAILED` except `INVALID_ENCRYPTED_DATA`, `TRUNCATED_CONTAINER`, `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`, `INVALID_CONTAINER_META`, `CONTAINER_METADATA_TOO_LARGE`, `CONTAINER_DATA_TOO_LARGE` and the unreachable `INVALID_CONTAINER_INPUT`, which are `INVALID_INPUT`, and `CONTAINER_ENCRYPTION_FAILED`, which is `ENCRYPTION_FAILED`. All of the above were confirmed by probe against this build. A wrong password, a mismatched `aad`, or any single-bit tamper surfaces as the generic `DECRYPTION_FAILED` — never as one of the specific codes — so there is no oracle. The byte layout is documented under [Container Format (v2)](#container-format-v2).
 
 ## 🔧 Configuration
 
@@ -904,14 +1085,14 @@ Container mode and the v1 ciphertext path reject each other's blobs:
 
 The library provides both asynchronous and synchronous versions of encryption/decryption operations:
 
-#### Asynchronous Operations (Recommended)
+#### When to use the asynchronous methods (recommended)
 
 - Use **Argon2id** for key derivation (more secure)
 - Better for performance and scalability
 - Non-blocking operations
 - Methods: `encryptText()`, `decryptText()`, `encryptFile()`, `decryptFile()`
 
-#### Synchronous Operations
+#### When to use the synchronous methods
 
 - Use **PBKDF2** for key derivation (less secure but synchronous)
 - Blocking operations
@@ -965,7 +1146,9 @@ await crypto.encryptFile(
 #### Examples
 
 ```typescript
-import { CryptoManager, ProgressCallback } from '@hiprax/crypto';
+// `ProgressCallback` is an interface, so it needs a type-only import — a plain
+// named import fails under `verbatimModuleSyntax` / `isolatedModules`.
+import { CryptoManager, type ProgressCallback } from '@hiprax/crypto';
 
 const crypto = new CryptoManager();
 
@@ -1008,8 +1191,8 @@ The `progress` argument is fully optional — every call shape that worked befor
 The library supports different security levels based on Argon2 parameters. The current threshold table is the one that ships with the v1.0.0 stable release; it was last tightened during pre-1.0 development (in the v0.15.0 dev iteration, Task 18) to track OWASP 2026 guidance for Argon2id — the **HIGH** tier moved from `memoryCost: 2^16` (64 MiB) up to `memoryCost: 2^17` (128 MiB), and **ULTRA** moved from `2^18` up to `2^19` (512 MiB):
 
 - **Low**: `memoryCost < 2^14` OR `timeCost < 2` (Fast, less secure — fallback tier)
-- **Medium**: `memoryCost: 2^14` (16 MiB), `timeCost: 2` (Balanced — minimum acceptable)
-- **High**: `memoryCost: 2^17` (128 MiB), `timeCost: 3` (**Default**, OWASP 2026 first choice)
+- **Medium**: `memoryCost: 2^14` (16 MiB), `timeCost: 2` — **this library's own floor, and it sits below OWASP's stated minimum**: the same `t=2`, but 16 MiB against the 19 MiB OWASP asks for. Treat `MEDIUM` as a deliberate trade for resource-constrained devices, not as a recommended configuration. The 12/9/7 MiB rows in OWASP's list are not cover for it, because each pairs its lower memory with *more* iterations, which `MEDIUM` does not. (The browser default is also classified `MEDIUM` by this table, but at 32 MiB / `t=3` it exceeds OWASP's minimum on both axes — the tier label is coarser than the comparison.)
+- **High**: `memoryCost: 2^17` (128 MiB), `timeCost: 3` (**the Node default** — above every configuration OWASP lists, which top out at `m=47104` / 46 MiB, and far above the stated minimum)
 - **Ultra**: `memoryCost: 2^19` (512 MiB), `timeCost: 4` (Maximum — paranoid tier for offline / async-only workloads)
 
 A configuration is reported at a tier only when **both** `memoryCost` AND `timeCost` clear that tier's minimum; if either parameter falls short, classification falls through to the next-lower tier.
@@ -1020,7 +1203,7 @@ The default `memoryCost` was bumped from `2^16` (64 MiB) to `2^17` (128 MiB) dur
 
 - **Existing v1 ciphertexts continue to decrypt unchanged.** Each ciphertext header embeds the exact `memoryCost` / `timeCost` / `parallelism` that were used to derive its key, so the decoder applies the embedded values rather than the constructor default. Data encrypted under the old 64 MiB default round-trips under the new default with no migration step.
 - **To opt back into the previous 64 MiB profile**, pass `memoryCost: 2 ** 16` to the `CryptoManager` constructor. This is the recommended escape hatch for resource-constrained environments (mobile, embedded, low-memory containers, shared free-tier hosts). Note: a `CryptoManager` configured this way will report `getSecurityLevel() === 'medium'` rather than `'high'`, which accurately reflects the post-bump threshold table.
-- **To opt INTO the previous ULTRA classification (256 MiB)**, you now need to supply `memoryCost: 2 ** 19` AND `timeCost: 4` — the previous ULTRA settings (`2 ** 18`, `4`) now classify as HIGH.
+- **To be classified ULTRA**, you now need `memoryCost: 2 ** 19` (512 MiB) AND `timeCost: 4`. The settings that used to earn ULTRA (`2 ** 18` = 256 MiB with `timeCost: 4`) now classify as HIGH, because 256 MiB clears the new HIGH floor of `2 ** 17` but not the new ULTRA floor of `2 ** 19`.
 
 #### Programmatic introspection
 
@@ -1160,12 +1343,23 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 
 **Decryption error codes specific to the format header**
 
-- `UNSUPPORTED_VERSION`: header magic matches but the version byte is not `0x01` — most often a [v2 container](#container-format-v2) (version `0x02`) fed to a v1 path. `inspectHeader` reports it unconditionally; `decryptBytes` / `decryptText` report it only in `legacyMode: 'strict'` or `'reject'`, because the default `'auto'` mode treats a failed header parse as a possible v0 ciphertext and surfaces the eventual failure as the generic code `DECRYPTION_FAILED`.
+- `UNSUPPORTED_VERSION`: header magic matches but the version byte is not `0x01` — most often a [v2 container](#container-format-v2) (version `0x02`) fed to a v1 path. `inspectHeader` reports it unconditionally; the decrypt methods do not always (see the note below).
 - `UNSUPPORTED_KDF`: header KDF identifier is unknown.
 - `KDF_MISMATCH`: ciphertext was produced by the sync path but is being decrypted by the async path (or vice-versa).
 - `INVALID_MAGIC`: only emitted by the low-level `parseHeader` helper when the magic check fails (the high-level decrypt methods treat that case as v0 and apply `legacyMode`).
 - `TRUNCATED_HEADER`, `INVALID_HEADER_PARAM`: defensive parser errors for malformed v1 input.
+- `KDF_PARAMS_OUT_OF_BOUNDS`: a header asking for KDF work beyond the DoS caps.
 - `LEGACY_FORMAT_REJECTED` / `UNSUPPORTED_FORMAT`: emitted in `'strict'`/`'reject'` modes when a v0 ciphertext is presented.
+
+**In the default `legacyMode: 'auto'`, most of the codes above are not what a decrypt call will actually report.** `auto` treats *any* header-parse failure as "this might be a v0 ciphertext whose 32-byte random salt happened to start with `HPCR`", so it swallows the specific code and retries the blob as v0. Concretely:
+
+| | Behaviour |
+| --- | --- |
+| Masked in `auto`, visible in `strict`/`reject` | `UNSUPPORTED_VERSION`, `UNSUPPORTED_KDF`, `KDF_MISMATCH`, `INVALID_HEADER_PARAM`, `TRUNCATED_HEADER` |
+| Never masked, in any mode | `KDF_PARAMS_OUT_OF_BOUNDS` — DoS rejection is never traded away for legacy recovery |
+| What `auto` reports instead | `INVALID_ENCRYPTED_DATA_SIZE` if the blob is under 60 bytes, otherwise the generic `DECRYPTION_FAILED` |
+
+That 60 is `salt + iv + tag` (32 + 12 + 16): the v0 retry treats the whole blob as a body with no header, so anything shorter fails the minimum-size check before any key derivation, and anything longer reaches GCM and fails authentication. Measured on this build: `decryptText` of an `encryptTextSync` ciphertext reports `DECRYPTION_FAILED` under `auto` and `KDF_MISMATCH` under `strict`; a 10-byte blob beginning `HPCR` reports `INVALID_ENCRYPTED_DATA_SIZE` under `auto` and `TRUNCATED_HEADER` under `strict`. **If you are debugging a format problem, construct a `strict` manager to see the real reason.**
 
 ### Container Format (v2)
 
@@ -1215,7 +1409,7 @@ if (isHpcr && bytes[4] === CONTAINER_VERSION) {
 Two details make this correct rather than merely plausible:
 
 - **Check the magic before reading byte 4.** A legacy v0 ciphertext opens with a 32-byte random salt, so roughly one in `2 ** 32` of them begins with the four `HPCR` bytes by chance (the library's `legacyMode: 'auto'` recovery exists for exactly that case). Reading `bytes[4]` on its own would misclassify any v0 blob whose fifth byte happens to be `0x02`.
-- **Use `MAGIC_BYTES`, not the exported `hasMagic()`, on a `Uint8Array`.** The Node entry's `hasMagic` keeps its original contract of accepting only a real `Buffer` and returns `false` for anything else, while `encryptBytes` / `encryptContainer` return a plain `Uint8Array` in both runtimes. The browser entry's `hasMagic` accepts any `Uint8Array`. The byte comparison above behaves identically on both entries; `hasMagic` does not. Wrap the value (`hasMagic(Buffer.from(bytes))`) if you want the Node helper specifically.
+- **Use `MAGIC_BYTES`, not the exported `hasMagic()`, on a `Uint8Array`.** The Node entry's `hasMagic` keeps its original contract of accepting only a real `Buffer` and returns `false` for anything else, while `encryptBytes` / `encryptContainer` return a plain `Uint8Array` in both runtimes. The browser entry's `hasMagic` accepts any `Uint8Array`. The byte comparison above behaves identically on both entries; `hasMagic` does not. Wrap the value (`hasMagic(Buffer.from(bytes))`) if you want the Node helper specifically. The same `Buffer`-only contract applies to the exported **`parseHeader`**, which throws `INVALID_HEADER_INPUT` on a plain `Uint8Array` from the Node entry — the `inspectHeader` *method* used above takes `Uint8Array` and works on both entries, which is why the example calls that instead.
 
 Note that `inspectHeader` is deliberately **not** part of this decision: it parses v1 headers only and throws `UNSUPPORTED_VERSION` on a container. Classify first, then call it on the v1 branch.
 
@@ -1225,8 +1419,8 @@ Note that `inspectHeader` is deliberately **not** part of this decision: it pars
 
 - **AES-256-GCM**: Authenticated encryption with Galois/Counter Mode
 - **Argon2id**: Memory-hard key derivation function (winner of Password Hashing Competition)
-- **Secure Random**: Uses Node.js `crypto.randomBytes()` for all random generation
-- **Constant-time Operations**: Secure string comparison to prevent timing attacks
+- **Secure Random**: every salt, IV and temp-file suffix comes from the platform CSPRNG — `crypto.randomBytes()` in Node, `crypto.getRandomValues()` in the browser. There is no userland PRNG anywhere in the library
+- **Constant-time Operations**: `crypto.timingSafeEqual` for `secureStringCompare`, and a constant-time byte compare for the container's embedded SHA-256 check
 
 ### AES-GCM (key, IV) reuse — security boundary for the low-level API
 
@@ -1242,9 +1436,9 @@ Note that `inspectHeader` is deliberately **not** part of this decision: it pars
 
 ### Memory Security
 
-- **Secure Clearing**: Sensitive data is zeroed from memory after use
-- **No Memory Leaks**: Proper cleanup of cryptographic materials
-- **Buffer Management**: Safe handling of cryptographic buffers
+- **Secure Clearing**: derived keys, plaintext copies and decoded ciphertext buffers are zero-filled after use, on both the success and the failure path
+- **Bounded retention**: the file paths scrub their 64 KiB reuse buffer and their key/salt/IV/tag material; the container path scrubs the KEK, the DEK and the cleartext metadata block
+- **Best-effort, not forensic**: this reaches byte arrays only. Immutable V8 strings (passwords, decrypted text, a configured `defaultPassphrase`) and Web Crypto's opaque `CryptoKey` cannot be scrubbed — see [Threat Model](#-threat-model) for the exact boundary
 
 ### Input Validation
 
@@ -1281,7 +1475,7 @@ These are not marketing claims — each one traces to an official standards-body
 
 1. **NIST, Post-Quantum Cryptography FAQ** — Grover's algorithm "will provide little or no advantage in attacking AES", key lengths do not need to be doubled, and even AES-128 "will remain secure for decades to come". <https://csrc.nist.gov/projects/post-quantum-cryptography/faqs>
 2. **NIST IR 8547, _Transition to Post-Quantum Cryptography Standards_** — symmetric standards (block ciphers, hash functions, HMAC, KDFs) are excluded from the PQC transition; AES-256 anchors security **Category 5**; the 2030/2035 deprecation timelines apply to RSA/ECC only. <https://nvlpubs.nist.gov/nistpubs/ir/2024/NIST.IR.8547.ipd.pdf>
-3. **NSA, Commercial National Security Algorithm Suite 2.0** — retains AES-256 as the symmetric cipher for National Security Systems up to TOP SECRET; only public-key algorithms are replaced (by ML-KEM / ML-DSA). <https://media.defense.gov/2022/Sep/07/2003071836/-1/-1/0/CSI_CNSA_2.0_FAQ_.PDF>
+3. **NSA, Commercial National Security Algorithm Suite 2.0** — retains AES-256 as the symmetric cipher for National Security Systems up to TOP SECRET; only public-key algorithms are replaced (by ML-KEM / ML-DSA). <https://media.defense.gov/2022/Sep/07/2003071836/-1/-1/0/CSI_CNSA_2.0_FAQ_.PDF> (that direct PDF link is often blocked to non-browser clients; the stable landing page is <https://www.nsa.gov/Press-Room/Digital-Media-Center/Document-Gallery/igphoto/2003071836/>)
 4. **BSI TR-02102-1** (Germany's federal cyber-security agency) — the impact of quantum computers on symmetric mechanisms is far milder than on asymmetric ones; 256-bit keys are recommended for high or long-term protection needs. <https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TG02102/BSI-TR-02102-1.pdf>
 5. **Amy, Di Matteo, Gheorghiu, Mosca, Parent & Schanck (SAC 2016)** — a fault-tolerant Grover preimage attack on SHA-256 costs ≈2^153.8 surface-code cycles of _depth_, vastly above the naive 2^128 query count, because Grover cannot be parallelized efficiently. <https://arxiv.org/abs/1603.09383>
 6. **Blocki, Holman & Lee (TCC 2022)**, with the EUROCRYPT 2025 follow-up — memory-hard functions retain their cost inside the reversible circuits a quantum attacker must build; cheap memory-erasing classical strategies do not translate into cheap quantum circuits. <https://arxiv.org/abs/2110.04191>, <https://eprint.iacr.org/2024/334>
@@ -1367,7 +1561,8 @@ npm run bench
 The full suite takes roughly **2.5-5.5 minutes** on a modern laptop. Argon2id at the default 128 MiB / `t=3` / `p=1` profile dominates the wall time (each derivation takes ~100-400 ms depending on the host), and every encrypt path performs one derivation per call. The codec group is the exception: it performs no key derivation in any measured case, which is the point of it — the KDF is large enough to hide a codec regression entirely. It runs first and takes ~30 s. To run a single bench file in isolation:
 
 ```bash
-node bench/codec.mjs          # base64url codec + inspectHeader, no KDF
+node bench/codec.mjs          # base64url codec + inspectHeader (no KDF in any MEASURED case;
+                              # one cheap Argon2id run happens in setup to build the fixture)
 node bench/kdf.mjs            # Argon2id + PBKDF2 only
 node bench/encrypt-text.mjs   # 1 KiB and 1 MiB text encrypt
 node bench/encrypt-file.mjs   # 10 MiB encrypt + decrypt streaming
@@ -1403,7 +1598,14 @@ try {
 - `MEMORY_ERROR`: Memory-related errors
 - `VALIDATION_ERROR`: Validation failures
 
-`CryptoError.type` is one of the categories above; the more specific `CryptoError.code` string distinguishes individual failures. Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (install `hash-wasm` or, in Node, native build tools); `DATA_TOO_LARGE_FOR_GCM` (type `INVALID_INPUT`) — see below; and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
+**Branch on `code`, not on `type`.** `CryptoError.type` is one of the seven coarse categories above; `CryptoError.code` is the specific, stable discriminator — the library raises **78** distinct codes. New codes are only ever added to `code` (a plain `string`), never to the `CryptoErrorType` enum, so a release can describe a new failure without a breaking type change.
+
+Two consequences worth knowing when writing handlers:
+
+- **A code is not pinned to one type.** `INVALID_HEADER_PARAM` is `INVALID_INPUT` when `packHeader` rejects an out-of-width value and `DECRYPTION_FAILED` when `parseHeader` rejects a non-positive parameter; `UNSUPPORTED_KDF` splits the same way. Matching on `code` alone is correct in both.
+- **A key-derivation failure is re-typed on decrypt paths.** `KEY_DERIVATION_FAILED` / `SYNC_KEY_DERIVATION_FAILED` carry `ENCRYPTION_FAILED` when raised by a direct `deriveKey` / `deriveKeySync` call (a derivation is neither direction), and are re-typed to `DECRYPTION_FAILED` when they surface inside a decrypt. The `code` is preserved either way.
+
+Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (install `hash-wasm` or, in Node, native build tools); `DATA_TOO_LARGE_FOR_GCM` (type `INVALID_INPUT`) — see below; and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
 
 ### The AES-GCM per-invocation size limit
 
@@ -1424,7 +1626,7 @@ console.log(MAX_GCM_PLAINTEXT_BYTES); // 68719476704
 assertGcmPlaintextLimit(fileSizeInBytes);
 ```
 
-In practice this is a bound on a *single* call, not on how much data the library can protect: split larger payloads across separate calls, each of which gets its own fresh salt, key and IV. Container mode is already stricter — a v2 container's payload is capped at `0xffffffff` bytes (just under 4 GiB, the width of the size field in its metadata block) and rejects anything larger with `CONTAINER_DATA_TOO_LARGE`, well below the GCM limit — and the text API is bounded far earlier still by V8's maximum string length (about 384 MiB of plaintext once base64url-encoded).
+In practice this is a bound on a *single* call, not on how much data the library can protect: split larger payloads across separate calls, each of which gets its own fresh salt, key and IV. Container mode is already stricter — a v2 container's payload is capped at `0xffffffff` bytes (just under 4 GiB, the width of the size field in its metadata block) and rejects anything larger with `CONTAINER_DATA_TOO_LARGE`, well below the GCM limit — and the text API is bounded far earlier still by V8's maximum string length. Read it off your own runtime rather than trusting a figure here: `require('buffer').constants.MAX_STRING_LENGTH` is `536870888` (512 MiB of characters) on Node 24.19.0, and base64url expands 4:3, so `encryptText` tops out near **384 MiB of plaintext**. `encryptBytes` has no such ceiling — it never materialises a string.
 
 ## 📦 Development
 
@@ -1491,7 +1693,7 @@ A cryptography library is only as useful as its honesty about what it does and d
 - **Weak passwords.** Encryption is only as strong as the password. The library validates strength at encryption time (8-char composition rule OR ≥20-char passphrase rule — see [Password Requirements](#password-requirements)), but the caller is responsible for sourcing high-entropy inputs and protecting against credential reuse. A weak password makes Argon2id/PBKDF2 brute-force tractable regardless of the parameters.
 - **Side-channel attacks beyond constant-time comparison.** The library uses `crypto.timingSafeEqual` for tag/string comparisons, but it does NOT defend against cache-timing, power-analysis, electromagnetic-emanation, or microarchitectural side channels in the underlying AES-256-GCM, Argon2id, or PBKDF2 implementations (which run in OpenSSL via Node.js's `crypto` module and the `argon2` native addon). Hardened deployments must rely on the host's mitigations (microcode, hypervisor isolation, etc.).
 - **Low password entropy against a future quantum adversary.** The primitives themselves are quantum-resistant — the library contains no public-key cryptography for Shor's algorithm to break, and AES-256, Argon2id, and PBKDF2-HMAC-SHA256 retain ≥128-bit effective strength under Grover's algorithm per NIST, NSA CNSA 2.0, and BSI guidance (see [Post-Quantum Security](#-post-quantum-security) for the full posture and sources). What no cipher can fix is a weak password: Grover halves the effective entropy of the password search space, so a "harvest now, decrypt later" adversary with future quantum capability attacks the password, not AES-256. If that adversary is in your threat model, use the async (Argon2id) path with a high-entropy passphrase (e.g. 8-10 random diceware words, ≈103-129 bits). The deliberate absence of a Kyber/Dilithium hybrid mode is not a gap: those standards replace key exchange and signatures, and this library performs neither.
-- **OS CSPRNG compromise.** All randomness (salt, IV, temp-file suffix) is sourced from `crypto.randomBytes`/`crypto.randomUUID`, which delegate to the host OS's CSPRNG (`getrandom(2)` on Linux, `BCryptGenRandom` on Windows, `SecRandomCopyBytes` on macOS). If the OS RNG is backdoored, virtualised onto a deterministic shim, or seeded with insufficient entropy at boot, the library inherits that compromise — IVs may collide, salts may be predictable, and the IND-CPA guarantee degrades. Detecting OS-level RNG compromise is outside the library's scope.
+- **OS CSPRNG compromise.** All randomness (salt, IV, container DEK, temp-file suffix) is sourced from `crypto.randomBytes`/`crypto.randomUUID` in Node and `crypto.getRandomValues` in the browser, all of which delegate to the host's CSPRNG (`getrandom(2)` on Linux, `BCryptGenRandom` on Windows, `SecRandomCopyBytes` on macOS). If the OS RNG is backdoored, virtualised onto a deterministic shim, or seeded with insufficient entropy at boot, the library inherits that compromise — IVs may collide, salts may be predictable, and the IND-CPA guarantee degrades. Detecting OS-level RNG compromise is outside the library's scope.
 - **String-copy memory leaks via V8.** `secureClear` zeroes the underlying `ArrayBuffer` slab of a Buffer, but V8 may have already created internal string copies of password or plaintext data for hashing, interning, or deoptimisation paths. Those copies are unreachable to `Buffer.fill(0)` and live until garbage collection. Treat `secureClear` as defence-in-depth, not as a forensic-grade wipe. The same caveat applies — more directly, by deliberate retention rather than incidental V8 behaviour — to `CryptoManager` instances configured with `defaultPassphrase`: the library stores the passphrase as a regular V8 string for the manager's lifetime and cannot scrub it. For sensitive workloads, pass the password explicitly to each `encrypt*` / `decrypt*` call instead of configuring `defaultPassphrase`. See [Password Requirements](#password-requirements) for the full retention discussion.
 - **Symlink-based path traversal.** `validatePath` is a syntactic check; it does not call `fs.realpath` and does not prevent a path like `/safe/dir/symlinkToEtc` from escaping via the symlink. Callers that need symlink-safe path validation must perform their own `realpath`-based check or operate inside a chroot/sandbox.
 - **Length leaks in comparison.** `secureStringCompare` only protects against bytewise timing differences within an equal-length compare. The lengths of the inputs are leaked via the early-return-on-length-mismatch path. For comparing values where length itself is sensitive, hash both sides first.

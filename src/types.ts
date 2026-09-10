@@ -188,7 +188,7 @@ export interface RetryConfig {
    * with code `WEAK_PASSWORD` or `INVALID_PASSWORD` (these are
    * surfaced from password-strength / wrong-password failures and
    * retrying them only burns CPU on doomed work). Pass an explicit
-   * predicate (`() => true`) to opt back in to the pre-v0.19.0
+   * predicate (`() => true`) to opt back in to the pre-v1.0.0
    * "retry everything" behaviour.
    */
   shouldRetry?: (error: Error, attempt: number) => boolean;
@@ -281,7 +281,7 @@ export enum SecurityLevel {
  * Supported encryption algorithms.
  *
  * Currently only AES-256-GCM (authenticated encryption) is supported. The
- * previously-defined `AES_256_CBC` member was removed in v0.19.0 — it was
+ * previously-defined `AES_256_CBC` member was removed in v1.0.0 — it was
  * never instantiated anywhere in the library and CBC is generally
  * discouraged for new code (no built-in authentication, prone to padding
  * oracle attacks). If you need a non-GCM mode in the future, add it to

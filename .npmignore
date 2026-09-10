@@ -129,8 +129,12 @@ azure-pipelines.yml
 # published. Probes: `README.junk` was included, `READMEXYZ.junk` was not, and
 # `CHANGELOG.md.tmp` / `SECURITY.md.tmp` were correctly excluded. The globs are
 # root-anchored, so a backup under a subdirectory is unaffected. No
-# configuration suppresses the rule — delete any such file before packing, and
-# treat an `npm pack --dry-run` count other than 31 files as a failure.
+# configuration suppresses the rule — delete any such file before packing.
+# This is enforced by `npm run check:tarball` (scripts/check-tarball.mjs), which
+# asks npm what it would actually pack and fails on any scratch/backup path. It
+# deliberately pins NO file count: a count assertion would go red on every
+# legitimate new dist/ module, which trains maintainers to edit the gate rather
+# than read it. The count is reported for the operator and asserts nothing.
 *.tmp
 *.bak
 *.backup

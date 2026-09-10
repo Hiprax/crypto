@@ -268,12 +268,20 @@ defaults. If a reported issue is mitigated by changing one of these,
 please call that out explicitly in the report.
 
 - **Default Argon2id parameters** (async paths, Node build): `memoryCost = 2 ** 17`
-  (128 MiB), `timeCost = 3`, `parallelism = 1`. Matches the OWASP 2026
-  first-choice tier for Argon2id.
+  (128 MiB), `timeCost = 3`, `parallelism = 1`. This is roughly 2.8x the memory of
+  the highest-memory Argon2id configuration OWASP's Password Storage Cheat Sheet
+  lists (`m=47104` / 46 MiB) and far above its stated minimum of 19 MiB at
+  `t=2` / `p=1`. OWASP designates no "first choice" among its five listed
+  configurations; they are described as providing "an equal level of defense",
+  differing only in a CPU/RAM trade-off. This library's default is a deliberately
+  conservative choice, not a quotation from that list.
 - **Default Argon2id parameters** (browser build): `memoryCost = 2 ** 15`
   (32 MiB), `timeCost = 3`, `parallelism = 1` — a lighter default to avoid
-  OOM on memory-constrained mobile browsers, still ≈1.68× the OWASP 2025/2026
-  Argon2id memory minimum (19 MiB). This is a runtime-specific default, not a
+  OOM on memory-constrained mobile browsers, and still strictly above OWASP's
+  stated minimum configuration on both axes: ≈1.68× its 19 MiB of memory, at
+  `t=3` against its `t=2`. Note the library classifies this profile `MEDIUM`,
+  whose *threshold* (16 MiB / `t=2`) does sit below that minimum; the browser
+  default itself does not. This is a runtime-specific default, not a
   format change; each ciphertext embeds the exact KDF parameters used, so a
   ciphertext decrypts anywhere that can afford its embedded `memoryCost`.
 - **Default PBKDF2 iterations** (sync paths, Node only): `600000`. Matches the

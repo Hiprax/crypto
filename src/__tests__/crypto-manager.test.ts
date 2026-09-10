@@ -81,10 +81,11 @@ describe('CryptoManager', () => {
 
     it('should default Argon2 parameters to the post-Task-18 HIGH tier (mem=2^17, time=3, parallelism=1)', () => {
       // Lock in the bumped default. Pre-Task-18 this was 2^16 (64 MiB);
-      // Task 18 raised it to 2^17 (128 MiB) so the library's out-of-the-box
-      // configuration matches the OWASP 2026 first-choice tier for
-      // Argon2id. Resource-constrained callers can opt back into the old
-      // value via `memoryCost: 2 ** 16`.
+      // Task 18 raised it to 2^17 (128 MiB), which puts the library's
+      // out-of-the-box configuration far above OWASP's stated Argon2id
+      // minimum (19 MiB at t=2) and above every configuration it lists.
+      // OWASP designates no "first choice". Resource-constrained callers can
+      // opt back into the old value via `memoryCost: 2 ** 16`.
       const params = crypto.getParameters();
       expect(params.argon2Options.memoryCost).toBe(2 ** 17);
       expect(params.argon2Options.timeCost).toBe(3);
@@ -1106,7 +1107,7 @@ describe('CryptoManager', () => {
 
     it('should return HIGH for default settings', () => {
       // The default after Task 18 is memoryCost=2^17 (128 MiB), timeCost=3,
-      // which classifies as HIGH (the OWASP first-choice tier).
+      // which this library classifies as HIGH.
       expect(crypto.getSecurityLevel()).toBe(SecurityLevel.HIGH);
     });
 

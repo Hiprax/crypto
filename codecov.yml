@@ -1,11 +1,20 @@
 # Codecov configuration for @hiprax/crypto.
 # Reference: https://docs.codecov.com/docs/codecov-yaml
 #
-# Philosophy: the local Jest threshold (80% across branches/functions/lines/
-# statements) is the gate that fails CI. Codecov here is for visualization
-# and PR feedback, not for re-running the gate. So Codecov's own status
-# checks are configured to be informational: they report movement but they
-# don't independently fail the build.
+# Philosophy: the local Jest threshold in `jest.config.js` is the gate that
+# fails CI. It is a one-way ratchet holding the measured `All files` values
+# floored to integers — currently statements 95, branches 87, functions 97,
+# lines 95 — and it only ever moves up. Codecov here is for visualization and
+# PR feedback, NOT for re-running that gate, so its own status checks are
+# configured to be informational: they report movement but never independently
+# fail the build.
+#
+# The targets below are deliberately SLACK relative to the real gate, and they
+# are not meant to mirror it. Anything that would breach the Jest ratchet fails
+# the `test` job long before a Codecov status is evaluated, so repeating those
+# four numbers here would add a second, noisier copy of a value that already has
+# one authoritative home. Do not "sync" these to the Jest values: the two serve
+# different purposes, and only `jest.config.js` is load-bearing.
 
 coverage:
   precision: 2
@@ -15,12 +24,13 @@ coverage:
   status:
     project:
       default:
-        # Match the local Jest floor so the badge and the CI gate agree.
+        # A floor for the badge colour and the PR status, set well below the
+        # real Jest ratchet on purpose (see the header). It is not the gate.
         target: 80%
-        # Allow a 1% downward drift between commits before Codecov flags
-        # the status as failing. Jest already enforces 80% strictly — this
-        # threshold absorbs noise from line-counting differences between
-        # the local run and Codecov's report parser.
+        # Allow a 1% downward drift between commits before Codecov flags the
+        # status as failing. This absorbs noise from line-counting differences
+        # between the local Jest run and Codecov's report parser; the actual
+        # enforcement lives in `jest.config.js`.
         threshold: 1%
         # Don't fail PRs while Codecov is still uploading the first run.
         if_ci_failed: success
@@ -31,7 +41,8 @@ coverage:
       default:
         # Patches (the changed lines in a PR) should be ~at-or-above the
         # project's floor. Allow a 5% drift so a single under-tested
-        # one-liner doesn't block an otherwise-fine PR.
+        # one-liner doesn't block an otherwise-fine PR. Same caveat as above:
+        # informational, not the gate.
         target: 80%
         threshold: 5%
         if_ci_failed: success

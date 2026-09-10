@@ -713,11 +713,11 @@ function defaultShouldRetry(error: Error): boolean {
  * omitted, a built-in default policy is applied that does NOT retry
  * `CryptoError`s of type `INVALID_PASSWORD` or with code
  * `WEAK_PASSWORD` / `INVALID_PASSWORD` — see
- * {@link defaultShouldRetry} for rationale. Pre-v0.19.0 callers that
+ * {@link defaultShouldRetry} for rationale. Pre-v1.0.0 callers that
  * relied on the previous "retry everything" behaviour can opt back in
  * by passing `shouldRetry: () => true` explicitly.
  *
- * **Behaviour change in v0.19.0**: prior versions retried every error
+ * **Behaviour change in v1.0.0**: prior versions retried every error
  * type, including wrong-password and weak-password errors. The new
  * default skips those, which is a subtle behavioural change for
  * callers that relied on the old behaviour for retry-counting tests

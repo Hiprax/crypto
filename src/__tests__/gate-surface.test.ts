@@ -53,15 +53,23 @@ const VERIFY_GATES = [
 
 /**
  * The ratchet floor. These are the measured `All files` coverage values floored
- * to integers (2026-09-05: statements 95.94, branches 87.20, functions 97.98,
- * lines 95.96). The configured thresholds may be RAISED above these when a run
- * measures higher; they may never fall below them.
+ * to integers (2026-09-21: statements 96.02, branches 87.37, functions 98.03,
+ * lines 96.03 over 27 suites / 1152 tests). The configured thresholds may be
+ * RAISED above these when a run measures higher; they may never fall below
+ * them.
+ *
+ * The same measurement on Node v22.23.2 returned byte-identical figures, which
+ * is the fact that makes this floor safe to hold: CI collects coverage on its
+ * ubuntu / Node 22 leg, where `crypto.argon2` does not exist, and the adapter
+ * for that provider is covered through a stubbed primitive as well as a real
+ * one. A floor raised on a Node-24-only number would be red on the machine
+ * that actually enforces it.
  */
 const COVERAGE_FLOOR = {
-  statements: 95,
+  statements: 96,
   branches: 87,
-  functions: 97,
-  lines: 95,
+  functions: 98,
+  lines: 96,
 } as const;
 
 /**

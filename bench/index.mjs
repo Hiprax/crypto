@@ -11,7 +11,7 @@
 // aren't directly comparable. Separate tables keep the output readable.
 //
 // Order matters in one place: `codec.mjs` runs FIRST because it is the only
-// group with no key derivation in it. It is also the cheapest (~30 s), so a
+// group with no key derivation in it. It is also the cheapest (~45 s), so a
 // codec change gets its answer immediately instead of after several minutes
 // of Argon2id. Everything after it is KDF-bound.
 //

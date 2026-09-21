@@ -3,19 +3,23 @@
  *
  * This module hosts two things:
  *
- *  1. **The Argon2id lazy-load machinery** (native `argon2` preferred, pure-WASM
- *     `hash-wasm` fallback) — relocated here from `crypto-manager.ts` so the
- *     shared core can reach it through the engine abstraction. `crypto-manager.ts`
- *     still imports {@link loadArgon2} directly for its existing `deriveKey`
- *     method (kept byte-identical) and re-exports the two `__…ForTesting` hooks
- *     plus {@link Argon2Provider}/{@link Argon2Hasher} so existing test imports
- *     from `./crypto-manager` continue to resolve unchanged.
+ *  1. **The Argon2id lazy-load machinery** — a three-provider chain, tried in
+ *     the order native `argon2` → the runtime's built-in `crypto.argon2`
+ *     (Node >= 24.7.0) → pure-WASM `hash-wasm`. Relocated here from
+ *     `crypto-manager.ts` so the shared core can reach it through the engine
+ *     abstraction. `crypto-manager.ts` still imports {@link loadArgon2}
+ *     directly for its existing `deriveKey` method (kept byte-identical) and
+ *     re-exports the two `__…ForTesting` hooks plus
+ *     {@link Argon2Provider}/{@link Argon2Hasher} so existing test imports from
+ *     `./crypto-manager` continue to resolve unchanged.
  *  2. **`nodeEngine`** — the concrete {@link CryptoEngine} backed by
  *     `node:crypto` (AES-256-GCM, SHA-256, CSPRNG) and the Argon2id loader.
  *
  * The `argon2`/`hash-wasm` imports stay lazy (dynamic `import()` inside the
  * loader functions) so constructing a manager or using only the sync PBKDF2
- * paths never triggers the native-module load.
+ * paths never triggers the native-module load. The built-in provider is probed
+ * the same way, by reading `crypto.argon2` INSIDE its loader rather than at
+ * module scope, so constructing a manager performs no capability check either.
  */
 
 import crypto from 'node:crypto';
@@ -65,12 +69,16 @@ type Argon2Module = {
  *   - `parallelism`       ↔ `parallelism`
  *   - `hashLength`        ↔ `hashLength`
  *
- * Both libraries implement the RFC 9106 Argon2id reference, so the raw
- * 32-byte derived keys are bit-identical for the same `(password, salt,
- * memoryCost, timeCost, parallelism, hashLength)` tuple. This is verified
- * with a known-vector parity test in `argon2-lazy-load.test.ts` — drift
- * would mean a v1 ciphertext produced under one runtime cannot be decrypted
- * under the other, so the test pins the round-trip explicitly.
+ * Both libraries implement the RFC 9106 Argon2id reference, as does the third
+ * provider in the chain, Node's built-in `crypto.argon2`, so the raw 32-byte
+ * derived keys are bit-identical across ALL THREE for the same
+ * `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple.
+ * This is verified with real, unmocked known-answer vectors in
+ * `argon2-provider-parity.test.ts` (the adapter-wiring cases in
+ * `argon2-lazy-load.test.ts` mock the two importable providers and are NOT
+ * parity evidence) — drift would mean a v1 ciphertext produced under one
+ * runtime cannot be decrypted under the other, so those tests pin the
+ * round-trip explicitly.
  */
 type HashWasmModule = {
   argon2id: (options: {
@@ -90,14 +98,28 @@ type HashWasmModule = {
  * assert which fallback path was hit. Internal — do NOT import from outside
  * the test suite.
  *
+ * Three members, in the order {@link importArgon2Hasher} tries them:
+ *
+ *   - `'native'` — the optional `argon2` npm package (a node-gyp addon).
+ *   - `'node'`   — the runtime's own `crypto.argon2`, added in Node v24.7.0.
+ *                  Needs no install at all, which is what makes
+ *                  `npm i @hiprax/crypto --omit=optional` usable on a modern
+ *                  Node.
+ *   - `'wasm'`   — the optional `hash-wasm` package (pure WebAssembly).
+ *
+ * All three implement the RFC 9106 Argon2id reference and produce
+ * bit-identical raw output for the same parameter tuple, so the tag is
+ * diagnostic only: it never changes a derived key or a ciphertext byte.
+ *
  * @internal
  */
-export type Argon2Provider = 'native' | 'wasm';
+export type Argon2Provider = 'native' | 'node' | 'wasm';
 
 /**
- * Unified hasher interface that both the native `argon2` module and the
- * `hash-wasm` fallback are normalised to. Encapsulating the differences
- * here keeps `deriveKey` provider-agnostic — it always sees the same
+ * Unified hasher interface that all three Argon2id providers — the native
+ * `argon2` module, Node's built-in `crypto.argon2`, and the `hash-wasm`
+ * fallback — are normalised to. Encapsulating the differences here keeps
+ * `deriveKey` provider-agnostic: it always sees the same
  * `(password, options) => Promise<Buffer>` shape regardless of which
  * provider produced the bytes.
  *
@@ -108,7 +130,7 @@ export type Argon2Hasher = {
   provider: Argon2Provider;
   /**
    * Compute a raw `hashLength`-byte Argon2id key for the given password and
-   * parameters. Both providers MUST produce bit-identical output for
+   * parameters. All three providers MUST produce bit-identical output for
    * identical inputs (verified by the parity test).
    */
   hash: (
@@ -124,7 +146,8 @@ export type Argon2Hasher = {
 };
 
 /**
- * Module-level cache for the loaded Argon2 hasher (native or WASM-backed).
+ * Module-level cache for the loaded Argon2 hasher (native, Node built-in,
+ * or WASM-backed).
  * Three observable states, with the in-flight loading state expressed as
  * the unsettled promise itself:
  *
@@ -248,6 +271,84 @@ async function importNativeArgon2(): Promise<Argon2Hasher> {
 }
 
 /**
+ * Adapt the runtime's OWN Argon2 implementation — `crypto.argon2`, added in
+ * Node v24.7.0 — to the unified {@link Argon2Hasher} interface.
+ *
+ * Three things about this function are load-bearing.
+ *
+ * **1. The capability probe is lazy, read INSIDE the function.** There is no
+ * module to import, so the obvious shortcut would be a module-scope
+ * `const HAS_BUILTIN = typeof crypto.argon2 === 'function'`. That is wrong
+ * twice over: it would run a capability check during `new CryptoManager()`
+ * (the whole point of the lazy chain is that constructing a manager touches no
+ * KDF), and it would freeze the answer at module-evaluation time, which is
+ * before any test can make the property absent. The suite exercises the
+ * "built-in missing" branch on a Node that HAS it by deleting the property and
+ * restoring it in a `finally`; that only works because the read happens here.
+ *
+ * **2. It is synchronous on purpose.** Its two siblings are `async` because
+ * they `await import(...)`; this one has nothing to await. `importArgon2Hasher`
+ * is itself `async`, so returning a plain value from its `try` block behaves
+ * identically to returning a promise, and a `throw` is caught the same way.
+ *
+ * **3. The parameter names differ from BOTH other providers**, and a silent
+ * transposition would produce a different digest rather than an error, so the
+ * mapping is spelled out once here and pinned by a known-answer test:
+ *
+ *   - `message`     ← `password`
+ *   - `nonce`       ← `salt`         (min 8 bytes; 32 here)
+ *   - `memory`      ← `memoryCost`   (**KiB blocks**, the same unit this
+ *                                     library and the native addon use — NOT
+ *                                     bytes)
+ *   - `passes`      ← `timeCost`
+ *   - `parallelism` ← `parallelism`
+ *   - `tagLength`   ← `hashLength`
+ *
+ * `crypto.argon2` has no promise form and its callback is mandatory (passing
+ * none throws `ERR_INVALID_ARG_TYPE`), so the callback is wrapped by hand
+ * below. The derived key arrives as a `Buffer`; it is copied on return, the
+ * same discipline the other two adapters follow.
+ *
+ * Returns a hasher tagged `provider: 'node'`; throws a raw `Error` when the
+ * runtime is older than v24.7.0 and the function is simply not there (the
+ * caller composes the friendly error after all three providers have failed).
+ */
+function importNodeBuiltinArgon2(): Argon2Hasher {
+  // Lazy read — see note 1 above. Do NOT hoist this to module scope.
+  const builtinArgon2 = crypto.argon2;
+  if (typeof builtinArgon2 !== 'function') {
+    throw new Error(
+      '`node:crypto` exposes no `argon2` function ' +
+        '(built-in Argon2id needs Node >= 24.7.0)'
+    );
+  }
+  return {
+    provider: 'node',
+    hash: (password, options): Promise<Buffer> =>
+      new Promise<Buffer>((resolve, reject) => {
+        builtinArgon2(
+          'argon2id',
+          {
+            message: password,
+            nonce: options.salt,
+            parallelism: options.parallelism,
+            tagLength: options.hashLength,
+            memory: options.memoryCost,
+            passes: options.timeCost,
+          },
+          (err, derivedKey) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(Buffer.from(derivedKey));
+          }
+        );
+      }),
+  };
+}
+
+/**
  * Perform the actual dynamic import of the `hash-wasm` module and adapt it
  * to the unified {@link Argon2Hasher} interface.
  *
@@ -303,16 +404,57 @@ async function importHashWasmArgon2(): Promise<Argon2Hasher> {
 }
 
 /**
- * Try the native `argon2` import first, then the `hash-wasm` import, and
- * if both fail throw a friendly {@link CryptoError} with a unified
- * `ARGON2_NOT_AVAILABLE` code.
+ * Try the native `argon2` import first, then Node's built-in `crypto.argon2`,
+ * then the `hash-wasm` import, and if all three fail throw a friendly
+ * {@link CryptoError} with a unified `ARGON2_NOT_AVAILABLE` code.
  *
- * Both providers implement the RFC 9106 Argon2id reference and produce
+ * All three providers implement the RFC 9106 Argon2id reference and produce
  * bit-identical raw output for the same `(password, salt, memoryCost,
- * timeCost, parallelism, hashLength)` tuple. The fallback chain therefore
- * does NOT change ciphertext compatibility: a v1 ciphertext produced by a
- * native-backed manager round-trips through a WASM-backed manager and
- * vice versa.
+ * timeCost, parallelism, hashLength)` tuple — verified across nine parameter
+ * sets, including the `memoryCost === 8 * parallelism` floor and values that
+ * are not multiples of `4 * parallelism` (all three apply the same rounding).
+ * SIX `(memoryCost, timeCost, parallelism)` tuples are pinned as standing
+ * regression tests in `argon2-provider-parity.test.ts`: the KAT `(4096, 2, 1)`,
+ * plus `(8, 2, 1)`, `(9, 2, 1)`, `(100, 2, 7)`, `(8, 1, 1)` and `(4096, 1, 1)`.
+ * A seventh case re-runs the KAT tuple with a multi-byte, non-ASCII password in
+ * both NFC and NFD, which is what pins that the providers agree on how a
+ * JavaScript string becomes bytes — an ASCII vector cannot, since ASCII is
+ * byte-identical under every plausible encoding.
+ *
+ * **Each tuple is checked against every provider the HOST has**, which is all
+ * three on a machine with the native addon and Node >= 24.7, and never fewer
+ * than two: with one implementation there is nothing to compare, so the case
+ * logs a skip rather than assert a parity claim it cannot make. That is why it
+ * still says something on Node 22, where there is no built-in.
+ *
+ * **Be precise about the overlap with the nine: exactly TWO of the six, the
+ * KAT and `(8, 1, 1)`, are literally among them.** The other four are
+ * neighbours chosen to reach the same corners — the `8 * parallelism` floor,
+ * the `4 * parallelism` rounding, and a `timeCost` of 1, which `@types/node`
+ * declares out of range while this library, and `bench/codec.mjs`, both permit
+ * it. (`parallelism` carries the identical "must be greater than 1" wording and
+ * is the MORE consequential instance, since `p = 1` is this library's default
+ * and therefore sits in essentially every ciphertext it has produced; the KAT
+ * and four of the five tuples pin it.) So "six of the nine" would overstate it.
+ * The remaining seven probes are recorded in no committed test; do not read
+ * the test file as their full record.
+ * The fallback chain therefore does NOT change ciphertext compatibility: a v1
+ * ciphertext produced under any one provider round-trips under any other.
+ *
+ * **The order is fixed and must not be rearranged.** Two independent reasons:
+ *
+ *  1. *Measured cost.* At the production `HIGH` profile (m = 2^17 KiB, t = 3,
+ *     p = 1) the three measured 343 ms (native), 403 ms (built-in) and 597 ms
+ *     (`hash-wasm`). Native leads, and the built-in — which also runs off the
+ *     event loop — turns the no-addon case from "slow WASM, or a hard failure
+ *     when `hash-wasm` is absent too" into a fast, install-free success.
+ *  2. *The snapshot suites depend on native being FIRST.*
+ *     `format-snapshot.test.ts` and `container.test.ts` `unstable_mockModule`
+ *     the `argon2` package with a hasher that SUCCEEDS and returns a fixed
+ *     key, then assert checked-in byte layouts. Those mocks only bite because
+ *     native is attempted first. Moving the built-in ahead of native would
+ *     make both suites derive a real Argon2id key instead and every snapshot
+ *     byte would change — a wire-format-looking failure with a tooling cause.
  *
  * Extracted from {@link loadArgon2} so the in-flight promise stored in the
  * cache contains only the import + normalisation + fallback work (no extra
@@ -325,23 +467,44 @@ async function importArgon2Hasher(): Promise<Argon2Hasher> {
   } catch (err) {
     nativeError = err;
   }
+  let builtinError: unknown;
+  try {
+    // Synchronous by design (no module to import) — see
+    // `importNodeBuiltinArgon2`. Returning it from this `async` function
+    // behaves identically to returning a promise.
+    return importNodeBuiltinArgon2();
+  } catch (err) {
+    builtinError = err;
+  }
   try {
     return await importHashWasmArgon2();
   } catch (wasmError) {
-    // Both providers failed — surface a friendly error that points users at
-    // both fix paths (install build tools for native, or install hash-wasm
-    // for the pure-JS WASM fallback) plus the synchronous PBKDF2 escape
-    // hatch that doesn't need either.
+    // All three providers failed — surface a friendly error that points users
+    // at every fix path (install build tools for native, upgrade the runtime
+    // for the built-in, or install hash-wasm for the pure-WASM fallback) plus
+    // the synchronous PBKDF2 escape hatch that needs none of them. Each
+    // provider's own diagnosis is appended so the reader can tell "not
+    // installed" from "installed but broken".
+    //
+    // The opening sentence is load-bearing text, not prose: `README.md` quotes
+    // this message byte-for-byte and `argon2-lazy-load.test.ts` asserts the
+    // fragment "argon2 native module unavailable. Install build tools".
     const nativeMsg =
       nativeError instanceof Error ? nativeError.message : String(nativeError);
+    const builtinMsg =
+      builtinError instanceof Error
+        ? builtinError.message
+        : String(builtinError);
     const wasmMsg =
       wasmError instanceof Error ? wasmError.message : String(wasmError);
     throw new CryptoError(
-      'argon2 native module unavailable. Install build tools (Python + node-gyp) ' +
-        'or install the optional `hash-wasm` package for a pure-WASM Argon2id ' +
-        'fallback (slower than native but works everywhere). Alternatively, use ' +
-        '*Sync methods (PBKDF2). ' +
-        `Native error: ${nativeMsg}. WASM error: ${wasmMsg}.`,
+      'argon2 native module unavailable. Install build tools (Python + node-gyp), ' +
+        'or run on Node >= 24.7.0 (whose built-in `crypto.argon2` needs no ' +
+        'install at all), or install the optional `hash-wasm` package for a ' +
+        'pure-WASM Argon2id fallback (slower than native but works everywhere). ' +
+        'Alternatively, use *Sync methods (PBKDF2). ' +
+        `Native error: ${nativeMsg}. Node built-in error: ${builtinMsg}. ` +
+        `WASM error: ${wasmMsg}.`,
       CryptoErrorType.MEMORY_ERROR,
       'ARGON2_NOT_AVAILABLE'
     );
@@ -349,9 +512,10 @@ async function importArgon2Hasher(): Promise<Argon2Hasher> {
 }
 
 /**
- * Lazily load an Argon2id hasher (native preferred, hash-wasm fallback)
- * using an in-flight-promise pattern that coalesces concurrent
- * first-callers and lets transient failures recover on the next call.
+ * Lazily load an Argon2id hasher (native preferred, then Node's built-in
+ * `crypto.argon2`, then the hash-wasm fallback) using an in-flight-promise
+ * pattern that coalesces concurrent first-callers and lets transient failures
+ * recover on the next call.
  *
  * Behaviour:
  *
@@ -422,9 +586,10 @@ function nodeRandomBytes(length: number): Uint8Array {
 
 /**
  * {@link CryptoEngine.deriveArgon2id} — derive a raw Argon2id key via the
- * lazily-loaded native/WASM hasher. The caller has already NFC-normalised
- * `password` (engine contract), so this hashes the exact string it is given.
- * Both providers produce exactly `hashLength` bytes for these parameters.
+ * lazily-loaded native / Node-built-in / WASM hasher. The caller has already
+ * NFC-normalised `password` (engine contract), so this hashes the exact string
+ * it is given. All three providers produce exactly `hashLength` bytes for these
+ * parameters.
  */
 async function nodeDeriveArgon2id(
   password: string,
@@ -503,7 +668,8 @@ async function nodeSha256(data: Uint8Array): Promise<Uint8Array> {
 
 /**
  * The Node {@link CryptoEngine}, backed by `node:crypto` for AES-256-GCM,
- * SHA-256, and the CSPRNG, and by the native→WASM Argon2id loader above.
+ * SHA-256, and the CSPRNG, and by the native → Node built-in → WASM Argon2id
+ * loader above.
  */
 export const nodeEngine: CryptoEngine = {
   randomBytes: nodeRandomBytes,

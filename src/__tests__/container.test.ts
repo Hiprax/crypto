@@ -46,6 +46,12 @@ import nodeCrypto from 'node:crypto';
 import fc from 'fast-check';
 import { CryptoManager as NodeCryptoManager } from '../crypto-manager';
 import { CryptoManager as BrowserCryptoManager } from '../crypto-manager.browser';
+// The engine singleton `crypto-manager.ts` hands to `super()`, imported
+// STATICALLY on purpose: a static binding is resolved once, when this file
+// loads, so it is the same object `NodeCryptoManager` above holds no matter
+// what a later `jest.resetModules()` does to the module registry. See the
+// CONTAINER_INTEGRITY_FAILED case for why that matters.
+import { nodeEngine } from '../engine.node';
 import { CryptoError, CryptoErrorType } from '../types';
 import {
   parseV2Container,
@@ -495,13 +501,26 @@ describe('v2 container — CONTAINER_INTEGRITY_FAILED on hash mismatch', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('rejects a container whose embedded plaintext-hash is wrong', async () => {
-    // Import the SAME nodeEngine instance the manager uses, then force its
-    // sha256 to return a BOGUS digest DURING ENCRYPT only (so the sealed-in
-    // hash is wrong). After restore, decrypt recomputes the REAL hash of the
-    // payload; the mismatch must surface as CONTAINER_INTEGRITY_FAILED, NOT as
-    // a GCM auth failure (the bogus hash is itself authenticated inside the
-    // metadata segment, so every GCM tag still verifies).
-    const { nodeEngine } = await import('../engine.node');
+    // Force the engine's sha256 to return a BOGUS digest DURING ENCRYPT only
+    // (so the sealed-in hash is wrong). After restore, decrypt recomputes the
+    // REAL hash of the payload; the mismatch must surface as
+    // CONTAINER_INTEGRITY_FAILED, NOT as a GCM auth failure (the bogus hash is
+    // itself authenticated inside the metadata segment, so every GCM tag still
+    // verifies).
+    //
+    // `nodeEngine` is the STATIC import at the top of this file, and that is
+    // load-bearing rather than a style choice. It is the object
+    // `crypto-manager.ts` passes to `super()`, which `CryptoCore` stores as
+    // `this.engine` and calls through on every digest, so a spy on it is
+    // observed. A dynamic `await import('../engine.node')` here would NOT be:
+    // the byte-layout-snapshot describe at the end of this file calls
+    // `jest.resetModules()`, and after that a dynamic import hands back a
+    // FRESH module whose `nodeEngine` nothing under test consults. The spy
+    // would then patch nothing, the container would be sealed with the REAL
+    // digest, decrypt would succeed, and this case would fail with
+    // `thrown === undefined`. Measured before the fix: 8 of 12 `--randomize`
+    // seeds ordered that describe ahead of this one, and this case failed
+    // exactly that way in every one of them.
     const cm = new NodeCryptoManager(LOW_COST);
 
     const spy = jest
@@ -675,8 +694,7 @@ describe('parseV2Container fuzzing harness', () => {
 
   function checkOutcome(
     outcome:
-      | { ok: true; value: ParsedV2Container }
-      | { ok: false; error: unknown }
+      { ok: true; value: ParsedV2Container } | { ok: false; error: unknown }
   ): void {
     if (outcome.ok) {
       assertWellFormed(outcome.value);
@@ -786,6 +804,61 @@ describe('serializeV2Meta / parseV2Meta', () => {
     expect(bytesToHex(parsed.sha256)).toBe(bytesToHex(SHA));
   });
 
+  // `parseV2Meta` is isomorphic: `core.ts` runs unchanged in Node and in the
+  // browser. Its JSDoc promises the returned `sha256` is "a fresh copy so the
+  // caller can scrub the source block independently", and `decryptContainer`
+  // does exactly that (`this.secureClear(metaPlain)`). The hazard is that
+  // `Buffer.prototype.slice` SHADOWS `Uint8Array.prototype.slice` and returns
+  // an aliasing VIEW, so the same expression is a copy in the browser and a
+  // view in Node — and in the Node build the block is always a `Buffer`,
+  // because `nodeAeadDecrypt` returns `Buffer.concat(...)`. These two twins
+  // pin the contract in BOTH runtime shapes; each asserts the digest survives
+  // the scrub AND the negative that must hold for it to keep surviving: the
+  // digest shares no backing store with the block it came from.
+  it.each([
+    [
+      'Node Buffer input (nodeAeadDecrypt returns Buffer.concat)',
+      (block: Uint8Array): Uint8Array => Buffer.from(block),
+    ],
+    [
+      'plain Uint8Array input (webAeadDecrypt returns new Uint8Array)',
+      (block: Uint8Array): Uint8Array => Uint8Array.from(block),
+    ],
+  ])(
+    'parseV2Meta returns a sha256 that survives scrubbing the source block — %s',
+    (_label, wrap) => {
+      const source = wrap(
+        serializeV2Meta({
+          size: 4242,
+          sha256: SHA,
+          filename: utf8Encode('secret.pdf'),
+          mime: utf8Encode('application/pdf'),
+        })
+      );
+
+      const parsed = parseV2Meta(source);
+      const capturedHex = bytesToHex(parsed.sha256);
+      // Guard the guard: a digest that was already zero would make the
+      // survival assertion below vacuous.
+      expect(capturedHex).toBe(bytesToHex(SHA));
+      expect(parsed.sha256.length).toBe(32);
+
+      source.fill(0); // the caller scrubs the cleartext meta block
+
+      expect(bytesToHex(parsed.sha256)).toBe(capturedHex);
+      expect(parsed.sha256.every(byte => byte === 0)).toBe(false);
+      // NEGATIVE: the copy must not alias the block at all. This is the
+      // property that keeps the survival assertion true for any future caller,
+      // not just for this scrub ordering.
+      expect(parsed.sha256.buffer).not.toBe(source.buffer);
+      // The other parsed fields were already decoded into JS strings/numbers,
+      // so they must be unaffected by the scrub too.
+      expect(parsed.size).toBe(4242);
+      expect(parsed.filename).toBe('secret.pdf');
+      expect(parsed.mime).toBe('application/pdf');
+    }
+  );
+
   it('rejects a block shorter than the fixed prefix', () => {
     expect(() => parseV2Meta(new Uint8Array(36))).toThrow(CryptoError);
     try {
@@ -806,7 +879,15 @@ describe('serializeV2Meta / parseV2Meta', () => {
     // flags = filename present; declared length 100 but no bytes follow.
     const block = new Uint8Array(39);
     block[0] = 0x01;
-    new DataView(block.buffer).setUint16(37, 100, false);
+    // Offset and length are explicit even though `block` is a freshly
+    // allocated array at offset 0. A bare `new DataView(x.buffer)` is the
+    // exact hazard this suite pins elsewhere (a view's `byteOffset` silently
+    // ignored), and it should not appear in the file that guards it.
+    new DataView(block.buffer, block.byteOffset, block.byteLength).setUint16(
+      37,
+      100,
+      false
+    );
     try {
       parseV2Meta(block);
       throw new Error('expected parseV2Meta to throw');
@@ -870,6 +951,21 @@ describe('v2 container byte-layout snapshot', () => {
     jest.resetModules();
   });
   afterEach(() => {
+    // Un-register the `argon2` module mock this block installs. It is NOT
+    // covered by either line below: `jest.resetModules()` clears the module
+    // REGISTRY but explicitly leaves mock state alone, and
+    // `jest.restoreAllMocks()` only restores `jest.spyOn` spies. Without this,
+    // the fixed-0xCC hasher stays registered for the rest of the file, and the
+    // first Argon2id derivation the STATIC graph performs afterwards caches it
+    // forever (`engine.node.ts`'s `argon2ModuleCache`), after which every
+    // password and every salt derive the same KEK, so a wrong password
+    // decrypts, a salt-segment tamper goes undetected and cross-engine interop
+    // breaks. Measured before this line existed: `--randomize --seed=8` put
+    // this describe at execution index 0 and four later cases failed that way.
+    // Running it here is safe for the checked-in snapshot: `afterEach` runs
+    // only after the test body and all thirteen of its `toMatchSnapshot`
+    // calls have completed.
+    jest.unstable_unmockModule('argon2');
     jest.resetModules();
     jest.restoreAllMocks();
   });

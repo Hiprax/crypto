@@ -74,6 +74,39 @@ afterAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
+// `jest.resetModules()` does NOT unregister a `jest.unstable_mockModule`
+// factory. It clears the module REGISTRY, while the mock DECISION lives in
+// Jest's separate mock state and survives every reset until the file tears
+// down. So the per-describe reset bubbles below do not, on their own, stop one
+// block's `node:fs` / `node:fs/promises` mock from reaching a later block that
+// needs the real module: the header's "don't leak across tests" claim held for
+// module instances and not for mock decisions.
+//
+// That was a live defect, not a theoretical one. Measured with
+// `npm test -- --randomize`: 3 of 10 whole-suite seeds (2026, 200, 800) failed
+// here, always the same way. The write-error-injection block's
+// `createWriteStream` mock reached `atomicRename copy-fallback`'s async case,
+// which deliberately mocks only `node:fs/promises` and expects a real
+// `node:fs`, and that case died with `ENOSPC: injected write error on call #2`
+// from a stream a different describe had installed.
+//
+// Jest runs `afterEach` hooks from the innermost block outward, so this
+// file-level hook is the last thing to run after every test and is the one
+// place that hands both specifiers back unmocked to whatever runs next. A test
+// that wants a mock registers it either in its own body or in its describe's
+// `beforeEach`, which re-runs before every test in that block, so either way
+// nothing here depends on a registration outliving the test that made it.
+//
+// This generalises a remedy the file was already applying by hand: three
+// blocks (see the notes on their `beforeEach` hooks) reinstall
+// identity-passthrough mocks precisely because registrations survive
+// `resetModules()`. Those blocks are the ones that never failed; the block
+// that failed is the one with no such immunity.
+afterEach(() => {
+  jest.unstable_unmockModule('node:fs');
+  jest.unstable_unmockModule('node:fs/promises');
+});
+
 // ---------------------------------------------------------------------------
 // 1. atomicRename copy-fallback path
 // ---------------------------------------------------------------------------

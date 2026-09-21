@@ -48,6 +48,14 @@ const REPO_ROOT = process.cwd();
 const DIST_DIR = path.join(REPO_ROOT, 'dist');
 const DIST_INDEX = path.join(DIST_DIR, 'index.js');
 const DIST_BROWSER_INDEX = path.join(DIST_DIR, 'index.browser.js');
+// The two modules the entry points re-export ASYMMETRICALLY: `index.ts` reaches
+// the format layer through the `Buffer` wrapper's NAMED re-export list while
+// `index.browser.ts` uses `export * from './format-core.js'`, and `utils.js` is
+// re-exported by the Node entry alone. The export-symmetry probe imports both
+// directly so the expected shape is derived from the artefacts rather than
+// restated as a literal list.
+const DIST_FORMAT_CORE = path.join(DIST_DIR, 'format-core.js');
+const DIST_UTILS = path.join(DIST_DIR, 'utils.js');
 
 // Unique per-suite scratch directory. mkdtempSync creates the directory
 // atomically with a random suffix — the CodeQL-approved secure pattern
@@ -165,7 +173,12 @@ function stripTsComments(source: string): string[] {
 describe('ESM smoke (Task 31)', () => {
   beforeAll(() => {
     mkdirSync(TEST_DIR, { recursive: true });
-    for (const artefact of [DIST_INDEX, DIST_BROWSER_INDEX]) {
+    for (const artefact of [
+      DIST_INDEX,
+      DIST_BROWSER_INDEX,
+      DIST_FORMAT_CORE,
+      DIST_UTILS,
+    ]) {
       if (!existsSync(artefact)) {
         throw new Error(
           `Built artefact not found at ${artefact}. ` +
@@ -415,10 +428,16 @@ process.stdout.write(
     // `./format-core.js` with `export *`. Anything added to `format-core.ts`
     // therefore reaches browser consumers automatically and Node consumers
     // only if someone remembers to extend the named list. A missing entry
-    // there type-checks, lints, bundles and passes every other test — the
-    // symbol is simply invisible to half the audience. This test is the only
-    // thing that would catch it, so it checks BOTH entries in one probe and
-    // requires the two constants to be identical.
+    // there type-checks, lints and bundles green, and the symbol is simply
+    // invisible to half the audience.
+    //
+    // This case is the INSTANCE-level half of the guard: it pins the two
+    // symbols that actually went missing once, and it pins their VALUES and
+    // live behaviour (the boundary passes, boundary+1 throws the typed error)
+    // rather than only their names. The case immediately below it generalises
+    // the same hazard to every runtime export by name, so a symbol nobody
+    // thought to add here is still caught. Both are kept; neither subsumes
+    // the other.
     //
     // Both entries are loaded through Node's real ESM resolver (not ts-jest's
     // transformer) against the built `dist/`, so it is the shipped artefacts
@@ -494,6 +513,150 @@ process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(pro
     }
   });
 
+  it('re-exports every format-core symbol from the Node entry, and differs from the browser entry by exactly utils.js', () => {
+    // The CLASS-level version of the tripwire above. That one pins the two
+    // symbols that actually went missing once (`MAX_GCM_PLAINTEXT_BYTES` and
+    // `assertGcmPlaintextLimit`) and asserts their VALUES and live behaviour;
+    // this one asserts the shape of the whole surface by NAME, so the NEXT
+    // symbol someone forgets is caught without anyone having to remember to
+    // extend a test. The two are complementary and both are kept.
+    //
+    // Three invariants, all derived from the built artefacts rather than from
+    // a hard-coded list (a hard-coded list is a second thing to forget):
+    //
+    //   1. Every runtime export of `format-core.js` is on the Node entry.
+    //      `src/format.ts` is a NAMED re-export list, so a constant added to
+    //      `format-core.ts` reaches browser consumers automatically (via
+    //      `export *`) and Node consumers only if someone extends that list.
+    //   2. Every runtime export of the browser entry is on the Node entry:
+    //      the Node surface is a superset, in every group, not just the
+    //      format one.
+    //   3. The Node-only delta is EXACTLY `utils.js`'s exports: nothing else
+    //      is Node-only, no `utils.js` helper is missing from the Node entry,
+    //      and none of them leaked into the browser entry.
+    //
+    // `default` is exported by both entries (it is `CryptoManager` in each), so
+    // it cancels in the delta; `utils.js` has no default export.
+    const tmpDir = path.join(
+      TEST_DIR,
+      `export-symmetry-${crypto.randomBytes(8).toString('hex')}`
+    );
+    mkdirSync(tmpDir, { recursive: true });
+    const probeFile = path.join(tmpDir, 'probe.mjs');
+
+    const formatCoreUrl = pathToFileURL(DIST_FORMAT_CORE).href;
+    const nodeUrl = pathToFileURL(DIST_INDEX).href;
+    const browserUrl = pathToFileURL(DIST_BROWSER_INDEX).href;
+    const utilsUrl = pathToFileURL(DIST_UTILS).href;
+
+    writeFileSync(
+      probeFile,
+      `
+import * as formatCoreMod from ${JSON.stringify(formatCoreUrl)};
+import * as nodeMod from ${JSON.stringify(nodeUrl)};
+import * as browserMod from ${JSON.stringify(browserUrl)};
+import * as utilsMod from ${JSON.stringify(utilsUrl)};
+
+const names = mod => Object.keys(mod).sort();
+const list = arr => arr.join(', ');
+
+const core = names(formatCoreMod);
+const node = names(nodeMod);
+const browser = names(browserMod);
+const utils = names(utilsMod);
+
+const problems = [];
+
+// Non-vacuity guard. Every set assertion below is trivially satisfied by an
+// empty namespace object, and none of these four modules is legitimately
+// empty, so a probe that silently loaded the wrong thing must not read as a
+// pass.
+for (const [label, found] of [
+  ['format-core.js', core],
+  ['index.js', node],
+  ['index.browser.js', browser],
+  ['utils.js', utils],
+]) {
+  if (found.length === 0) {
+    problems.push(label + ' reported zero runtime exports');
+  }
+}
+
+const nodeSet = new Set(node);
+const browserSet = new Set(browser);
+const utilsSet = new Set(utils);
+
+// 1. format-core -> Node entry.
+const coreMissing = core.filter(name => !nodeSet.has(name));
+if (coreMissing.length > 0) {
+  problems.push(
+    'format-core.js exports absent from the Node entry (add them to the named re-export list in src/format.ts): ' +
+      list(coreMissing)
+  );
+}
+
+// 2. browser entry -> Node entry.
+const browserMissing = browser.filter(name => !nodeSet.has(name));
+if (browserMissing.length > 0) {
+  problems.push(
+    'browser-entry exports absent from the Node entry: ' + list(browserMissing)
+  );
+}
+
+// 3. The Node-only delta is exactly utils.js, checked in both directions.
+const nodeOnly = node.filter(name => !browserSet.has(name));
+const unexpectedNodeOnly = nodeOnly.filter(name => !utilsSet.has(name));
+if (unexpectedNodeOnly.length > 0) {
+  problems.push(
+    'Node-only exports that do not come from utils.js: ' +
+      list(unexpectedNodeOnly)
+  );
+}
+const utilsMissingFromNode = utils.filter(name => !nodeSet.has(name));
+if (utilsMissingFromNode.length > 0) {
+  problems.push(
+    'utils.js exports absent from the Node entry: ' + list(utilsMissingFromNode)
+  );
+}
+const utilsOnBrowser = utils.filter(name => browserSet.has(name));
+if (utilsOnBrowser.length > 0) {
+  problems.push(
+    'utils.js exports that also reach the browser entry: ' +
+      list(utilsOnBrowser)
+  );
+}
+
+process.stdout.write(
+  problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(problems)
+);
+`,
+      'utf8'
+    );
+
+    try {
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
+
+      // Report the offending NAMES, not a boolean. On a clean run stdout is
+      // exactly 'OK'; on a violation it carries the symbol list, and on a
+      // subprocess crash (a missing artefact, a broken exports map) stdout is
+      // empty, so fold stderr in rather than failing with no diagnosis.
+      const report =
+        result.status === 0
+          ? result.stdout
+          : `probe exited ${String(result.status)}; stderr: ${result.stderr}`;
+
+      expect(report).toBe('OK');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('names the v2 container version from both entries, and it matches the wire byte', () => {
     // `FORMAT_VERSION` (0x01) has always reached both entries through the
     // format module, but `CONTAINER_VERSION` (0x02) lived only in `core.ts`,
@@ -529,7 +692,7 @@ process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(pro
 
     const nodeUrl = pathToFileURL(DIST_INDEX).href;
     const browserUrl = pathToFileURL(DIST_BROWSER_INDEX).href;
-    const utilsUrl = pathToFileURL(path.join(DIST_DIR, 'utils.js')).href;
+    const utilsUrl = pathToFileURL(DIST_UTILS).href;
 
     writeFileSync(
       probeFile,
@@ -723,7 +886,7 @@ try {
     const probeFile = path.join(tmpDir, 'probe.mjs');
 
     const cmUrl = pathToFileURL(path.join(DIST_DIR, 'crypto-manager.js')).href;
-    const utilsUrl = pathToFileURL(path.join(DIST_DIR, 'utils.js')).href;
+    const utilsUrl = pathToFileURL(DIST_UTILS).href;
 
     writeFileSync(
       probeFile,

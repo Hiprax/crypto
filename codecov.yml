@@ -3,11 +3,12 @@
 #
 # Philosophy: the local Jest threshold in `jest.config.js` is the gate that
 # fails CI. It is a one-way ratchet holding the measured `All files` values
-# floored to integers — currently statements 95, branches 87, functions 97,
-# lines 95 — and it only ever moves up. Codecov here is for visualization and
-# PR feedback, NOT for re-running that gate, so its own status checks are
-# configured to be informational: they report movement but never independently
-# fail the build.
+# floored to integers — currently statements 96, branches 87, functions 98,
+# lines 96 — and it only ever moves up. Read `jest.config.js` for the live
+# values; the four numbers above are a restatement and can only ever lag it.
+# Codecov here is for visualization and PR feedback, NOT for re-running that
+# gate, so its own status checks are configured to be informational: they
+# report movement but never independently fail the build.
 #
 # The targets below are deliberately SLACK relative to the real gate, and they
 # are not meant to mirror it. Anything that would breach the Jest ratchet fails

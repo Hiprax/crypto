@@ -354,7 +354,9 @@ const fixture = {
     package: pkg.name,
     version: pkg.version,
     kdf: 'argon2id',
-    engine: 'node build (native argon2 or hash-wasm fallback)',
+    engine:
+      'node build (Argon2id via native argon2, Node built-in crypto.argon2, ' +
+      'or hash-wasm — all three derive bit-identical keys)',
   },
   kdfParams: { ...KDF_PARAMS },
   vectors,

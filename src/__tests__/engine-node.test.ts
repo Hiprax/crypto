@@ -15,13 +15,20 @@
  *      `CryptoError(DECRYPTION_FAILED)` — no decryption oracle.
  *   4. `sha256` matches the canonical NIST FIPS 180-4 vectors.
  *
- * Availability gating (Core Principle 4): `argon2` is a native optional
- * dependency and `hash-wasm` is its pure-WASM fallback. On a host where BOTH
- * are genuinely unavailable, the library's documented behaviour is a graceful
- * `ARGON2_NOT_AVAILABLE` throw — so the Argon2id KAT uses the "probe IS the
- * call" pattern and SKIPs (logged) rather than failing when neither provider
- * can load. The KAT value is bit-identical across both providers (RFC 9106),
- * so any successful derivation must equal it regardless of which one ran.
+ * Availability gating (Core Principle 4): the Node engine reaches Argon2id
+ * through a THREE-provider chain — the optional native `argon2` addon, then
+ * the runtime's own `crypto.argon2` (Node >= 24.7.0, installed by nothing),
+ * then the optional pure-WASM `hash-wasm`. On a host where ALL THREE are
+ * genuinely unavailable — which, since the middle link is the runtime itself,
+ * now means a Node older than 24.7.0 with neither optional package installed —
+ * the library's documented behaviour is a graceful `ARGON2_NOT_AVAILABLE`
+ * throw. So the Argon2id KAT uses the "probe IS the call" pattern and SKIPs
+ * (logged) rather than failing. Note the practical consequence of the third
+ * provider: on Node >= 24.7.0 that skip branch is now UNREACHABLE, because the
+ * built-in always answers. The KAT value is bit-identical across all three
+ * (RFC 9106), so any successful derivation must equal it regardless of which
+ * one ran; which one ran is pinned in `argon2-provider-parity.test.ts`, not
+ * here.
  *
  * This file registers NO module mocks, so it does not perturb (and is not
  * perturbed by) the `jest.unstable_mockModule` registrations in the argon2
@@ -36,7 +43,8 @@ import { bytesToHex, utf8Encode } from '../codec';
 // Argon2id known-answer vector (identical to argon2-provider-parity.test.ts).
 // Computed live at implementation time from the REAL installed providers —
 // argon2 (native) AND hash-wasm (pure WASM) — which produced the same 32-byte
-// output. Never authored from memory.
+// output, and since reproduced by Node's built-in `crypto.argon2` in that same
+// parity suite. Never authored from memory.
 //
 //   password    = 'parity-vector-password'  (ASCII; NFC is a no-op)
 //   salt        = 32 bytes, values 0x00..0x1f
@@ -63,7 +71,7 @@ describe('nodeEngine.deriveArgon2id', () => {
         parallelism: 1,
         hashLength: 32,
       });
-      // The engine returns exactly `hashLength` bytes; both providers agree.
+      // The engine returns exactly `hashLength` bytes; all three agree.
       expect(key.length).toBe(32);
       derivedHex = bytesToHex(key);
     } catch (err) {

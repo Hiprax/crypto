@@ -24,9 +24,28 @@
  *     final character's UTF-16 CODE UNIT instead of its decoded 6-bit SEXTET).
  *   - The chunked encoder is byte-identical to Buffer across its internal
  *     flush boundary and neither mutates nor retains its input.
- *   - `bytesToHex`, `utf8Encode`, `utf8Decode`, `concatBytes` equal their
- *     Node counterparts, incl. padding boundaries (lengths 0..3) and
- *     multi-byte Unicode.
+ *   - `bytesToHex` equals `Buffer.from(b).toString('hex')` over every byte
+ *     value 0..255, across its own 1024-byte flush boundary, through a
+ *     subarray view at a non-zero `byteOffset` and for a `Buffer` input, and
+ *     keeps the pre-lookup-table output byte-for-byte even for the
+ *     out-of-contract array-likes a JavaScript caller can pass a public
+ *     export.
+ *   - `utf8Encode`, `utf8Decode`, `concatBytes` equal their Node
+ *     counterparts, incl. padding boundaries (lengths 0..3) and multi-byte
+ *     Unicode.
+ *
+ * One sizing rule governs every property in this file, and getting it wrong
+ * is silent rather than loud. fast-check treats a collection's `maxLength`
+ * as a CEILING, not a target, and relaxes to its default size unless told
+ * otherwise, so `fc.uint8Array({ minLength: 0, maxLength: 4096 })` generated
+ * a longest array of TEN bytes over 600 runs on fast-check 4.10.2. A
+ * property whose value comes from its input's LENGTH — anything pinning a
+ * chunk, flush or quantum boundary — therefore must not take that shape. The
+ * two properties here that need depth generate the length with `fc.integer`
+ * and build the bytes from it via {@link strideBytes}, which also keeps a
+ * failing run's shrink at milliseconds instead of minutes. Properties that
+ * only need arbitrary CONTENT keep their small `fc.uint8Array` arbitraries,
+ * which is what they are for.
  */
 import { describe, it, expect } from '@jest/globals';
 import fc from 'fast-check';
@@ -44,6 +63,22 @@ const FC_RUNS = { numRuns: 600 } as const;
 
 const B64URL_ALPHABET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/**
+ * Build `len` bytes deterministically from a small `(stride, offset)` pair.
+ *
+ * This exists so a property can fuzz the LENGTH of an input across thousands
+ * of bytes without fast-check having to generate — and, on failure, shrink —
+ * an array that large. See the properties that use it for the two traps it
+ * dodges.
+ */
+function strideBytes(len: number, stride: number, offset: number): Uint8Array {
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i += 1) {
+    bytes[i] = (i * stride + offset) & 0xff;
+  }
+  return bytes;
+}
 
 /** Compare two byte arrays by value. */
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -191,16 +226,38 @@ describe('codec: bytesToBase64url', () => {
   });
 
   it('matches Buffer base64url over 0..4096-byte inputs (fast-check)', () => {
-    // Wider than the 512-byte property above. Note 4096 bytes encodes to 5462
-    // characters, still BELOW the 8192-character flush threshold, so this
-    // property exercises the triple loop at depth but never a flush; the flush
-    // itself is covered by the boundary test below.
+    // Depth, not content: 4096 bytes encode to 5462 characters, still BELOW
+    // the 8192-character flush threshold, so this property drives the triple
+    // loop deep but never a flush; the flush itself is the boundary test
+    // below. Arbitrary byte CONTENT is the small-input property above (it is spelled
+    // `maxLength: 512` but, per the header note, actually tops out near ten
+    // bytes — which is fine, content is all it is for).
+    //
+    // The arbitrary is a LENGTH plus a content `(stride, offset)` pair rather
+    // than a `Uint8Array`, because the obvious spelling is a trap at both
+    // ends. `fc.uint8Array({ minLength: 0, maxLength: 4096 })` does not
+    // generate up to 4096: fast-check reads `maxLength` as a ceiling and
+    // relaxes to its default size unless told otherwise, and measured on
+    // fast-check 4.10.2 over 600 runs the longest array it produced was TEN
+    // bytes — such a property says "0..4096" and tests "0..10". Adding
+    // `size: 'max'` fixes the generation and breaks the failure path instead:
+    // fast-check then shrinks a ~4000-element array while Jest diffs two
+    // multi-kilobyte strings at every step, measured at over fourteen
+    // minutes on one seeded mutation, which reads as a hang rather than as a
+    // test failure. Generating the length instead gives real 0..4096
+    // coverage (383 of 600 runs at or above 1024) and shrinks in about 3 ms.
     fc.assert(
-      fc.property(fc.uint8Array({ minLength: 0, maxLength: 4096 }), bytes => {
-        expect(bytesToBase64url(bytes)).toBe(
-          Buffer.from(bytes).toString('base64url')
-        );
-      }),
+      fc.property(
+        fc.integer({ min: 0, max: 4096 }),
+        fc.integer({ min: 1, max: 255 }),
+        fc.integer({ min: 0, max: 255 }),
+        (len, stride, offset) => {
+          const bytes = strideBytes(len, stride, offset);
+          expect(bytesToBase64url(bytes)).toBe(
+            Buffer.from(bytes).toString('base64url')
+          );
+        }
+      ),
       FC_RUNS
     );
   });
@@ -798,6 +855,178 @@ describe('codec: bytesToHex', () => {
       '000fffa5'
     );
     expect(bytesToHex(new Uint8Array(0))).toBe('');
+  });
+
+  it('equals Buffer hex over 0..4096-byte inputs, past the flush boundary (fast-check)', () => {
+    // Deliberately past the encoder's 1024-byte flush boundary: a 4096-byte
+    // input is flushed four times, so this property drives the chunk-reset
+    // path at generated lengths rather than only the single-chunk case.
+    // Arbitrary byte CONTENT is the small-input property above; this one is
+    // about length, which is what the flush logic is a function of. (That
+    // one is spelled `maxLength: 512` and actually tops out near ten bytes,
+    // per the header note; content is all it is for.)
+    //
+    // The arbitrary is therefore a LENGTH plus a content `(stride, offset)`
+    // pair, not a `Uint8Array`, for the two reasons spelled out on the
+    // base64url twin of this case: `fc.uint8Array({ maxLength: 4096 })`
+    // silently generates at most TEN bytes and so never reaches a flush at
+    // all, while the `size: 'max'` repair makes a FAILING run shrink a
+    // ~4000-element array for over fourteen minutes. Generating the length
+    // gives real coverage — 383 of 600 runs land at or above 1024 — and
+    // shrinks in about 3 ms. An odd stride walks every residue mod 256, and
+    // full byte-value coverage is pinned outright by the 0..255 case below.
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 4096 }),
+        fc.integer({ min: 1, max: 255 }),
+        fc.integer({ min: 0, max: 255 }),
+        (len, stride, offset) => {
+          const bytes = strideBytes(len, stride, offset);
+          expect(bytesToHex(bytes)).toBe(Buffer.from(bytes).toString('hex'));
+        }
+      ),
+      FC_RUNS
+    );
+  });
+
+  it('encodes every byte value 0..255 exactly as Buffer does', () => {
+    // The whole domain of the 256-entry lookup table in ONE assertion, so a
+    // single wrong entry — the exact defect a table introduces that a
+    // per-byte `toString(16)` could not — fails here deterministically
+    // rather than with the probability a random property gives it.
+    const all = new Uint8Array(256);
+    for (let i = 0; i < 256; i += 1) {
+      all[i] = i;
+    }
+    expect(bytesToHex(all)).toBe(Buffer.from(all).toString('hex'));
+  });
+
+  it('is byte-identical to Buffer across the internal flush boundary', () => {
+    // The encoder appends two characters per byte into a chunk string that is
+    // flushed onto the output every 1024 input bytes. Two of the three ways
+    // that can go wrong — a flushed chunk discarded instead of appended, and
+    // a chunk appended but never reset — corrupt the output at and beyond
+    // the FIRST boundary and NOWHERE below it. That is what this case is
+    // for: the small-input content property cannot see either one, because
+    // it never generates an input that reaches 1024. (The third way, never
+    // flushing the trailing partial chunk, breaks every non-empty input and
+    // reddens the whole block; it is not what this case is here for.)
+    //
+    // What this case adds over the length-generating property above is
+    // EXACTNESS. That property lands at or above 1024 in most runs, so it
+    // also catches both chunk mutations — measured, each turns six of this
+    // block's ten cases red including both of them — but it hits 1023, 1024
+    // and 1025 themselves only by chance. Here they are named. 0 and 1 pin
+    // the empty and sub-chunk cases; 2047/2048/2049 pin the SECOND boundary,
+    // which an implementation that flushes exactly once would still pass.
+    //
+    // What this case deliberately does NOT claim: the boundary's VALUE.
+    // Moving 1024 to 1025 only moves bytes between `chunk` and `out` and the
+    // function returns their concatenation either way, so an off-by-one in
+    // the flush condition is an EQUIVALENT mutant (verified: the whole file
+    // stays green under it). 1024 is a performance parameter, documented as
+    // such at `HEX_ENCODE_CHUNK_BYTES`, not a correctness one.
+    for (const len of [0, 1, 1023, 1024, 1025, 2047, 2048, 2049, 4096]) {
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i += 1) {
+        bytes[i] = (i * 31 + 7) & 0xff;
+      }
+      expect(bytesToHex(bytes)).toBe(Buffer.from(bytes).toString('hex'));
+    }
+  });
+
+  it('matches Buffer hex for a large payload spanning many flushes', () => {
+    const bytes = new Uint8Array(100_000);
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = (i * 31) & 0xff;
+    }
+    expect(bytesToHex(bytes)).toBe(Buffer.from(bytes).toString('hex'));
+  });
+
+  it('emits exactly two [0-9a-f] characters per byte, independently of the oracle', () => {
+    // A standalone NEGATIVE that never consults `Buffer`: it pins the SHAPE
+    // of the output on its own terms. A lookup that fell off the end of the
+    // 256-entry table and appended the string 'undefined', an empty string,
+    // or a NUL would change the length or the alphabet and fail here even if
+    // some future oracle comparison were satisfied vacuously. Uppercase is
+    // rejected for the same reason: the documented contract is lowercase.
+    for (const len of [0, 1, 255, 256, 1023, 1024, 1025, 3000]) {
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i += 1) {
+        bytes[i] = (i * 97 + 13) & 0xff;
+      }
+      const hex = bytesToHex(bytes);
+      expect(hex).toHaveLength(2 * len);
+      expect(hex).toMatch(/^[0-9a-f]*$/);
+      expect(hex).not.toContain('undefined');
+      expect(hex).not.toContain('\u0000');
+    }
+  });
+
+  it('reads a subarray view through its own indices, not its backing store', () => {
+    const base = new Uint8Array(4096);
+    for (let i = 0; i < base.length; i += 1) {
+      base[i] = (i * 31 + 7) & 0xff;
+    }
+    // A view at a NON-ZERO `byteOffset` whose length also straddles the
+    // 1024-byte flush boundary. The implementation is index-based and so is
+    // offset-safe; one that reached for `bytes.buffer` (or for any absolute
+    // offset into it) would silently encode the wrong window. Several callers
+    // in this repository hand `bytesToHex` exactly such a view — see the
+    // `subarray` slices in `engine-web.test.ts` and `interop.test.ts`.
+    const view = base.subarray(1234, 1234 + 1500);
+    expect(view.byteOffset).toBe(1234);
+    const hex = bytesToHex(view);
+    expect(hex).toBe(Buffer.from(view).toString('hex'));
+    // Negatives: the view's own 1500 bytes, and not the whole backing store.
+    expect(hex).toHaveLength(2 * 1500);
+    expect(hex).not.toBe(bytesToHex(base));
+  });
+
+  it('accepts a Node Buffer, including one at a non-zero byteOffset', () => {
+    // `Buffer` is a `Uint8Array` subclass, and many of this repository's
+    // calls pass one (every `bytesToHex(key)` in the Node engine suites
+    // does). Its own `toString('hex')` is the tightest available oracle.
+    const buf = Buffer.alloc(1500);
+    for (let i = 0; i < buf.length; i += 1) {
+      buf[i] = (i * 131 + 29) & 0xff;
+    }
+    expect(bytesToHex(buf)).toBe(buf.toString('hex'));
+    // `Buffer.prototype.subarray` returns a Buffer VIEW at a non-zero offset
+    // — the same hazard as the `Uint8Array` case above, but arriving without
+    // anyone asking for a view (a pooled `Buffer` is one too).
+    const windowed = buf.subarray(7, 7 + 1030);
+    expect(windowed.byteOffset).not.toBe(0);
+    expect(bytesToHex(windowed)).toBe(windowed.toString('hex'));
+    expect(bytesToHex(windowed)).toHaveLength(2 * 1030);
+  });
+
+  it('stays total and byte-identical for out-of-contract array-like input', () => {
+    // `bytesToHex` is a public export of BOTH entry points, so a plain
+    // JavaScript caller can hand it an array-like whose elements are outside
+    // 0..255, fractional, non-finite, missing, or not numbers at all. The
+    // expected strings are GOLDEN VALUES captured from the pre-table
+    // implementation — `(bytes[i] ?? 0).toString(16).padStart(2, '0')` — so
+    // this pins that introducing the lookup table changed no output
+    // character even outside the declared type. Each row misses the
+    // 256-entry table a DIFFERENT way.
+    const outOfContract: Array<[unknown[], string]> = [
+      [[300], '12c'], // above the table
+      [[-1], '-1'], // negative: no such index
+      [[4096], '1000'], // far above the table
+      [[1_000_000_000], '3b9aca00'], // beyond a 32-bit byte index
+      [[300, 4096, 70_000], '12c100011170'], // several in one pass
+      [[0.5], '0.8'], // fractional: not an integer index
+      [[255.9], 'ff.e66666666668'], // fractional just past the top entry
+      [[Number.NaN], 'NaN'],
+      [[Number.POSITIVE_INFINITY], 'Infinity'],
+      [[undefined, 5], '0005'], // the `?? 0` read
+      [new Array<unknown>(3), '000000'], // a SPARSE array-like: three holes
+      [['10'], '10'], // a numeric STRING: must NOT be read as index 10
+    ];
+    for (const [elements, expected] of outOfContract) {
+      expect(bytesToHex(elements as unknown as Uint8Array)).toBe(expected);
+    }
   });
 });
 

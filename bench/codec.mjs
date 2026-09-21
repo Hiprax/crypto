@@ -1,4 +1,4 @@
-// Benchmark: base64url codec + inspectHeader (no key derivation at all)
+// Benchmark: base64url + hex codecs + inspectHeader (no key derivation at all)
 //
 // Why this file exists
 // --------------------
@@ -21,6 +21,18 @@
 // last two rows, header inspection). A regression in these paths shows up
 // here as a directly readable multiple, not as noise in a KDF-bound total.
 //
+// The ratios quoted above are the BASE64URL pair. `bytesToHex` (added to this
+// file when it was given the same lookup-table treatment) trails its own
+// reference by more, and by a margin that WIDENS with size rather than
+// staying flat: on the machine these figures were taken on, roughly 10-15x
+// at 1 KiB, about 50x at 1 MiB and 170-200x at 8 MiB. The widening is the cost
+// of building a 16 M-character output string by concatenation, which no
+// amount of table lookup removes; against the form it replaced the rewrite
+// still cut the 8 MiB case from about 1527 ms to 381 ms (medians, isolated
+// process), while the native encoder's median sits near 2.2 ms. Those are orders of
+// magnitude, not budgets — read every ratio off its own pair of rows in a
+// fresh run.
+//
 // What is measured
 // ----------------
 //   - `bytesToBase64url` and `base64urlToBytes` (the pure, isomorphic codec
@@ -34,6 +46,15 @@
 //     make the native side look artificially slow. These rows are the floor
 //     the pure codec is measured against, and the ratio between a pair is
 //     the number worth tracking across releases.
+//   - `bytesToHex` at the same three sizes, each with its own
+//     `Buffer.toString('hex')` reference row wrapped the same VIEW way. Note
+//     what these rows are and are not: `bytesToHex` is on NO production code
+//     path in this library — outside its own definition it is called only by
+//     the test suite and by this file — so there is deliberately no `Buffer`
+//     seam for it the way there is for base64url, and its reference row is a
+//     yardstick rather than a path anything ships. It is measured because it is a public export of
+//     both entry points, and because the browser build has no `Buffer` at
+//     all, so the pure row is the only one a browser consumer can pay.
 //   - `inspectHeader` on a ciphertext produced from 1 MiB of plaintext,
 //     given as a string, plus a `Uint8Array` reference row for the same
 //     record. `inspectHeader` decodes only the first 32 base64url characters
@@ -45,7 +66,9 @@
 // Runs against the compiled `dist/` output, like every other bench here, so
 // `npm run build` is a prerequisite.
 //
-// Expected runtime: ~30 s. There is no KDF in any measured case.
+// Expected runtime: ~45 s (it was ~30 s before the three hex pairs were
+// added; the 8 MiB hex row alone is ~8 s). There is no KDF in any measured
+// case.
 
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -56,6 +79,7 @@ import {
   CryptoManager,
   bytesToBase64url,
   base64urlToBytes,
+  bytesToHex,
 } from '../dist/index.js';
 
 const KiB = 1024;
@@ -102,6 +126,13 @@ for (const { label, bytes, encoded } of fixtures) {
     base64urlToBytes(encoded),
     bytes,
     `pure decoder disagrees with Buffer at ${label}`
+  );
+  assert.equal(
+    bytesToHex(bytes),
+    Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString(
+      'hex'
+    ),
+    `pure hex encoder disagrees with Buffer at ${label}`
   );
 }
 
@@ -164,6 +195,16 @@ for (const { label, bytes, encoded } of fixtures) {
     })
     .add(`Buffer.from(s, 'base64url') (${label}, reference)`, () => {
       sink = Buffer.from(encoded, 'base64url').byteLength;
+    })
+    .add(`bytesToHex (${label}, pure codec)`, () => {
+      sink = bytesToHex(bytes).length;
+    })
+    .add(`Buffer.toString('hex') (${label}, reference)`, () => {
+      sink = Buffer.from(
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength
+      ).toString('hex').length;
     });
 }
 
@@ -181,8 +222,9 @@ console.log(
   `  - inspectHeader fixture: ${ciphertext.length} base64url characters`
 );
 console.log(
-  `  - reference rows use Buffer exactly as the Node seam does\n`
+  `  - base64url reference rows use Buffer exactly as the Node seam does`
 );
+console.log(`  - hex reference rows are a yardstick: there is no hex seam\n`);
 
 await bench.run();
 

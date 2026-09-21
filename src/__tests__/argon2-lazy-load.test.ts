@@ -9,19 +9,31 @@
  *   1. Constructing a CryptoManager and using only sync (PBKDF2) methods
  *      MUST succeed even when neither `argon2` nor `hash-wasm` can be
  *      loaded.
- *   2. The first async (Argon2id) operation triggers loading: native
- *      `argon2` is tried first; if it fails, `hash-wasm` is tried; if both
- *      fail, the call rejects with `CryptoError(MEMORY_ERROR,
- *      'ARGON2_NOT_AVAILABLE')` and an actionable message.
+ *   2. The first async (Argon2id) operation triggers loading, and the chain has
+ *      THREE links, tried in this order: native `argon2`, then the runtime's
+ *      own `crypto.argon2` (Node >= 24.7.0, needs no install), then
+ *      `hash-wasm`. Only when all three fail does the call reject with
+ *      `CryptoError(MEMORY_ERROR, 'ARGON2_NOT_AVAILABLE')` and an actionable
+ *      message naming all three causes.
  *   3. (Task 4 in-flight-promise pattern.) Concurrent first-callers
  *      share a single load attempt (no duplicate dynamic imports under
  *      load). On success the resolved hasher is cached forever; on
  *      failure the cache clears so the next caller can retry —
  *      transient failures recover.
- *   4. (Task 17 fallback.) When native fails but `hash-wasm` is
- *      available, the loader falls back to WASM. The two providers
- *      MUST produce bit-identical raw key bytes for identical inputs
- *      (RFC 9106 Argon2id — verified by the parity test below).
+ *   4. Each fallback is transparent to ciphertext. All three providers
+ *      implement the RFC 9106 Argon2id reference and MUST produce
+ *      bit-identical raw key bytes for identical inputs, so which one answers
+ *      never changes a stored ciphertext; the provider tag is diagnostic only.
+ *      (The real cross-provider evidence is in
+ *      `argon2-provider-parity.test.ts` and `argon2-golden-ciphertext.test.ts`,
+ *      not here — the cases below mock their providers.)
+ *
+ * NOTE FOR ANYONE EDITING THIS FILE. Most cases here make the native import
+ * fail, and were written when the chain had only two links. On Node >= 24.7 the
+ * built-in would now answer in `hash-wasm`'s place, so each of those cases runs
+ * inside `withNodeBuiltinArgon2Hidden` (see its comment). That wrapping is the
+ * repair for a real coverage loss, not ceremony — do not remove it, and do not
+ * "fix" such a case by changing what it expects.
  *
  * Implementation notes:
  *   - We use `jest.unstable_mockModule(...)` BEFORE importing
@@ -36,6 +48,121 @@
  *     failed load doesn't leak into the next test case.
  */
 import { jest } from '@jest/globals';
+import crypto from 'node:crypto';
+
+/**
+ * Run `fn` with Node's built-in `crypto.argon2` temporarily absent, restoring
+ * it in a `finally` whatever happens.
+ *
+ * WHY THIS EXISTS. `engine.node.ts` tries THREE Argon2id providers, in the
+ * order native `argon2` -> the runtime's built-in `crypto.argon2` (Node >=
+ * 24.7.0) -> `hash-wasm`. Every case in this file that makes the native import
+ * fail was written when the chain had only two links, so on any Node >= 24.7
+ * the built-in would now answer and the case would stop exercising what its
+ * name claims. Two distinct classes are affected, and the criterion for both is
+ * "`importNativeArgon2` cannot resolve a callable hasher", NOT "asserts the
+ * WASM fallback":
+ *
+ *   - the cases that expect `provider === 'wasm'` would see `'node'`; and
+ *   - the cases that mock BOTH optional providers as failing and expect
+ *     `ARGON2_NOT_AVAILABLE` would see a SUCCESSFUL derivation, because the
+ *     built-in needs nothing installed. Two of those (the fixed-output adapter
+ *     wiring pair) would additionally run a real 64 MiB Argon2id derivation and
+ *     then fail on the fixed-output bytes.
+ *
+ * Hiding the built-in is the repair. Flipping an assertion from `'wasm'` to
+ * `'node'`, or from an error to a success, is not: that deletes the coverage
+ * and leaves a green suite. The built-in's own ordering is pinned separately,
+ * by the "three-provider chain ordering" block at the end of this file.
+ *
+ * WHY THE DESCRIPTOR DANCE, and not `jest.replaceProperty`. That helper refuses
+ * outright here: `` Cannot replace the `argon2` property because it is a
+ * function. Use jest.spyOn(object, 'argon2') instead. `` A spy cannot express
+ * "this property does not exist", which is exactly the condition under test, so
+ * the property descriptor is saved, the property deleted, and the descriptor
+ * put back. `crypto.argon2` is `{ writable, configurable, enumerable }`, so the
+ * round trip is exact. On a Node older than 24.7 the descriptor is `undefined`,
+ * the delete is a no-op and nothing is restored — every case below then behaves
+ * exactly as it did before the third provider existed, which is what keeps this
+ * file green on Node 22.
+ *
+ * WHY IT IS DUPLICATED rather than shared with
+ * `argon2-golden-ciphertext.test.ts`. Jest's `testMatch` is
+ * `['**\/__tests__/**\/*.ts', …]` and `testPathIgnorePatterns` excludes only
+ * `browser/`, so ANY `.ts` file placed under `src/__tests__/` is collected as a
+ * suite and fails with "Your test suite must contain at least one test". A
+ * shared helper module would have to live outside this directory and be added
+ * to the gate surface. The duplication is deliberate; do not "simplify" it into
+ * a shared file.
+ */
+async function withNodeBuiltinArgon2Hidden<T>(
+  fn: () => Promise<T>
+): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(crypto, 'argon2');
+  if (descriptor !== undefined) {
+    delete (crypto as { argon2?: typeof crypto.argon2 }).argon2;
+  }
+  try {
+    return await fn();
+  } finally {
+    if (descriptor !== undefined) {
+      Object.defineProperty(crypto, 'argon2', descriptor);
+    }
+  }
+}
+
+/**
+ * The mirror of {@link withNodeBuiltinArgon2Hidden}: run `fn` with
+ * `crypto.argon2` REPLACED by `stub`, then put the original property back —
+ * or, on a runtime that never had one, remove the stub again.
+ *
+ * WHY A STUB IS NEEDED AT ALL, given that one case above drives the REAL
+ * built-in. Because that case cannot run everywhere, and the adapter must be
+ * covered everywhere. `importNodeBuiltinArgon2` throws before it constructs its
+ * returned object literal when `crypto.argon2` is absent, so on Node 22 the
+ * three functions inside that literal — the `hash` method, the `Promise`
+ * executor and the callback — are structurally unreachable. Measured: with only
+ * the real-built-in case, `npm run test:coverage` on Node v22.23.2 passes all
+ * tests but reports functions at 96.07% against a 97% threshold and EXITS 1,
+ * while the same run on Node v24.19.0 reports 98.04% and passes. CI measures
+ * coverage on its ubuntu / Node 22 leg, so that gap is a red build on a machine
+ * nobody develops on. Substituting the runtime's own KDF primitive is the same
+ * "genuinely external boundary" the `unstable_mockModule` fixed-output cases in
+ * this file already substitute, and it leaves the real implementation covered
+ * by the unmocked case beside it — so the answer is to run the adapter against
+ * a stub, never to lower the threshold.
+ *
+ * It also buys the error branches, which no real built-in can be persuaded to
+ * produce on demand: a callback invoked with an `Error`, and a synchronous
+ * throw from `crypto.argon2` itself (what an out-of-range parameter actually
+ * does).
+ *
+ * The descriptor is restored, not merely re-assigned, so a runtime that has the
+ * real function gets its exact original property back, and one that does not is
+ * left with no `argon2` property rather than an `undefined` one — the
+ * difference `typeof crypto.argon2 === 'function'` gates elsewhere rely on.
+ */
+async function withNodeBuiltinArgon2Stub<T>(
+  stub: typeof crypto.argon2,
+  fn: () => Promise<T>
+): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(crypto, 'argon2');
+  Object.defineProperty(crypto, 'argon2', {
+    value: stub,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+  try {
+    return await fn();
+  } finally {
+    if (descriptor === undefined) {
+      delete (crypto as { argon2?: typeof crypto.argon2 }).argon2;
+    } else {
+      Object.defineProperty(crypto, 'argon2', descriptor);
+    }
+  }
+}
 
 const FRIENDLY_MESSAGE_FRAGMENT =
   'argon2 native module unavailable. Install build tools';
@@ -145,110 +272,116 @@ describe('argon2 lazy-load (Task 9)', () => {
   });
 
   it('throws CryptoError(MEMORY_ERROR, ARGON2_NOT_AVAILABLE) when both argon2 AND hash-wasm cannot be loaded (deriveKey)', async () => {
-    // Simulate `MODULE_NOT_FOUND` for BOTH providers — only then does the
-    // friendly error fire. After Task 17 the loader's first fallback is
-    // hash-wasm, so failing only `argon2` would silently succeed via
-    // WASM. To preserve the original "argon2 NOT_AVAILABLE" semantics we
-    // must mock both.
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Simulate `MODULE_NOT_FOUND` for BOTH providers — only then does the
+      // friendly error fire. After Task 17 the loader's first fallback is
+      // hash-wasm, so failing only `argon2` would silently succeed via
+      // WASM. To preserve the original "argon2 NOT_AVAILABLE" semantics we
+      // must mock both.
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      mockHashWasmUnavailable();
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      const salt = cm.generateSecureRandom(32);
+
+      await expect(cm.deriveKey(password, salt)).rejects.toThrow(CryptoError);
+
+      try {
+        await cm.deriveKey(password, salt);
+        throw new Error('Expected deriveKey to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        const e = err as InstanceType<typeof CryptoError>;
+        expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+        expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+        expect(e.message).toContain(FRIENDLY_MESSAGE_FRAGMENT);
+        expect(e.message).toContain('PBKDF2');
+        // Task 17: error message points users at hash-wasm too.
+        expect(e.message).toContain('hash-wasm');
+      }
     });
-    mockHashWasmUnavailable();
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    const salt = cm.generateSecureRandom(32);
-
-    await expect(cm.deriveKey(password, salt)).rejects.toThrow(CryptoError);
-
-    try {
-      await cm.deriveKey(password, salt);
-      throw new Error('Expected deriveKey to throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(CryptoError);
-      const e = err as InstanceType<typeof CryptoError>;
-      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
-      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
-      expect(e.message).toContain(FRIENDLY_MESSAGE_FRAGMENT);
-      expect(e.message).toContain('PBKDF2');
-      // Task 17: error message points users at hash-wasm too.
-      expect(e.message).toContain('hash-wasm');
-    }
   });
 
   it('throws CryptoError(MEMORY_ERROR, ARGON2_NOT_AVAILABLE) from encryptText when both providers are missing', async () => {
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      mockHashWasmUnavailable();
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+
+      try {
+        await cm.encryptText('hello', password);
+        throw new Error('Expected encryptText to throw ARGON2_NOT_AVAILABLE');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        const e = err as InstanceType<typeof CryptoError>;
+        expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+        expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+      }
     });
-    mockHashWasmUnavailable();
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-
-    try {
-      await cm.encryptText('hello', password);
-      throw new Error('Expected encryptText to throw ARGON2_NOT_AVAILABLE');
-    } catch (err) {
-      expect(err).toBeInstanceOf(CryptoError);
-      const e = err as InstanceType<typeof CryptoError>;
-      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
-      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
-    }
   });
 
   it('on failure the cache clears so the next call can retry (Task 4 — transient recovery)', async () => {
-    // Task 4: replaces the previous "cache the failure sentinel forever"
-    // behaviour. A failed load no longer permanently disables async
-    // crypto for the process — the cache slot is cleared on rejection
-    // and the NEXT caller starts a fresh import attempt. This lets
-    // transient failures (e.g. a temporary FS permission glitch on
-    // Windows during a build-tool install) recover within the same
-    // process.
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Task 4: replaces the previous "cache the failure sentinel forever"
+      // behaviour. A failed load no longer permanently disables async
+      // crypto for the process — the cache slot is cleared on rejection
+      // and the NEXT caller starts a fresh import attempt. This lets
+      // transient failures (e.g. a temporary FS permission glitch on
+      // Windows during a build-tool install) recover within the same
+      // process.
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        throw new Error("Cannot find module 'argon2'");
+      });
+      // Both providers must fail for the cache-clear retry semantics to
+      // be observable via deriveKey rejection.
+      mockHashWasmUnavailable();
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      const salt = cm.generateSecureRandom(32);
+
+      await expect(cm.deriveKey(password, salt)).rejects.toThrow(
+        'argon2 native module unavailable'
+      );
+      const callsAfterFirst = nativeFactoryCalls;
+      expect(callsAfterFirst).toBe(1);
+
+      // Second call: cache was cleared on the previous rejection, so a
+      // fresh import attempt happens.
+      await expect(cm.deriveKey(password, salt)).rejects.toThrow(
+        'argon2 native module unavailable'
+      );
+      expect(nativeFactoryCalls).toBe(2);
+
+      // Third call: same — every call retries until success.
+      await expect(cm.deriveKey(password, salt)).rejects.toThrow(
+        'argon2 native module unavailable'
+      );
+      expect(nativeFactoryCalls).toBe(3);
     });
-    // Both providers must fail for the cache-clear retry semantics to
-    // be observable via deriveKey rejection.
-    mockHashWasmUnavailable();
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    const salt = cm.generateSecureRandom(32);
-
-    await expect(cm.deriveKey(password, salt)).rejects.toThrow(
-      'argon2 native module unavailable'
-    );
-    const callsAfterFirst = nativeFactoryCalls;
-    expect(callsAfterFirst).toBe(1);
-
-    // Second call: cache was cleared on the previous rejection, so a
-    // fresh import attempt happens.
-    await expect(cm.deriveKey(password, salt)).rejects.toThrow(
-      'argon2 native module unavailable'
-    );
-    expect(nativeFactoryCalls).toBe(2);
-
-    // Third call: same — every call retries until success.
-    await expect(cm.deriveKey(password, salt)).rejects.toThrow(
-      'argon2 native module unavailable'
-    );
-    expect(nativeFactoryCalls).toBe(3);
   });
 
   it('concurrent first-callers share a single import (Task 4 — coalescing)', async () => {
@@ -295,135 +428,143 @@ describe('argon2 lazy-load (Task 9)', () => {
   });
 
   it('concurrent first-callers all see the same rejection (Task 4 — failure coalescing)', async () => {
-    // Symmetric to the success-coalescing test: when both providers
-    // fail, every concurrent first-caller awaiting the in-flight
-    // promise sees the same friendly CryptoError. After all concurrent
-    // callers have settled, the cache is clear and a NEXT call can
-    // attempt a fresh import.
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      throw new Error("Cannot find module 'argon2'");
-    });
-    mockHashWasmUnavailable();
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Symmetric to the success-coalescing test: when both providers
+      // fail, every concurrent first-caller awaiting the in-flight
+      // promise sees the same friendly CryptoError. After all concurrent
+      // callers have settled, the cache is clear and a NEXT call can
+      // attempt a fresh import.
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        throw new Error("Cannot find module 'argon2'");
+      });
+      mockHashWasmUnavailable();
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
-    __resetArgon2ModuleCacheForTesting();
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
 
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
 
-    // 20 concurrent calls, each expected to reject.
-    const salts = Array.from({ length: 20 }, () => cm.generateSecureRandom(32));
-    const settled = await Promise.allSettled(
-      salts.map(salt => cm.deriveKey(password, salt))
-    );
+      // 20 concurrent calls, each expected to reject.
+      const salts = Array.from({ length: 20 }, () =>
+        cm.generateSecureRandom(32)
+      );
+      const settled = await Promise.allSettled(
+        salts.map(salt => cm.deriveKey(password, salt))
+      );
 
-    expect(settled).toHaveLength(20);
-    for (const result of settled) {
-      expect(result.status).toBe('rejected');
-      if (result.status === 'rejected') {
-        expect(result.reason).toBeInstanceOf(CryptoError);
-        const e = result.reason as InstanceType<typeof CryptoError>;
-        expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
-        expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+      expect(settled).toHaveLength(20);
+      for (const result of settled) {
+        expect(result.status).toBe('rejected');
+        if (result.status === 'rejected') {
+          expect(result.reason).toBeInstanceOf(CryptoError);
+          const e = result.reason as InstanceType<typeof CryptoError>;
+          expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+          expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+        }
       }
-    }
 
-    // Only ONE import attempt for the burst.
-    expect(nativeFactoryCalls).toBe(1);
+      // Only ONE import attempt for the burst.
+      expect(nativeFactoryCalls).toBe(1);
 
-    // ...but a subsequent call retries (cache cleared on rejection).
-    await expect(
-      cm.deriveKey(password, cm.generateSecureRandom(32))
-    ).rejects.toThrow('argon2 native module unavailable');
-    expect(nativeFactoryCalls).toBe(2);
+      // ...but a subsequent call retries (cache cleared on rejection).
+      await expect(
+        cm.deriveKey(password, cm.generateSecureRandom(32))
+      ).rejects.toThrow('argon2 native module unavailable');
+      expect(nativeFactoryCalls).toBe(2);
+    });
   });
 
   it('first call fails, second call succeeds — transient recovery (Task 4)', async () => {
-    // Models the canonical transient-failure scenario: the very first
-    // import attempt throws (e.g. ephemeral FS issue), and a subsequent
-    // call after the failure ends up actually loading the module
-    // successfully. The cache slot must NOT be poisoned; the second
-    // call must observe a fresh import that resolves cleanly.
-    let factoryCalls = 0;
-    const hash = jest.fn(async () => Buffer.alloc(32, 0x99));
-    jest.unstable_mockModule('argon2', () => {
-      factoryCalls += 1;
-      if (factoryCalls === 1) {
-        // Simulate a transient failure on the first call only.
-        throw new Error('ENOSPC: temporary disk full');
-      }
-      return {
-        hash,
-        argon2id: 2,
-      };
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Models the canonical transient-failure scenario: the very first
+      // import attempt throws (e.g. ephemeral FS issue), and a subsequent
+      // call after the failure ends up actually loading the module
+      // successfully. The cache slot must NOT be poisoned; the second
+      // call must observe a fresh import that resolves cleanly.
+      let factoryCalls = 0;
+      const hash = jest.fn(async () => Buffer.alloc(32, 0x99));
+      jest.unstable_mockModule('argon2', () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) {
+          // Simulate a transient failure on the first call only.
+          throw new Error('ENOSPC: temporary disk full');
+        }
+        return {
+          hash,
+          argon2id: 2,
+        };
+      });
+      // hash-wasm must also fail on the first attempt so the loader
+      // surfaces the friendly error rather than silently falling back.
+      let wasmFactoryCalls = 0;
+      jest.unstable_mockModule('hash-wasm', () => {
+        wasmFactoryCalls += 1;
+        throw new Error("Cannot find module 'hash-wasm'");
+      });
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      const salt = cm.generateSecureRandom(32);
+
+      // First call: native fails, wasm fails, friendly error surfaces.
+      await expect(cm.deriveKey(password, salt)).rejects.toThrow(CryptoError);
+      expect(factoryCalls).toBe(1);
+      expect(wasmFactoryCalls).toBe(1);
+
+      // Second call: cache was cleared on the first rejection, so a fresh
+      // import runs. This time the (mocked) native module loads
+      // successfully — no need to fall through to wasm.
+      const key = await cm.deriveKey(password, salt);
+      expect(Buffer.isBuffer(key)).toBe(true);
+      expect(key.length).toBe(32);
+      expect(factoryCalls).toBe(2);
+
+      // Third call: now uses the cached resolved promise — no further
+      // import attempts.
+      await cm.deriveKey(password, salt);
+      expect(factoryCalls).toBe(2);
     });
-    // hash-wasm must also fail on the first attempt so the loader
-    // surfaces the friendly error rather than silently falling back.
-    let wasmFactoryCalls = 0;
-    jest.unstable_mockModule('hash-wasm', () => {
-      wasmFactoryCalls += 1;
-      throw new Error("Cannot find module 'hash-wasm'");
-    });
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    const { CryptoError } = await import('../types');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    const salt = cm.generateSecureRandom(32);
-
-    // First call: native fails, wasm fails, friendly error surfaces.
-    await expect(cm.deriveKey(password, salt)).rejects.toThrow(CryptoError);
-    expect(factoryCalls).toBe(1);
-    expect(wasmFactoryCalls).toBe(1);
-
-    // Second call: cache was cleared on the first rejection, so a fresh
-    // import runs. This time the (mocked) native module loads
-    // successfully — no need to fall through to wasm.
-    const key = await cm.deriveKey(password, salt);
-    expect(Buffer.isBuffer(key)).toBe(true);
-    expect(key.length).toBe(32);
-    expect(factoryCalls).toBe(2);
-
-    // Third call: now uses the cached resolved promise — no further
-    // import attempts.
-    await cm.deriveKey(password, salt);
-    expect(factoryCalls).toBe(2);
   });
 
   it('sync (PBKDF2) methods still work after a failed argon2 load', async () => {
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      mockHashWasmUnavailable();
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      const salt = cm.generateSecureRandom(32);
+
+      // Argon2id path fails as expected:
+      await expect(cm.deriveKey(password, salt)).rejects.toThrow(
+        'argon2 native module unavailable'
+      );
+
+      // ...but the PBKDF2 path is wholly unaffected.
+      const plaintext = 'sync still works after argon2 load failure';
+      const ciphertext = cm.encryptTextSync(plaintext, password);
+      expect(cm.decryptTextSync(ciphertext, password)).toBe(plaintext);
+
+      const key = cm.deriveKeySync(password, salt);
+      expect(Buffer.isBuffer(key)).toBe(true);
+      expect(key.length).toBe(32);
     });
-    mockHashWasmUnavailable();
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    const salt = cm.generateSecureRandom(32);
-
-    // Argon2id path fails as expected:
-    await expect(cm.deriveKey(password, salt)).rejects.toThrow(
-      'argon2 native module unavailable'
-    );
-
-    // ...but the PBKDF2 path is wholly unaffected.
-    const plaintext = 'sync still works after argon2 load failure';
-    const ciphertext = cm.encryptTextSync(plaintext, password);
-    expect(cm.decryptTextSync(ciphertext, password)).toBe(plaintext);
-
-    const key = cm.deriveKeySync(password, salt);
-    expect(Buffer.isBuffer(key)).toBe(true);
-    expect(key.length).toBe(32);
   });
 
   it('handles argon2 modules exported as a CJS namespace (no .default property)', async () => {
@@ -498,260 +639,275 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
   });
 
   it('falls back to hash-wasm when native argon2 is unavailable', async () => {
-    // Native fails, WASM succeeds. The loader must transparently fall
-    // through and the encrypt/decrypt round trip must succeed.
-    const wasmArgon2id = jest.fn(async () => new Uint8Array(32).fill(0xc3));
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Native fails, WASM succeeds. The loader must transparently fall
+      // through and the encrypt/decrypt round trip must succeed.
+      const wasmArgon2id = jest.fn(async () => new Uint8Array(32).fill(0xc3));
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasmArgon2id,
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      const ciphertext = await cm.encryptText('hello wasm', password);
+      const decrypted = await cm.decryptText(ciphertext, password);
+      expect(decrypted).toBe('hello wasm');
+
+      // Provider tag confirms WASM was used.
+      const provider = await __peekArgon2ProviderForTesting();
+      expect(provider).toBe('wasm');
+
+      // hash-wasm was invoked twice (encrypt + decrypt) with the same
+      // 32-byte raw output target.
+      expect(wasmArgon2id).toHaveBeenCalledTimes(2);
+      // Verify parameter mapping: hash-wasm gets `iterations` (timeCost),
+      // `memorySize` (memoryCost), `parallelism`, and `outputType:
+      // 'binary'`.
+      const lastCall = wasmArgon2id.mock.calls[0]?.[0] as
+        | {
+            iterations: number;
+            memorySize: number;
+            parallelism: number;
+            hashLength: number;
+            outputType: string;
+          }
+        | undefined;
+      expect(lastCall).toBeDefined();
+      if (lastCall !== undefined) {
+        expect(lastCall.outputType).toBe('binary');
+        expect(lastCall.hashLength).toBe(32);
+        expect(typeof lastCall.iterations).toBe('number');
+        expect(typeof lastCall.memorySize).toBe('number');
+        expect(typeof lastCall.parallelism).toBe('number');
+      }
     });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasmArgon2id,
-    }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    const ciphertext = await cm.encryptText('hello wasm', password);
-    const decrypted = await cm.decryptText(ciphertext, password);
-    expect(decrypted).toBe('hello wasm');
-
-    // Provider tag confirms WASM was used.
-    const provider = await __peekArgon2ProviderForTesting();
-    expect(provider).toBe('wasm');
-
-    // hash-wasm was invoked twice (encrypt + decrypt) with the same
-    // 32-byte raw output target.
-    expect(wasmArgon2id).toHaveBeenCalledTimes(2);
-    // Verify parameter mapping: hash-wasm gets `iterations` (timeCost),
-    // `memorySize` (memoryCost), `parallelism`, and `outputType:
-    // 'binary'`.
-    const lastCall = wasmArgon2id.mock.calls[0]?.[0] as
-      | {
-          iterations: number;
-          memorySize: number;
-          parallelism: number;
-          hashLength: number;
-          outputType: string;
-        }
-      | undefined;
-    expect(lastCall).toBeDefined();
-    if (lastCall !== undefined) {
-      expect(lastCall.outputType).toBe('binary');
-      expect(lastCall.hashLength).toBe(32);
-      expect(typeof lastCall.iterations).toBe('number');
-      expect(typeof lastCall.memorySize).toBe('number');
-      expect(typeof lastCall.parallelism).toBe('number');
-    }
   });
 
   it('falls back to hash-wasm when hash-wasm exposes a CJS namespace shape (no .default)', async () => {
-    // Some module-resolution paths surface hash-wasm via a synthetic
-    // namespace whose top-level field IS the named export. Our loader
-    // must handle both the `.default`-wrapped and direct shapes — same
-    // pattern as the native argon2 normalisation.
-    const wasmArgon2id = jest.fn(async () => new Uint8Array(32).fill(0xd4));
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Some module-resolution paths surface hash-wasm via a synthetic
+      // namespace whose top-level field IS the named export. Our loader
+      // must handle both the `.default`-wrapped and direct shapes — same
+      // pattern as the native argon2 normalisation.
+      const wasmArgon2id = jest.fn(async () => new Uint8Array(32).fill(0xd4));
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasmArgon2id,
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      await cm.encryptText('hi via namespace', password);
+
+      expect(wasmArgon2id).toHaveBeenCalled();
+      const provider = await __peekArgon2ProviderForTesting();
+      expect(provider).toBe('wasm');
     });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasmArgon2id,
-    }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    await cm.encryptText('hi via namespace', password);
-
-    expect(wasmArgon2id).toHaveBeenCalled();
-    const provider = await __peekArgon2ProviderForTesting();
-    expect(provider).toBe('wasm');
   });
 
   it('falls back to hash-wasm when hash-wasm exposes a .default-wrapped shape', async () => {
-    // Mirror the previous test for the `.default`-wrapped shape that
-    // some bundlers / interop shims produce.
-    const wasmArgon2id = jest.fn(async () => new Uint8Array(32).fill(0xe5));
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Mirror the previous test for the `.default`-wrapped shape that
+      // some bundlers / interop shims produce.
+      const wasmArgon2id = jest.fn(async () => new Uint8Array(32).fill(0xe5));
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        default: {
+          argon2id: wasmArgon2id,
+        },
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+      await cm.encryptText('hi via .default', password);
+
+      expect(wasmArgon2id).toHaveBeenCalled();
+      const provider = await __peekArgon2ProviderForTesting();
+      expect(provider).toBe('wasm');
     });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      default: {
-        argon2id: wasmArgon2id,
-      },
-    }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-    await cm.encryptText('hi via .default', password);
-
-    expect(wasmArgon2id).toHaveBeenCalled();
-    const provider = await __peekArgon2ProviderForTesting();
-    expect(provider).toBe('wasm');
   });
 
   it('throws ARGON2_NOT_AVAILABLE when BOTH providers fail to load', async () => {
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => {
+        throw new Error("Cannot find module 'hash-wasm'");
+      });
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+
+      try {
+        await cm.encryptText('boom', password);
+        throw new Error('Expected encryptText to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        const e = err as InstanceType<typeof CryptoError>;
+        expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+        expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+        // Friendly message points users at all three fix paths.
+        expect(e.message).toContain('argon2 native module unavailable');
+        expect(e.message).toContain('hash-wasm');
+        expect(e.message).toContain('PBKDF2');
+      }
     });
-    jest.unstable_mockModule('hash-wasm', () => {
-      throw new Error("Cannot find module 'hash-wasm'");
-    });
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-
-    try {
-      await cm.encryptText('boom', password);
-      throw new Error('Expected encryptText to throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(CryptoError);
-      const e = err as InstanceType<typeof CryptoError>;
-      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
-      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
-      // Friendly message points users at all three fix paths.
-      expect(e.message).toContain('argon2 native module unavailable');
-      expect(e.message).toContain('hash-wasm');
-      expect(e.message).toContain('PBKDF2');
-    }
   });
 
   it('adapter wiring: both provider adapters pass a fixed key through unchanged (mocked)', async () => {
-    // SCOPE: this test verifies the ADAPTER WIRING only — that the native
-    // and WASM adapters pass parameters through and convert their output to
-    // a Buffer identically. Both providers are mocked to return the same
-    // fixed constant, so it does NOT exercise a real Argon2id computation
-    // and is NOT itself evidence of RFC 9106 parity.
-    //
-    // The REAL cross-provider parity evidence (unmocked known-answer
-    // vectors from the genuine argon2 + hash-wasm installs, and a golden
-    // native-produced ciphertext decrypted through the real WASM fallback)
-    // lives in `argon2-provider-parity.test.ts` and
-    // `argon2-golden-ciphertext.test.ts`.
-    //
-    // We mock both providers with a fixed output to keep this wiring check
-    // deterministic and fast (a real Argon2 derivation at these params
-    // would dominate the suite).
-    const FIXED_OUTPUT = Buffer.from(
-      'e368bb157114953b17017a398bcf20d9a8800227cfdbc5d38eb6564111e8a188',
-      'hex'
-    );
-    const nativeHash = jest.fn(async () => Buffer.from(FIXED_OUTPUT));
-    const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_OUTPUT));
-    jest.unstable_mockModule('argon2', () => ({
-      hash: nativeHash,
-      argon2id: 2,
-    }));
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasmArgon2id,
-    }));
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // SCOPE: this test verifies the ADAPTER WIRING only — that the native
+      // and WASM adapters pass parameters through and convert their output to
+      // a Buffer identically. Both providers are mocked to return the same
+      // fixed constant, so it does NOT exercise a real Argon2id computation
+      // and is NOT itself evidence of RFC 9106 parity.
+      //
+      // The REAL cross-provider parity evidence (unmocked known-answer
+      // vectors from the genuine argon2 + hash-wasm installs, and a golden
+      // native-produced ciphertext decrypted through the real WASM fallback)
+      // lives in `argon2-provider-parity.test.ts` and
+      // `argon2-golden-ciphertext.test.ts`.
+      //
+      // We mock both providers with a fixed output to keep this wiring check
+      // deterministic and fast (a real Argon2 derivation at these params
+      // would dominate the suite).
+      const FIXED_OUTPUT = Buffer.from(
+        'e368bb157114953b17017a398bcf20d9a8800227cfdbc5d38eb6564111e8a188',
+        'hex'
+      );
+      const nativeHash = jest.fn(async () => Buffer.from(FIXED_OUTPUT));
+      const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_OUTPUT));
+      jest.unstable_mockModule('argon2', () => ({
+        hash: nativeHash,
+        argon2id: 2,
+      }));
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasmArgon2id,
+      }));
 
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
 
-    const password = 'MySecureP@ssw0rd123!';
-    const salt = Buffer.alloc(32, 0x42);
+      const password = 'MySecureP@ssw0rd123!';
+      const salt = Buffer.alloc(32, 0x42);
 
-    // Pass 1: native. Cache + use, then capture the derived key.
-    __resetArgon2ModuleCacheForTesting();
-    const nativeCm = new CryptoManager({
-      memoryCost: 2 ** 16,
-      timeCost: 3,
-      parallelism: 1,
+      // Pass 1: native. Cache + use, then capture the derived key.
+      __resetArgon2ModuleCacheForTesting();
+      const nativeCm = new CryptoManager({
+        memoryCost: 2 ** 16,
+        timeCost: 3,
+        parallelism: 1,
+      });
+      const nativeKey = await nativeCm.deriveKey(password, salt);
+
+      // Pass 2: simulate native unavailable so the loader falls through
+      // to wasm. Reset modules + cache to force a re-import attempt.
+      jest.resetModules();
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasmArgon2id,
+      }));
+      const m2 = await import('../crypto-manager');
+      m2.__resetArgon2ModuleCacheForTesting();
+      const wasmCm = new m2.CryptoManager({
+        memoryCost: 2 ** 16,
+        timeCost: 3,
+        parallelism: 1,
+      });
+      const wasmKey = await wasmCm.deriveKey(password, salt);
+
+      // Bit-for-bit equality. Any drift here breaks ciphertext
+      // round-tripping across native/WASM environments.
+      expect(Buffer.compare(nativeKey, wasmKey)).toBe(0);
+      expect(nativeKey.equals(FIXED_OUTPUT)).toBe(true);
+      expect(wasmKey.equals(FIXED_OUTPUT)).toBe(true);
     });
-    const nativeKey = await nativeCm.deriveKey(password, salt);
-
-    // Pass 2: simulate native unavailable so the loader falls through
-    // to wasm. Reset modules + cache to force a re-import attempt.
-    jest.resetModules();
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
-    });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasmArgon2id,
-    }));
-    const m2 = await import('../crypto-manager');
-    m2.__resetArgon2ModuleCacheForTesting();
-    const wasmCm = new m2.CryptoManager({
-      memoryCost: 2 ** 16,
-      timeCost: 3,
-      parallelism: 1,
-    });
-    const wasmKey = await wasmCm.deriveKey(password, salt);
-
-    // Bit-for-bit equality. Any drift here breaks ciphertext
-    // round-tripping across native/WASM environments.
-    expect(Buffer.compare(nativeKey, wasmKey)).toBe(0);
-    expect(nativeKey.equals(FIXED_OUTPUT)).toBe(true);
-    expect(wasmKey.equals(FIXED_OUTPUT)).toBe(true);
   });
 
   it('adapter wiring: a v1 ciphertext round-trips across the two mocked provider adapters', async () => {
-    // SCOPE: wiring only. Encrypt with native-mocked, decrypt with
-    // WASM-mocked, both producing the same FIXED key — this checks that the
-    // parameter mapping and output handling line up across the adapters, not
-    // that a real Argon2id computation agrees across providers. The genuine
-    // cross-provider decrypt evidence (native-produced ciphertext through the
-    // real WASM fallback) lives in `argon2-golden-ciphertext.test.ts`; the
-    // real known-answer vectors live in `argon2-provider-parity.test.ts`.
-    // If the parameter mapping or output handling drifts, this test fails.
-    const FIXED_KEY = Buffer.alloc(32, 0xa5);
-    const nativeHash = jest.fn(async () => Buffer.from(FIXED_KEY));
-    const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_KEY));
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // SCOPE: wiring only. Encrypt with native-mocked, decrypt with
+      // WASM-mocked, both producing the same FIXED key — this checks that the
+      // parameter mapping and output handling line up across the adapters, not
+      // that a real Argon2id computation agrees across providers. The genuine
+      // cross-provider decrypt evidence (native-produced ciphertext through the
+      // real WASM fallback) lives in `argon2-golden-ciphertext.test.ts`; the
+      // real known-answer vectors live in `argon2-provider-parity.test.ts`.
+      // If the parameter mapping or output handling drifts, this test fails.
+      const FIXED_KEY = Buffer.alloc(32, 0xa5);
+      const nativeHash = jest.fn(async () => Buffer.from(FIXED_KEY));
+      const wasmArgon2id = jest.fn(async () => new Uint8Array(FIXED_KEY));
 
-    // Pass 1: native encrypt.
-    jest.unstable_mockModule('argon2', () => ({
-      hash: nativeHash,
-      argon2id: 2,
-    }));
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasmArgon2id,
-    }));
-    const m1 = await import('../crypto-manager');
-    m1.__resetArgon2ModuleCacheForTesting();
-    const cm1 = new m1.CryptoManager();
-    const ciphertext = await cm1.encryptText(
-      'cross-runtime hello',
-      'MySecureP@ssw0rd123!'
-    );
+      // Pass 1: native encrypt.
+      jest.unstable_mockModule('argon2', () => ({
+        hash: nativeHash,
+        argon2id: 2,
+      }));
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasmArgon2id,
+      }));
+      const m1 = await import('../crypto-manager');
+      m1.__resetArgon2ModuleCacheForTesting();
+      const cm1 = new m1.CryptoManager();
+      const ciphertext = await cm1.encryptText(
+        'cross-runtime hello',
+        'MySecureP@ssw0rd123!'
+      );
 
-    // Pass 2: simulate native unavailable so wasm runs decryption.
-    jest.resetModules();
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+      // Pass 2: simulate native unavailable so wasm runs decryption.
+      jest.resetModules();
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasmArgon2id,
+      }));
+      const m2 = await import('../crypto-manager');
+      m2.__resetArgon2ModuleCacheForTesting();
+      const cm2 = new m2.CryptoManager();
+      const decrypted = await cm2.decryptText(
+        ciphertext,
+        'MySecureP@ssw0rd123!'
+      );
+
+      expect(decrypted).toBe('cross-runtime hello');
     });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasmArgon2id,
-    }));
-    const m2 = await import('../crypto-manager');
-    m2.__resetArgon2ModuleCacheForTesting();
-    const cm2 = new m2.CryptoManager();
-    const decrypted = await cm2.decryptText(ciphertext, 'MySecureP@ssw0rd123!');
-
-    expect(decrypted).toBe('cross-runtime hello');
   });
 });
 
@@ -766,53 +922,55 @@ describe('ARGON2_NOT_AVAILABLE passes through the decrypt-path KDF remap (Task 1
   });
 
   it('decryptText surfaces MEMORY_ERROR / ARGON2_NOT_AVAILABLE, NOT DECRYPTION_FAILED', async () => {
-    // The decrypt-path remap re-types ONLY derivation-failure CryptoErrors
-    // (ENCRYPTION_FAILED + KEY_DERIVATION_FAILED). ARGON2_NOT_AVAILABLE is a
-    // MEMORY_ERROR raised when neither provider can load, and it must reach
-    // the caller untouched. We craft a well-formed v1 Argon2id blob so the
-    // decrypt path reaches key derivation (which fails on the missing
-    // provider) BEFORE any GCM work — no real KDF output is required.
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // The decrypt-path remap re-types ONLY derivation-failure CryptoErrors
+      // (ENCRYPTION_FAILED + KEY_DERIVATION_FAILED). ARGON2_NOT_AVAILABLE is a
+      // MEMORY_ERROR raised when neither provider can load, and it must reach
+      // the caller untouched. We craft a well-formed v1 Argon2id blob so the
+      // decrypt path reaches key derivation (which fails on the missing
+      // provider) BEFORE any GCM work — no real KDF output is required.
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      mockHashWasmUnavailable();
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
+      __resetArgon2ModuleCacheForTesting();
+
+      // [header][salt: 32][iv: 12][tag: 16][ciphertext] — the text wire layout.
+      // memoryCost 4096 clears the DoS caps and the RFC 9106 8×parallelism floor.
+      const header = packHeader(KDF_ID_ARGON2ID, {
+        kind: 'argon2id',
+        memoryCost: 4096,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      const salt = Buffer.alloc(32, 0x11);
+      const iv = Buffer.alloc(12, 0x22);
+      const tag = Buffer.alloc(16, 0x33);
+      const body = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+      const blob = Buffer.concat([header, salt, iv, tag, body]).toString(
+        'base64url'
+      );
+
+      const cm = new CryptoManager();
+      const password = 'MySecureP@ssw0rd123!';
+
+      try {
+        await cm.decryptText(blob, password);
+        throw new Error('Expected decryptText to throw ARGON2_NOT_AVAILABLE');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        const e = err as InstanceType<typeof CryptoError>;
+        expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+        expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
+        // Explicitly assert it was NOT remapped to a decryption error.
+        expect(e.type).not.toBe(CryptoErrorType.DECRYPTION_FAILED);
+      }
     });
-    mockHashWasmUnavailable();
-
-    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
-      await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
-    const { packHeader, KDF_ID_ARGON2ID } = await import('../format');
-    __resetArgon2ModuleCacheForTesting();
-
-    // [header][salt: 32][iv: 12][tag: 16][ciphertext] — the text wire layout.
-    // memoryCost 4096 clears the DoS caps and the RFC 9106 8×parallelism floor.
-    const header = packHeader(KDF_ID_ARGON2ID, {
-      kind: 'argon2id',
-      memoryCost: 4096,
-      timeCost: 2,
-      parallelism: 1,
-    });
-    const salt = Buffer.alloc(32, 0x11);
-    const iv = Buffer.alloc(12, 0x22);
-    const tag = Buffer.alloc(16, 0x33);
-    const body = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
-    const blob = Buffer.concat([header, salt, iv, tag, body]).toString(
-      'base64url'
-    );
-
-    const cm = new CryptoManager();
-    const password = 'MySecureP@ssw0rd123!';
-
-    try {
-      await cm.decryptText(blob, password);
-      throw new Error('Expected decryptText to throw ARGON2_NOT_AVAILABLE');
-    } catch (err) {
-      expect(err).toBeInstanceOf(CryptoError);
-      const e = err as InstanceType<typeof CryptoError>;
-      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
-      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
-      // Explicitly assert it was NOT remapped to a decryption error.
-      expect(e.type).not.toBe(CryptoErrorType.DECRYPTION_FAILED);
-    }
   });
 });
 
@@ -1008,197 +1166,209 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
   });
 
   it('falls back to a namespace-shaped `hash-wasm`, having tried native FIRST', async () => {
-    const wasm = recordingWasmArgon2id();
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      const wasm = recordingWasmArgon2id();
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasm.argon2id,
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+      const key = await cm.deriveKey(PASSWORD, SALT);
+
+      // Ordering is part of the contract: native is preferred for performance, so
+      // it must be ATTEMPTED even on a host where it cannot load.
+      expect(nativeFactoryCalls).toBe(1);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
+      expect(wasm.calls.length).toBe(1);
+      const call = wasm.calls[0];
+      expect(call).toBeDefined();
+      if (call !== undefined) expectWasmMapping(call);
     });
-    jest.unstable_mockModule('hash-wasm', () => ({ argon2id: wasm.argon2id }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager(COST);
-    const key = await cm.deriveKey(PASSWORD, SALT);
-
-    // Ordering is part of the contract: native is preferred for performance, so
-    // it must be ATTEMPTED even on a host where it cannot load.
-    expect(nativeFactoryCalls).toBe(1);
-    expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
-    expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
-    expect(wasm.calls.length).toBe(1);
-    const call = wasm.calls[0];
-    expect(call).toBeDefined();
-    if (call !== undefined) expectWasmMapping(call);
   });
 
   it('falls back to a `.default`-wrapped `hash-wasm`, having tried native FIRST', async () => {
-    const wasm = recordingWasmArgon2id();
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      const wasm = recordingWasmArgon2id();
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        default: { argon2id: wasm.argon2id },
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+      const key = await cm.deriveKey(PASSWORD, SALT);
+
+      expect(nativeFactoryCalls).toBe(1);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
+      expect(wasm.calls.length).toBe(1);
+      const call = wasm.calls[0];
+      expect(call).toBeDefined();
+      if (call !== undefined) expectWasmMapping(call);
     });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      default: { argon2id: wasm.argon2id },
-    }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager(COST);
-    const key = await cm.deriveKey(PASSWORD, SALT);
-
-    expect(nativeFactoryCalls).toBe(1);
-    expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
-    expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
-    expect(wasm.calls.length).toBe(1);
-    const call = wasm.calls[0];
-    expect(call).toBeDefined();
-    if (call !== undefined) expectWasmMapping(call);
   });
 
   it('prefers the namespace `argon2id` when `.default.argon2id` is not callable', async () => {
-    // A namespace can legitimately carry BOTH a usable named export and a
-    // `.default` that is a re-export shim rather than the module object. The
-    // WASM normalisation is therefore a `typeof … === 'function'` test on
-    // `.default.argon2id`, not a truthiness test on `.default`: preferring the
-    // truthy-but-useless `.default` here would call `undefined` and blow up.
-    const wasm = recordingWasmArgon2id();
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // A namespace can legitimately carry BOTH a usable named export and a
+      // `.default` that is a re-export shim rather than the module object. The
+      // WASM normalisation is therefore a `typeof … === 'function'` test on
+      // `.default.argon2id`, not a truthiness test on `.default`: preferring the
+      // truthy-but-useless `.default` here would call `undefined` and blow up.
+      const wasm = recordingWasmArgon2id();
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasm.argon2id,
+        default: { argon2id: 'not-a-function' },
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+      const key = await cm.deriveKey(PASSWORD, SALT);
+
+      expect(nativeFactoryCalls).toBe(1);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
+      // NEGATIVE: the useless `.default` was never taken — the real function ran
+      // exactly once and no "is not a function" TypeError surfaced.
+      expect(wasm.calls.length).toBe(1);
     });
-    jest.unstable_mockModule('hash-wasm', () => ({
-      argon2id: wasm.argon2id,
-      default: { argon2id: 'not-a-function' },
-    }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager(COST);
-    const key = await cm.deriveKey(PASSWORD, SALT);
-
-    expect(nativeFactoryCalls).toBe(1);
-    expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
-    expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
-    // NEGATIVE: the useless `.default` was never taken — the real function ran
-    // exactly once and no "is not a function" TypeError surfaced.
-    expect(wasm.calls.length).toBe(1);
   });
 
   it('never caches a rejected load: a later attempt can resolve to a DIFFERENT provider', async () => {
-    // The cache slot holds the in-flight promise so concurrent first-callers
-    // coalesce, and clears it on rejection so a transient failure does not
-    // disable async crypto for the process lifetime. Here the SECOND attempt
-    // succeeds through a different provider than the first attempt reached,
-    // which is only possible if the rejected promise was genuinely discarded.
-    //
-    // This case deliberately does NOT call `jest.resetModules()` between the
-    // attempts — that would wipe the module-scope cache that IS the subject —
-    // so it relies on a jest behaviour worth naming: a mock factory that THROWS
-    // is re-invoked on a subsequent `import()` within the same registry, which
-    // is what lets the factory-call counters below distinguish a fresh attempt
-    // from a cached one. If a future jest release memoises a throwing factory,
-    // this test breaks on the counters rather than on the contract.
-    const wasm = recordingWasmArgon2id();
-    let nativeFactoryCalls = 0;
-    let wasmFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      throw new Error("Cannot find module 'argon2'");
-    });
-    jest.unstable_mockModule('hash-wasm', () => {
-      wasmFactoryCalls += 1;
-      if (wasmFactoryCalls === 1) {
-        throw new Error('EACCES: transient permission error');
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // The cache slot holds the in-flight promise so concurrent first-callers
+      // coalesce, and clears it on rejection so a transient failure does not
+      // disable async crypto for the process lifetime. Here the SECOND attempt
+      // succeeds through a different provider than the first attempt reached,
+      // which is only possible if the rejected promise was genuinely discarded.
+      //
+      // This case deliberately does NOT call `jest.resetModules()` between the
+      // attempts — that would wipe the module-scope cache that IS the subject —
+      // so it relies on a jest behaviour worth naming: a mock factory that THROWS
+      // is re-invoked on a subsequent `import()` within the same registry, which
+      // is what lets the factory-call counters below distinguish a fresh attempt
+      // from a cached one. If a future jest release memoises a throwing factory,
+      // this test breaks on the counters rather than on the contract.
+      const wasm = recordingWasmArgon2id();
+      let nativeFactoryCalls = 0;
+      let wasmFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => {
+        wasmFactoryCalls += 1;
+        if (wasmFactoryCalls === 1) {
+          throw new Error('EACCES: transient permission error');
+        }
+        return { argon2id: wasm.argon2id };
+      });
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+
+      // Attempt 1: both providers fail.
+      try {
+        await cm.deriveKey(PASSWORD, SALT);
+        throw new Error('Expected the first deriveKey to reject');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CryptoError);
+        const e = err as InstanceType<typeof CryptoError>;
+        expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
+        expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
       }
-      return { argon2id: wasm.argon2id };
+      expect(nativeFactoryCalls).toBe(1);
+      expect(wasmFactoryCalls).toBe(1);
+      // No provider is reported. On its own this cannot distinguish an empty
+      // cache from a cached rejection (the peek hook maps both to `null`); what
+      // proves the slot was actually cleared is attempt 2 below, which observes a
+      // FRESH pair of imports.
+      expect(await __peekArgon2ProviderForTesting()).toBeNull();
+
+      // Attempt 2: fresh imports; native still fails, WASM now loads.
+      const key = await cm.deriveKey(PASSWORD, SALT);
+      expect(nativeFactoryCalls).toBe(2);
+      expect(wasmFactoryCalls).toBe(2);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
+
+      // Attempt 3: NEGATIVE — a resolved load is cached forever, so no further
+      // import of either provider happens.
+      const key2 = await cm.deriveKey(PASSWORD, SALT);
+      expect(key2.toString('hex')).toBe(PINNED_KEY_HEX);
+      expect(nativeFactoryCalls).toBe(2);
+      expect(wasmFactoryCalls).toBe(2);
+      expect(wasm.calls.length).toBe(2);
     });
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager(COST);
-
-    // Attempt 1: both providers fail.
-    try {
-      await cm.deriveKey(PASSWORD, SALT);
-      throw new Error('Expected the first deriveKey to reject');
-    } catch (err) {
-      expect(err).toBeInstanceOf(CryptoError);
-      const e = err as InstanceType<typeof CryptoError>;
-      expect(e.type).toBe(CryptoErrorType.MEMORY_ERROR);
-      expect(e.code).toBe('ARGON2_NOT_AVAILABLE');
-    }
-    expect(nativeFactoryCalls).toBe(1);
-    expect(wasmFactoryCalls).toBe(1);
-    // No provider is reported. On its own this cannot distinguish an empty
-    // cache from a cached rejection (the peek hook maps both to `null`); what
-    // proves the slot was actually cleared is attempt 2 below, which observes a
-    // FRESH pair of imports.
-    expect(await __peekArgon2ProviderForTesting()).toBeNull();
-
-    // Attempt 2: fresh imports; native still fails, WASM now loads.
-    const key = await cm.deriveKey(PASSWORD, SALT);
-    expect(nativeFactoryCalls).toBe(2);
-    expect(wasmFactoryCalls).toBe(2);
-    expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
-    expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
-
-    // Attempt 3: NEGATIVE — a resolved load is cached forever, so no further
-    // import of either provider happens.
-    const key2 = await cm.deriveKey(PASSWORD, SALT);
-    expect(key2.toString('hex')).toBe(PINNED_KEY_HEX);
-    expect(nativeFactoryCalls).toBe(2);
-    expect(wasmFactoryCalls).toBe(2);
-    expect(wasm.calls.length).toBe(2);
   });
 
   it('reports no provider while an in-flight load is on its way to rejecting', async () => {
-    // `__peekArgon2ProviderForTesting` reads the cache slot synchronously, so
-    // it can observe the still-pending promise of a load that is about to fail.
-    // It must resolve to `null` rather than rejecting — otherwise every test
-    // that inspects the provider after a failure would blow up with an
-    // unhandled rejection instead of reporting "nothing cached".
-    jest.unstable_mockModule('argon2', () => {
-      throw new Error("Cannot find module 'argon2'");
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // `__peekArgon2ProviderForTesting` reads the cache slot synchronously, so
+      // it can observe the still-pending promise of a load that is about to fail.
+      // It must resolve to `null` rather than rejecting — otherwise every test
+      // that inspects the provider after a failure would blow up with an
+      // unhandled rejection instead of reporting "nothing cached".
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      mockHashWasmUnavailable();
+
+      const { loadArgon2, __resetArgon2ModuleCacheForTesting } =
+        await import('../engine.node');
+      const { __peekArgon2ProviderForTesting } =
+        await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      // Start the load WITHOUT awaiting it; the cache slot now holds the pending
+      // promise. Peek reads that slot before the loader clears it.
+      const loading = loadArgon2();
+      const peeked = __peekArgon2ProviderForTesting();
+
+      await expect(loading).rejects.toThrow(FRIENDLY_MESSAGE_FRAGMENT);
+      await expect(peeked).resolves.toBeNull();
     });
-    mockHashWasmUnavailable();
-
-    const { loadArgon2, __resetArgon2ModuleCacheForTesting } =
-      await import('../engine.node');
-    const { __peekArgon2ProviderForTesting } =
-      await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    // Start the load WITHOUT awaiting it; the cache slot now holds the pending
-    // promise. Peek reads that slot before the loader clears it.
-    const loading = loadArgon2();
-    const peeked = __peekArgon2ProviderForTesting();
-
-    await expect(loading).rejects.toThrow(FRIENDLY_MESSAGE_FRAGMENT);
-    await expect(peeked).resolves.toBeNull();
   });
 
   // ---------------------------------------------------------------------------
@@ -1308,48 +1478,243 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
   });
 
   it('falls through to hash-wasm when `argon2` resolves to a `.default` with no callable `hash`', async () => {
-    // Nothing in this namespace can hash. The load must FAIL rather than
-    // resolve an uncallable hasher, so the WASM fallback gets its turn — the
-    // whole point of having a fallback.
-    const wasm = recordingWasmArgon2id();
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      return { default: {} };
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Nothing in this namespace can hash. The load must FAIL rather than
+      // resolve an uncallable hasher, so the WASM fallback gets its turn — the
+      // whole point of having a fallback.
+      const wasm = recordingWasmArgon2id();
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        return { default: {} };
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasm.argon2id,
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+      const key = await cm.deriveKey(PASSWORD, SALT);
+
+      // Native was ATTEMPTED (ordering is part of the contract) and rejected.
+      expect(nativeFactoryCalls).toBe(1);
+      // NEGATIVE: the cache does NOT hold a broken 'native' hasher.
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
+      expect(wasm.calls.length).toBe(1);
+      const call = wasm.calls[0];
+      expect(call).toBeDefined();
+      if (call !== undefined) expectWasmMapping(call);
     });
-    jest.unstable_mockModule('hash-wasm', () => ({ argon2id: wasm.argon2id }));
-
-    const {
-      CryptoManager,
-      __resetArgon2ModuleCacheForTesting,
-      __peekArgon2ProviderForTesting,
-    } = await import('../crypto-manager');
-    __resetArgon2ModuleCacheForTesting();
-
-    const cm = new CryptoManager(COST);
-    const key = await cm.deriveKey(PASSWORD, SALT);
-
-    // Native was ATTEMPTED (ordering is part of the contract) and rejected.
-    expect(nativeFactoryCalls).toBe(1);
-    // NEGATIVE: the cache does NOT hold a broken 'native' hasher.
-    expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
-    expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
-    expect(wasm.calls.length).toBe(1);
-    const call = wasm.calls[0];
-    expect(call).toBeDefined();
-    if (call !== undefined) expectWasmMapping(call);
   });
 
   it('falls through to hash-wasm when `argon2` resolves to a namespace with no `hash` at all', async () => {
-    // The `.default`-less variant of the same defect: `'default' in mod` was
-    // false, so the empty namespace itself was resolved and tagged 'native'.
-    const wasm = recordingWasmArgon2id();
-    let nativeFactoryCalls = 0;
-    jest.unstable_mockModule('argon2', () => {
-      nativeFactoryCalls += 1;
-      return {};
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // The `.default`-less variant of the same defect: `'default' in mod` was
+      // false, so the empty namespace itself was resolved and tagged 'native'.
+      const wasm = recordingWasmArgon2id();
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        return {};
+      });
+      jest.unstable_mockModule('hash-wasm', () => ({
+        argon2id: wasm.argon2id,
+      }));
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+      const key = await cm.deriveKey(PASSWORD, SALT);
+
+      expect(nativeFactoryCalls).toBe(1);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
+      expect(wasm.calls.length).toBe(1);
+      const call = wasm.calls[0];
+      expect(call).toBeDefined();
+      if (call !== undefined) expectWasmMapping(call);
     });
-    jest.unstable_mockModule('hash-wasm', () => ({ argon2id: wasm.argon2id }));
+  });
+
+  it('reports ARGON2_NOT_AVAILABLE, not KEY_DERIVATION_FAILED, when `hash-wasm` exposes no callable `argon2id`', async () => {
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // The mirror case, and the one that made the two engines disagree: for the
+      // identical module shape `engine.web.ts` reported the actionable
+      // MEMORY_ERROR / ARGON2_NOT_AVAILABLE while the Node engine reported
+      // ENCRYPTION_FAILED / KEY_DERIVATION_FAILED with an internal variable name
+      // in the message. They must now agree.
+      let wasmFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        throw new Error("Cannot find module 'argon2'");
+      });
+      jest.unstable_mockModule('hash-wasm', () => {
+        wasmFactoryCalls += 1;
+        return { default: {} };
+      });
+
+      const {
+        CryptoManager,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+
+      let caught: unknown;
+      let resolved = false;
+      try {
+        await cm.deriveKey(PASSWORD, SALT);
+        resolved = true;
+      } catch (err) {
+        caught = err;
+      }
+      // The thing that must NOT have happened: a key came back from a hasher
+      // that cannot hash.
+      expect(resolved).toBe(false);
+      expect(caught).toBeInstanceOf(CryptoError);
+      const error = caught as InstanceType<typeof CryptoError>;
+      expect(error.type).toBe(CryptoErrorType.MEMORY_ERROR);
+      expect(error.code).toBe('ARGON2_NOT_AVAILABLE');
+      // NEGATIVE: not the misleading call-time failure this used to surface.
+      expect(error.code).not.toBe('KEY_DERIVATION_FAILED');
+      expect(error.message).not.toContain('is not a function');
+      // The composed message names the WASM cause in the engine-web wording.
+      expect(error.message).toContain(
+        '`hash-wasm` loaded but exposes no `argon2id` export'
+      );
+      expect(wasmFactoryCalls).toBe(1);
+      // A rejected load is never cached.
+      expect(await __peekArgon2ProviderForTesting()).toBeNull();
+    });
+  });
+
+  it('names BOTH uncallable providers in one ARGON2_NOT_AVAILABLE', async () => {
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // Neither module is missing — both load and both are useless. The friendly
+      // error must still be the actionable one, and must carry both diagnoses so
+      // the reader can tell "not installed" from "installed but broken".
+      jest.unstable_mockModule('argon2', () => ({}));
+      jest.unstable_mockModule('hash-wasm', () => ({}));
+
+      const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+        await import('../crypto-manager');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      const cm = new CryptoManager(COST);
+
+      let caught: unknown;
+      let resolved = false;
+      try {
+        await cm.encryptText('both providers are hollow', PASSWORD);
+        resolved = true;
+      } catch (err) {
+        caught = err;
+      }
+      expect(resolved).toBe(false);
+      expect(caught).toBeInstanceOf(CryptoError);
+      const error = caught as InstanceType<typeof CryptoError>;
+      expect(error.type).toBe(CryptoErrorType.MEMORY_ERROR);
+      expect(error.code).toBe('ARGON2_NOT_AVAILABLE');
+      expect(error.message).toContain(
+        '`argon2` loaded but exposes no `hash` function'
+      );
+      expect(error.message).toContain(
+        '`hash-wasm` loaded but exposes no `argon2id` export'
+      );
+      // The actionable guidance is still there.
+      expect(error.message).toContain(FRIENDLY_MESSAGE_FRAGMENT);
+      expect(error.message).toContain('PBKDF2');
+    });
+  });
+});
+
+/**
+ * The three-provider chain, pinned as an ordering contract.
+ *
+ * `engine.node.ts` tries native `argon2` -> the runtime's built-in
+ * `crypto.argon2` (Node >= 24.7.0) -> `hash-wasm`, and every link of that order
+ * is load-bearing:
+ *
+ *   - **Native stays first** for two independent reasons. It is the fastest of
+ *     the three (measured 343 ms against 403 ms and 597 ms at the production
+ *     `HIGH` profile), and — the reason that bites hardest if it is forgotten —
+ *     `format-snapshot.test.ts` and `container.test.ts` module-mock the `argon2`
+ *     package with a hasher that SUCCEEDS and returns a fixed key, then assert
+ *     checked-in byte layouts. Those mocks only take effect because native is
+ *     attempted first; promote the built-in above it and every snapshot byte
+ *     changes, which reads like a wire-format regression but is a tooling bug.
+ *   - **The built-in sits second** so a host with no compiler toolchain and no
+ *     `hash-wasm` still gets a fast, install-free Argon2id instead of a hard
+ *     `ARGON2_NOT_AVAILABLE`.
+ *   - **`hash-wasm` stays last**, which keeps it the provider for Node 22 and
+ *     for any runtime without `crypto.argon2`.
+ *
+ * The four cases below pin each of those transitions, plus the failure mode when
+ * all three are gone. The two that need a genuinely present built-in are gated
+ * on `typeof crypto.argon2 === 'function'` with this repo's `[skip]` warning so
+ * the file stays green on Node 22, where the third provider does not exist.
+ */
+describe('three-provider chain ordering (native -> node built-in -> wasm)', () => {
+  /** Cheap, explicit KDF params — the built-in case runs a REAL derivation. */
+  const CHAIN_COST = { memoryCost: 4096, timeCost: 2, parallelism: 1 } as const;
+  const CHAIN_PASSWORD = 'MySecureP@ssw0rd123!';
+  const CHAIN_SALT = Buffer.alloc(32, 0x7e);
+  /** What the mocked providers return, so "which provider ran" is readable off the key. */
+  const NATIVE_KEY_HEX =
+    'aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00';
+  const WASM_KEY_HEX =
+    'bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11bb11';
+
+  /** True when this runtime actually has the built-in provider (Node >= 24.7.0). */
+  function builtinAvailable(): boolean {
+    return typeof crypto.argon2 === 'function';
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  afterEach(() => {
+    jest.resetModules();
+    jest.restoreAllMocks();
+  });
+
+  it('prefers native over the built-in when both are available', async () => {
+    if (!builtinAvailable()) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[skip] node:crypto.argon2 unavailable (Node < 24.7.0); ' +
+          'native-beats-built-in ordering is vacuous here'
+      );
+      return;
+    }
+    const nativeHash = jest.fn(async () => Buffer.from(NATIVE_KEY_HEX, 'hex'));
+    let wasmFactoryCalls = 0;
+    jest.unstable_mockModule('argon2', () => ({
+      hash: nativeHash,
+      argon2id: 2,
+    }));
+    jest.unstable_mockModule('hash-wasm', () => {
+      wasmFactoryCalls += 1;
+      return {
+        argon2id: async (): Promise<Uint8Array> => new Uint8Array(32),
+      };
+    });
 
     const {
       CryptoManager,
@@ -1358,31 +1723,212 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
     } = await import('../crypto-manager');
     __resetArgon2ModuleCacheForTesting();
 
-    const cm = new CryptoManager(COST);
-    const key = await cm.deriveKey(PASSWORD, SALT);
+    const cm = new CryptoManager(CHAIN_COST);
+    const key = await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
 
-    expect(nativeFactoryCalls).toBe(1);
-    expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
-    expect(key.toString('hex')).toBe(PINNED_KEY_HEX);
-    expect(wasm.calls.length).toBe(1);
-    const call = wasm.calls[0];
-    expect(call).toBeDefined();
-    if (call !== undefined) expectWasmMapping(call);
+    expect(await __peekArgon2ProviderForTesting()).toBe('native');
+    // The key itself says which provider ran: the built-in would have derived a
+    // real Argon2id digest, which is not this constant.
+    expect(key.toString('hex')).toBe(NATIVE_KEY_HEX);
+    expect(nativeHash).toHaveBeenCalledTimes(1);
+    // NEGATIVES: neither of the two providers BEHIND native was consulted.
+    expect(await __peekArgon2ProviderForTesting()).not.toBe('node');
+    expect(wasmFactoryCalls).toBe(0);
   });
 
-  it('reports ARGON2_NOT_AVAILABLE, not KEY_DERIVATION_FAILED, when `hash-wasm` exposes no callable `argon2id`', async () => {
-    // The mirror case, and the one that made the two engines disagree: for the
-    // identical module shape `engine.web.ts` reported the actionable
-    // MEMORY_ERROR / ARGON2_NOT_AVAILABLE while the Node engine reported
-    // ENCRYPTION_FAILED / KEY_DERIVATION_FAILED with an internal variable name
-    // in the message. They must now agree.
+  it('falls through to the built-in when native fails, and never reaches hash-wasm', async () => {
+    if (!builtinAvailable()) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[skip] node:crypto.argon2 unavailable (Node < 24.7.0); ' +
+          'skipping the built-in fallback case'
+      );
+      return;
+    }
+    let nativeFactoryCalls = 0;
+    let wasmFactoryCalls = 0;
+    jest.unstable_mockModule('argon2', () => {
+      nativeFactoryCalls += 1;
+      throw new Error("Cannot find module 'argon2'");
+    });
+    jest.unstable_mockModule('hash-wasm', () => {
+      wasmFactoryCalls += 1;
+      return {
+        argon2id: async (): Promise<Buffer> => Buffer.from(WASM_KEY_HEX, 'hex'),
+      };
+    });
+
+    const {
+      CryptoManager,
+      __resetArgon2ModuleCacheForTesting,
+      __peekArgon2ProviderForTesting,
+    } = await import('../crypto-manager');
+    __resetArgon2ModuleCacheForTesting();
+
+    const cm = new CryptoManager(CHAIN_COST);
+    const key = await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
+
+    // Native is still ATTEMPTED — the ordering is not short-circuited away.
+    expect(nativeFactoryCalls).toBe(1);
+    expect(await __peekArgon2ProviderForTesting()).toBe('node');
+    expect(Buffer.isBuffer(key)).toBe(true);
+    expect(key.length).toBe(32);
+    // NEGATIVE, and the point of the case: the chain stopped at the built-in, so
+    // `hash-wasm` was never even imported, let alone called.
+    expect(wasmFactoryCalls).toBe(0);
+    expect(key.toString('hex')).not.toBe(WASM_KEY_HEX);
+  });
+
+  it('falls through to hash-wasm when native fails AND the built-in is absent', async () => {
+    // The pre-existing two-provider behaviour, now stated explicitly instead of
+    // being incidental. This one needs no availability gate: hiding a property
+    // that is already absent is a no-op, so it asserts the same thing on Node 22.
+    const wasmArgon2id = jest.fn(async () => Buffer.from(WASM_KEY_HEX, 'hex'));
+    let nativeFactoryCalls = 0;
+    jest.unstable_mockModule('argon2', () => {
+      nativeFactoryCalls += 1;
+      throw new Error("Cannot find module 'argon2'");
+    });
+    jest.unstable_mockModule('hash-wasm', () => ({ argon2id: wasmArgon2id }));
+
+    const {
+      CryptoManager,
+      __resetArgon2ModuleCacheForTesting,
+      __peekArgon2ProviderForTesting,
+    } = await import('../crypto-manager');
+    __resetArgon2ModuleCacheForTesting();
+
+    await withNodeBuiltinArgon2Hidden(async () => {
+      const cm = new CryptoManager(CHAIN_COST);
+      const key = await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
+
+      expect(nativeFactoryCalls).toBe(1);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(WASM_KEY_HEX);
+      expect(wasmArgon2id).toHaveBeenCalledTimes(1);
+      // NEGATIVE: the built-in did not silently answer in hash-wasm's place.
+      expect(await __peekArgon2ProviderForTesting()).not.toBe('node');
+    });
+  });
+
+  it('reports all three causes in one ARGON2_NOT_AVAILABLE, and still clears the cache', async () => {
+    // Two properties in one case, because the second only means anything if the
+    // first held: the composed message must diagnose every link of the chain,
+    // and a rejection must still leave the cache slot empty so a later attempt
+    // can succeed — the file's long-standing transient-recovery property, now
+    // across three providers rather than two.
+    const wasmArgon2id = jest.fn(async () => Buffer.from(WASM_KEY_HEX, 'hex'));
+    let nativeFactoryCalls = 0;
+    let wasmFactoryCalls = 0;
+    jest.unstable_mockModule('argon2', () => {
+      nativeFactoryCalls += 1;
+      throw new Error("Cannot find module 'argon2'");
+    });
+    jest.unstable_mockModule('hash-wasm', () => {
+      wasmFactoryCalls += 1;
+      if (wasmFactoryCalls === 1) {
+        throw new Error("Cannot find module 'hash-wasm'");
+      }
+      return { argon2id: wasmArgon2id };
+    });
+
+    const {
+      CryptoManager,
+      __resetArgon2ModuleCacheForTesting,
+      __peekArgon2ProviderForTesting,
+    } = await import('../crypto-manager');
+    const { CryptoError, CryptoErrorType } = await import('../types');
+    __resetArgon2ModuleCacheForTesting();
+
+    await withNodeBuiltinArgon2Hidden(async () => {
+      const cm = new CryptoManager(CHAIN_COST);
+
+      // Attempt 1: all three links are gone.
+      let caught: unknown;
+      let resolved = false;
+      try {
+        await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
+        resolved = true;
+      } catch (err) {
+        caught = err;
+      }
+      // NEGATIVE: no key came back from a chain with no working provider.
+      expect(resolved).toBe(false);
+      expect(caught).toBeInstanceOf(CryptoError);
+      const error = caught as InstanceType<typeof CryptoError>;
+      expect(error.type).toBe(CryptoErrorType.MEMORY_ERROR);
+      expect(error.code).toBe('ARGON2_NOT_AVAILABLE');
+
+      // The actionable opening sentence is unchanged — `README.md` quotes it
+      // byte-for-byte — and each of the three remedies is named.
+      expect(error.message).toContain(FRIENDLY_MESSAGE_FRAGMENT);
+      expect(error.message).toContain('Node >= 24.7.0');
+      expect(error.message).toContain('hash-wasm');
+      expect(error.message).toContain('PBKDF2');
+
+      // ...and each of the three diagnoses, under its own label.
+      expect(error.message).toContain(
+        "Native error: Cannot find module 'argon2'"
+      );
+      expect(error.message).toContain(
+        'Node built-in error: `node:crypto` exposes no `argon2` function'
+      );
+      expect(error.message).toContain(
+        "WASM error: Cannot find module 'hash-wasm'"
+      );
+
+      expect(nativeFactoryCalls).toBe(1);
+      expect(wasmFactoryCalls).toBe(1);
+      expect(await __peekArgon2ProviderForTesting()).toBeNull();
+
+      // Attempt 2: the rejection was not cached, so a fresh import runs and the
+      // now-working `hash-wasm` answers.
+      const key = await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
+      expect(nativeFactoryCalls).toBe(2);
+      expect(wasmFactoryCalls).toBe(2);
+      expect(await __peekArgon2ProviderForTesting()).toBe('wasm');
+      expect(key.toString('hex')).toBe(WASM_KEY_HEX);
+    });
+  });
+  // --------------------------------------------------------------------------
+  // The adapter itself, driven against a STUBBED `crypto.argon2`.
+  //
+  // The case above drives the REAL built-in and is the honest end-to-end proof,
+  // but it can only run on Node >= 24.7. These three run on every supported
+  // runtime, which is what keeps the adapter's three inner functions (the
+  // `hash` method, the `Promise` executor, the callback) and BOTH sides of its
+  // `if (err)` branch covered on the Node 22 leg where CI measures coverage.
+  // See `withNodeBuiltinArgon2Stub` for the measured numbers.
+  // --------------------------------------------------------------------------
+
+  it('maps every parameter onto the built-in API and copies the bytes it returns', async () => {
+    // A recording stub pins the parameter NAMES; the real known-answer vector
+    // (which is what proves the SEMANTICS — that `memory` counts KiB blocks and
+    // that `passes`/`tagLength` are not transposed) is a separate, unmocked
+    // test. A transposition produces a different digest rather than an error,
+    // so both halves are needed and neither substitutes for the other.
+    const calls: Array<{
+      algorithm: string;
+      parameters: crypto.Argon2Parameters;
+    }> = [];
+    // The stub hands back THIS buffer, then it is scrubbed after the call: the
+    // adapter must have copied, not aliased.
+    const stubOutput = Buffer.alloc(32, 0x5b);
+    const STUB_OUTPUT_HEX = stubOutput.toString('hex');
+    const stub: typeof crypto.argon2 = (algorithm, parameters, callback) => {
+      calls.push({ algorithm, parameters: { ...parameters } });
+      callback(null, stubOutput);
+    };
+
     let wasmFactoryCalls = 0;
     jest.unstable_mockModule('argon2', () => {
       throw new Error("Cannot find module 'argon2'");
     });
     jest.unstable_mockModule('hash-wasm', () => {
       wasmFactoryCalls += 1;
-      return { default: {} };
+      return {
+        argon2id: async (): Promise<Buffer> => Buffer.from(WASM_KEY_HEX, 'hex'),
+      };
     });
 
     const {
@@ -1390,73 +1936,134 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
       __resetArgon2ModuleCacheForTesting,
       __peekArgon2ProviderForTesting,
     } = await import('../crypto-manager');
-    const { CryptoError, CryptoErrorType } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
-    const cm = new CryptoManager(COST);
+    await withNodeBuiltinArgon2Stub(stub, async () => {
+      const cm = new CryptoManager(CHAIN_COST);
+      const key = await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
 
-    let caught: unknown;
-    let resolved = false;
-    try {
-      await cm.deriveKey(PASSWORD, SALT);
-      resolved = true;
-    } catch (err) {
-      caught = err;
-    }
-    // The thing that must NOT have happened: a key came back from a hasher
-    // that cannot hash.
-    expect(resolved).toBe(false);
-    expect(caught).toBeInstanceOf(CryptoError);
-    const error = caught as InstanceType<typeof CryptoError>;
-    expect(error.type).toBe(CryptoErrorType.MEMORY_ERROR);
-    expect(error.code).toBe('ARGON2_NOT_AVAILABLE');
-    // NEGATIVE: not the misleading call-time failure this used to surface.
-    expect(error.code).not.toBe('KEY_DERIVATION_FAILED');
-    expect(error.message).not.toContain('is not a function');
-    // The composed message names the WASM cause in the engine-web wording.
-    expect(error.message).toContain(
-      '`hash-wasm` loaded but exposes no `argon2id` export'
-    );
-    expect(wasmFactoryCalls).toBe(1);
-    // A rejected load is never cached.
-    expect(await __peekArgon2ProviderForTesting()).toBeNull();
+      expect(await __peekArgon2ProviderForTesting()).toBe('node');
+      expect(key.toString('hex')).toBe(STUB_OUTPUT_HEX);
+      expect(calls.length).toBe(1);
+
+      const call = calls[0];
+      expect(call).toBeDefined();
+      if (call !== undefined) {
+        expect(call.algorithm).toBe('argon2id');
+        expect(call.parameters.message).toBe(CHAIN_PASSWORD);
+        expect(
+          Buffer.from(call.parameters.nonce as Uint8Array).equals(CHAIN_SALT)
+        ).toBe(true);
+        expect(call.parameters.memory).toBe(CHAIN_COST.memoryCost);
+        expect(call.parameters.passes).toBe(CHAIN_COST.timeCost);
+        expect(call.parameters.parallelism).toBe(CHAIN_COST.parallelism);
+        expect(call.parameters.tagLength).toBe(32);
+        // NEGATIVES on the two mistakes that would otherwise be silent: KiB
+        // read as bytes, and `passes`/`tagLength` swapped.
+        expect(call.parameters.memory).not.toBe(CHAIN_COST.memoryCost * 1024);
+        expect(call.parameters.tagLength).not.toBe(CHAIN_COST.timeCost);
+      }
+
+      // NEGATIVE: the chain stopped at the built-in.
+      expect(wasmFactoryCalls).toBe(0);
+
+      // The adapter returns a COPY — scrubbing the provider's buffer afterwards
+      // must not reach into the derived key.
+      stubOutput.fill(0x00);
+      expect(key.toString('hex')).toBe(STUB_OUTPUT_HEX);
+      expect(key).not.toBe(stubOutput);
+    });
   });
 
-  it('names BOTH uncallable providers in one ARGON2_NOT_AVAILABLE', async () => {
-    // Neither module is missing — both load and both are useless. The friendly
-    // error must still be the actionable one, and must carry both diagnoses so
-    // the reader can tell "not installed" from "installed but broken".
-    jest.unstable_mockModule('argon2', () => ({}));
-    jest.unstable_mockModule('hash-wasm', () => ({}));
+  it('rejects with the built-in callback error unchanged, and does NOT fall through to hash-wasm', async () => {
+    // A provider that LOADED and then failed at call time is a different
+    // condition from one that could not load, and the two must not be
+    // conflated: the first is a derivation failure, the second is
+    // `ARGON2_NOT_AVAILABLE`. `engine.web.ts` draws the same line, and the
+    // chain deliberately does not retry a later provider after a call-time
+    // failure — native has always behaved this way, and the built-in matches.
+    const CALLBACK_ERROR = 'BUILTIN_CALLBACK_FAILURE_MARKER';
+    const stub: typeof crypto.argon2 = (_algorithm, _parameters, callback) => {
+      callback(new Error(CALLBACK_ERROR), Buffer.alloc(0));
+    };
+
+    let wasmFactoryCalls = 0;
+    jest.unstable_mockModule('argon2', () => {
+      throw new Error("Cannot find module 'argon2'");
+    });
+    jest.unstable_mockModule('hash-wasm', () => {
+      wasmFactoryCalls += 1;
+      return {
+        argon2id: async (): Promise<Buffer> => Buffer.from(WASM_KEY_HEX, 'hex'),
+      };
+    });
 
     const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
       await import('../crypto-manager');
     const { CryptoError, CryptoErrorType } = await import('../types');
     __resetArgon2ModuleCacheForTesting();
 
-    const cm = new CryptoManager(COST);
+    await withNodeBuiltinArgon2Stub(stub, async () => {
+      const cm = new CryptoManager(CHAIN_COST);
 
-    let caught: unknown;
-    let resolved = false;
-    try {
-      await cm.encryptText('both providers are hollow', PASSWORD);
-      resolved = true;
-    } catch (err) {
-      caught = err;
-    }
-    expect(resolved).toBe(false);
-    expect(caught).toBeInstanceOf(CryptoError);
-    const error = caught as InstanceType<typeof CryptoError>;
-    expect(error.type).toBe(CryptoErrorType.MEMORY_ERROR);
-    expect(error.code).toBe('ARGON2_NOT_AVAILABLE');
-    expect(error.message).toContain(
-      '`argon2` loaded but exposes no `hash` function'
-    );
-    expect(error.message).toContain(
-      '`hash-wasm` loaded but exposes no `argon2id` export'
-    );
-    // The actionable guidance is still there.
-    expect(error.message).toContain(FRIENDLY_MESSAGE_FRAGMENT);
-    expect(error.message).toContain('PBKDF2');
+      let caught: unknown;
+      let resolved = false;
+      try {
+        await cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT);
+        resolved = true;
+      } catch (err) {
+        caught = err;
+      }
+
+      // NEGATIVE: no key came back from a provider that reported failure.
+      expect(resolved).toBe(false);
+      expect(caught).toBeInstanceOf(CryptoError);
+      const error = caught as InstanceType<typeof CryptoError>;
+      expect(error.type).toBe(CryptoErrorType.ENCRYPTION_FAILED);
+      expect(error.code).toBe('KEY_DERIVATION_FAILED');
+      // The callback's own error text survives the adapter untouched.
+      expect(error.message).toContain(CALLBACK_ERROR);
+      // NEGATIVE: this is NOT an availability failure — the provider loaded.
+      expect(error.code).not.toBe('ARGON2_NOT_AVAILABLE');
+      // NEGATIVE: and a call-time failure does not silently re-route to WASM,
+      // which would hide a broken runtime behind a slower one.
+      expect(wasmFactoryCalls).toBe(0);
+    });
+  });
+
+  it('rejects rather than throwing when the built-in fails synchronously', async () => {
+    // `crypto.argon2` validates its parameters synchronously and throws
+    // `ERR_OUT_OF_RANGE` before ever reaching the callback. The adapter calls it
+    // INSIDE a `Promise` executor, so that throw becomes a rejection; spelled
+    // any other way it would escape as a synchronous exception from a method
+    // whose signature promises a promise, and `await`ing callers would see an
+    // error their `.catch()` never runs for.
+    const SYNC_ERROR = 'BUILTIN_SYNCHRONOUS_FAILURE_MARKER';
+    const stub: typeof crypto.argon2 = () => {
+      throw new Error(SYNC_ERROR);
+    };
+
+    jest.unstable_mockModule('argon2', () => {
+      throw new Error("Cannot find module 'argon2'");
+    });
+    mockHashWasmUnavailable();
+
+    const { CryptoManager, __resetArgon2ModuleCacheForTesting } =
+      await import('../crypto-manager');
+    const { CryptoError } = await import('../types');
+    __resetArgon2ModuleCacheForTesting();
+
+    await withNodeBuiltinArgon2Stub(stub, async () => {
+      const cm = new CryptoManager(CHAIN_COST);
+
+      // `rejects` is the assertion: a synchronous throw would fail this with an
+      // uncaught exception instead of a rejected promise.
+      await expect(cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT)).rejects.toThrow(
+        CryptoError
+      );
+      await expect(cm.deriveKey(CHAIN_PASSWORD, CHAIN_SALT)).rejects.toThrow(
+        SYNC_ERROR
+      );
+    });
   });
 });

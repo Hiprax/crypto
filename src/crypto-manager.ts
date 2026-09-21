@@ -36,10 +36,11 @@ import { CryptoCore, SECURITY_THRESHOLDS, isValidPassword } from './core.js';
 import { loadArgon2, nodeEngine } from './engine.node.js';
 import type { Argon2Hasher, Argon2Provider } from './engine.node.js';
 
-// The Argon2 lazy-load implementation (native `argon2` → pure-WASM `hash-wasm`
-// fallback) lives in `engine.node.ts` as of the engine refactor. Re-export the
-// internal test-only cache hooks and the provider/hasher types here so existing
-// imports from `./crypto-manager` continue to resolve unchanged.
+// The Argon2 lazy-load implementation (native `argon2` → the runtime's built-in
+// `crypto.argon2` on Node >= 24.7.0 → pure-WASM `hash-wasm`) lives in
+// `engine.node.ts` as of the engine refactor. Re-export the internal test-only
+// cache hooks and the provider/hasher types here so existing imports from
+// `./crypto-manager` continue to resolve unchanged.
 export {
   __resetArgon2ModuleCacheForTesting,
   __peekArgon2ProviderForTesting,
@@ -286,14 +287,15 @@ export class CryptoManager extends CryptoCore {
     }
 
     // Lazy-load an Argon2id hasher on first use. The loader tries the
-    // native `argon2` module first and falls back to the pure-WASM
-    // `hash-wasm` module if native is unavailable; both producers are
-    // RFC 9106 Argon2id implementations and produce bit-identical raw
-    // output for the same parameters, so the fallback never changes
-    // ciphertext compatibility. If BOTH providers fail (no build tools
-    // AND no hash-wasm installed), this throws CryptoError with code
-    // `ARGON2_NOT_AVAILABLE` and an actionable message pointing at all
-    // three fix paths (build tools / hash-wasm / *Sync PBKDF2 methods).
+    // native `argon2` module first, then the runtime's own `crypto.argon2`
+    // (Node >= 24.7.0, no install required), then the pure-WASM `hash-wasm`
+    // module; all three are RFC 9106 Argon2id implementations and produce
+    // bit-identical raw output for the same parameters, so which one answers
+    // never changes ciphertext compatibility. If ALL THREE fail (no build
+    // tools, a Node older than 24.7.0, AND no hash-wasm installed), this
+    // throws CryptoError with code `ARGON2_NOT_AVAILABLE` and an actionable
+    // message naming every fix path (build tools / a newer Node / hash-wasm /
+    // *Sync PBKDF2 methods).
     // We do NOT wrap this in the try/catch below because we want the
     // load failure to bubble up with its own specific error code, not
     // get rewritten as `KEY_DERIVATION_FAILED`.

@@ -49,6 +49,11 @@ import {
 //   parallelism = 1
 //   hashLength  = 32
 //
+// Re-verified 2026-09-21 after the optional `argon2` dependency moved to
+// ^0.45.1: the native adapter still resolves `provider === 'native'` and still
+// derives this exact vector, so the value above is a cross-VERSION invariant
+// too, not only a cross-provider one. The version recorded above is the one
+// the vector was first computed from; it is history, not a pin.
 const KAT_HEX =
   '79fce5dc8932db4e5d85f8d32c1d8f2206188c3c1bcbe5ef555bab13c595567b';
 const KAT_PASSWORD = 'parity-vector-password';

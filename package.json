@@ -74,7 +74,7 @@
   "author": "Hiprax",
   "license": "MIT",
   "optionalDependencies": {
-    "argon2": "^0.44.0",
+    "argon2": "^0.45.1",
     "hash-wasm": "^4.12.0"
   },
   "devDependencies": {
@@ -84,8 +84,8 @@
     "@types/node": "^25.7.0",
     "@typescript-eslint/eslint-plugin": "^8.59.3",
     "@typescript-eslint/parser": "^8.59.3",
-    "@vitest/browser": "^4.1.10",
-    "@vitest/browser-playwright": "^4.1.10",
+    "@vitest/browser": "^4.1.11",
+    "@vitest/browser-playwright": "^4.1.11",
     "cross-env": "^10.1.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.3.0",
@@ -103,7 +103,7 @@
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "js-yaml": "^3.15.0",

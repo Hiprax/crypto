@@ -43,13 +43,32 @@ export {
   // `export *`, and `src/index.ts` re-exports this module rather than
   // `format-core.js`. Omitting them would publish both symbols to browser
   // consumers (via `index.browser.ts`'s `export * from './format-core.js'`)
-  // while hiding them from Node consumers — an asymmetric public API that
-  // type-checks, lints, bundles and tests completely green.
+  // while hiding them from Node consumers, which is an asymmetric public API
+  // that type-checks, lints and bundles completely green.
+  //
+  // It no longer passes the test suite, and that is deliberate. Every symbol
+  // in this block, not only these two, is covered by the class-level guard
+  // `re-exports every format-core symbol from the Node entry, and differs from
+  // the browser entry by exactly utils.js` in
+  // `src/__tests__/esm-smoke.test.ts`: it spawns real Node against the built
+  // `dist/`, compares the export NAMES of `format-core.js`, both entries and
+  // `utils.js`, and reports whichever names went missing. So a constant added
+  // to `format-core.ts` and forgotten here turns that suite red rather than
+  // shipping a half-visible API. Add the name here in the same edit; do not
+  // silence the guard.
   MAX_GCM_PLAINTEXT_BYTES,
   assertGcmPlaintextLimit,
 } from './format-core.js';
 
 // Re-export all types unchanged.
+//
+// NOTE: this second block carries the same hazard as the value block above
+// (named list here, `export *` in `index.browser.ts`) but the guard named
+// there does NOT cover it: a TypeScript type has no runtime binding, so it
+// never appears in the module namespace the probe inspects, and
+// `check:types:browser` only compiles the browser graph, where the type is
+// present. A type added to `format-core.ts` and forgotten here is still
+// silent. Add it in the same edit.
 export type {
   KdfId,
   Argon2idHeaderParams,

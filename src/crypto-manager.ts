@@ -24,6 +24,7 @@ import { pipeline } from 'node:stream/promises';
 import { dirname } from 'node:path';
 import type { CryptoManagerOptions, ProgressCallback } from './types.js';
 import { CryptoError, CryptoErrorType } from './types.js';
+import type { KdfHeaderParams } from './format.js';
 import {
   HEADER_LENGTH,
   KDF_ID_ARGON2ID,
@@ -31,6 +32,7 @@ import {
   hasMagic,
   parseHeader,
   assertGcmPlaintextLimit,
+  DEFAULT_DECRYPT_KDF_LIMITS,
 } from './format.js';
 import { CryptoCore, SECURITY_THRESHOLDS, isValidPassword } from './core.js';
 import { loadArgon2, nodeEngine } from './engine.node.js';
@@ -166,6 +168,12 @@ export class CryptoManager extends CryptoCore {
       memoryCost: SECURITY_THRESHOLDS.HIGH.memoryCost, // 128 MiB
       timeCost: SECURITY_THRESHOLDS.HIGH.timeCost,
       parallelism: 1,
+      // Node's decrypt-side KDF budget. Accepts up to the ULTRA tier
+      // (512 MiB), so every profile this library has ever recommended still
+      // decrypts, while the worst case a hostile header can demand falls from
+      // 4 GiB / ~531 CPU-seconds to 512 MiB / ~5 s. Widened per-field to this
+      // instance's own cost, so it can always read back its own output.
+      decryptKdfLimits: DEFAULT_DECRYPT_KDF_LIMITS.node,
     });
   }
 
@@ -956,6 +964,10 @@ export class CryptoManager extends CryptoCore {
       // value (defaults to 100000 — what every old sync ciphertext used).
       let bodyOffset: number;
       let pbkdf2Iterations: number = this.legacyPbkdf2Iterations;
+      // Non-null exactly when the KDF parameters came from a header, which is
+      // the only case the decrypt cost policy applies to. The legacy v0
+      // fallback leaves it null and derives from trusted instance config.
+      let headerKdfParams: KdfHeaderParams | null = null;
       // For v1 ciphertexts, capture on-disk header bytes verbatim for AAD
       // binding (see decryptText for the deeper rationale on why
       // re-serialising would defeat the purpose).
@@ -969,6 +981,7 @@ export class CryptoManager extends CryptoCore {
         try {
           const parsed = parseHeader(combined);
           this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
+          headerKdfParams = parsed.params;
           if (parsed.params.kind === 'pbkdf2-sha256') {
             pbkdf2Iterations = parsed.params.iterations;
           }
@@ -991,6 +1004,17 @@ export class CryptoManager extends CryptoCore {
       } else {
         this.enforceLegacyMode();
         bodyOffset = 0;
+      }
+
+      // Refuse a header demanding more KDF work than this manager accepts,
+      // before deriving a key and before any temp file exists. Placed OUTSIDE
+      // the header-parse try/catch above: in `legacyMode: 'auto'` that catch
+      // swallows a parse failure and retries the blob as v0, and a policy
+      // rejection must never be swallowed that way. Being out here there is no
+      // allowlist to remember. Guarded on `headerKdfParams` so the v0 fallback,
+      // whose parameters are this instance's own, stays unpoliced.
+      if (headerKdfParams !== null) {
+        this.assertDecryptKdfPolicy(headerKdfParams);
       }
 
       // Validate minimum size
@@ -1564,6 +1588,10 @@ export class CryptoManager extends CryptoCore {
       const fileHandle = await this.openInputHandle(inputPath);
 
       let formatHeaderLen: number;
+      // Non-null exactly when the KDF parameters came from a header, which is
+      // the only case the decrypt cost policy applies to. The legacy v0
+      // fallback leaves it null and derives from trusted instance config.
+      let headerKdfParams: KdfHeaderParams | null = null;
       let argonOverrides:
         | { memoryCost: number; timeCost: number; parallelism: number }
         | undefined;
@@ -1629,6 +1657,7 @@ export class CryptoManager extends CryptoCore {
             }
             const parsed = parseHeader(front);
             this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
+            headerKdfParams = parsed.params;
             if (parsed.params.kind === 'argon2id') {
               argonOverrides = {
                 memoryCost: parsed.params.memoryCost,
@@ -1658,6 +1687,17 @@ export class CryptoManager extends CryptoCore {
         } else {
           this.enforceLegacyMode();
           formatHeaderLen = 0;
+        }
+
+        // Refuse a header demanding more KDF work than this manager accepts,
+        // before deriving a key and before any temp file exists. Placed OUTSIDE
+        // the header-parse try/catch above: in `legacyMode: 'auto'` that catch
+        // swallows a parse failure and retries the blob as v0, and a policy
+        // rejection must never be swallowed that way. Being out here there is no
+        // allowlist to remember. Guarded on `headerKdfParams` so the v0 fallback,
+        // whose parameters are this instance's own, stays unpoliced.
+        if (headerKdfParams !== null) {
+          this.assertDecryptKdfPolicy(headerKdfParams);
         }
 
         // Validate the file is at least large enough for the salt+iv+tag
@@ -2363,6 +2403,10 @@ export class CryptoManager extends CryptoCore {
       // Detect format version.
       let formatHeaderLen: number;
       let pbkdf2Iterations: number = this.legacyPbkdf2Iterations;
+      // Non-null exactly when the KDF parameters came from a header, which is
+      // the only case the decrypt cost policy applies to. The legacy v0
+      // fallback leaves it null and derives from trusted instance config.
+      let headerKdfParams: KdfHeaderParams | null = null;
       // For v1 ciphertexts, capture on-disk header bytes verbatim for AAD
       // binding (see decryptText for the deeper rationale on why
       // re-serialising would defeat the purpose).
@@ -2380,6 +2424,7 @@ export class CryptoManager extends CryptoCore {
           }
           const parsed = parseHeader(front);
           this.assertKdfMatches(parsed, KDF_ID_PBKDF2_SHA256);
+          headerKdfParams = parsed.params;
           if (parsed.params.kind === 'pbkdf2-sha256') {
             pbkdf2Iterations = parsed.params.iterations;
           }
@@ -2402,6 +2447,17 @@ export class CryptoManager extends CryptoCore {
       } else {
         this.enforceLegacyMode();
         formatHeaderLen = 0;
+      }
+
+      // Refuse a header demanding more KDF work than this manager accepts,
+      // before deriving a key and before any temp file exists. Placed OUTSIDE
+      // the header-parse try/catch above: in `legacyMode: 'auto'` that catch
+      // swallows a parse failure and retries the blob as v0, and a policy
+      // rejection must never be swallowed that way. Being out here there is no
+      // allowlist to remember. Guarded on `headerKdfParams` so the v0 fallback,
+      // whose parameters are this instance's own, stays unpoliced.
+      if (headerKdfParams !== null) {
+        this.assertDecryptKdfPolicy(headerKdfParams);
       }
 
       // Validate file size.

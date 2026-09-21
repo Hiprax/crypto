@@ -32,6 +32,9 @@ import {
   KDF_ID_ARGON2ID,
   KDF_ID_PBKDF2_SHA256,
   FORMAT_VERSION,
+  resolveDecryptKdfLimits,
+  assertKdfWithinDecryptLimits,
+  DEFAULT_DECRYPT_KDF_LIMITS,
 } from '../format';
 import type { ParsedHeader } from '../format';
 import { CryptoError, CryptoErrorType } from '../types';
@@ -328,5 +331,106 @@ describe('parseHeader fuzzing harness (Task 12)', () => {
         FUZZ_CONFIG
       );
     });
+  });
+});
+
+describe('decrypt-side KDF cost policy fuzz', () => {
+  // Same shape as the parser fuzz block above: a fixed seed so any failure is
+  // reproducible, and `endOnFailure` so a counterexample is reported rather
+  // than shrunk for minutes.
+  const POLICY_FUZZ_CONFIG: fc.Parameters = {
+    numRuns: 1000,
+    endOnFailure: true,
+    seed: 0xc0ffee,
+  };
+
+  // The invariant: the policy accepts a header if and only if EVERY resolved
+  // bound holds. Stated as an iff, so neither a guard that never fires nor one
+  // that fires spuriously can pass. Magnitudes are generated with
+  // `fc.integer`, which uses its full declared range, rather than a collection
+  // arbitrary whose `maxLength` is only a ceiling.
+  const LIMITS = resolveDecryptKdfLimits(
+    {
+      maxMemoryCost: 2 ** 16,
+      maxTimeCost: 8,
+      maxParallelism: 4,
+      maxWork: 2 ** 18,
+      maxPbkdf2Iterations: 500_000,
+      minWork: 2 ** 10,
+      minPbkdf2Iterations: 100,
+    },
+    DEFAULT_DECRYPT_KDF_LIMITS.node,
+    {
+      memoryCost: 2 ** 14,
+      timeCost: 1,
+      parallelism: 1,
+      pbkdf2Iterations: 1000,
+      legacyPbkdf2Iterations: 100,
+    }
+  );
+
+  it('accepts an Argon2id header exactly when every bound holds', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 8, max: 2 ** 17 }),
+        fc.integer({ min: 1, max: 20 }),
+        fc.integer({ min: 1, max: 8 }),
+        (memoryCost, timeCost, parallelism) => {
+          const work = memoryCost * timeCost;
+          const shouldPass =
+            memoryCost <= LIMITS.maxMemoryCost &&
+            timeCost <= LIMITS.maxTimeCost &&
+            parallelism <= LIMITS.maxParallelism &&
+            work <= LIMITS.maxWork &&
+            work >= LIMITS.minWork;
+
+          const outcome = safelyRun(() =>
+            assertKdfWithinDecryptLimits(
+              { kind: 'argon2id', memoryCost, timeCost, parallelism },
+              LIMITS
+            )
+          );
+
+          if (shouldPass) {
+            expect(outcome.ok).toBe(true);
+            return;
+          }
+          expect(outcome.ok).toBe(false);
+          const error = outcome.error as CryptoError;
+          expect(error).toBeInstanceOf(CryptoError);
+          expect(error.type).toBe(CryptoErrorType.INVALID_INPUT);
+          expect([
+            'KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+            'KDF_COST_BELOW_DECRYPT_MINIMUM',
+          ]).toContain(error.code);
+        }
+      ),
+      POLICY_FUZZ_CONFIG
+    );
+  });
+
+  it('accepts a PBKDF2 header exactly when both iteration bounds hold', () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 1_000_000 }), iterations => {
+        const shouldPass =
+          iterations <= LIMITS.maxPbkdf2Iterations &&
+          iterations >= LIMITS.minPbkdf2Iterations;
+
+        const outcome = safelyRun(() =>
+          assertKdfWithinDecryptLimits(
+            { kind: 'pbkdf2-sha256', iterations },
+            LIMITS
+          )
+        );
+
+        expect(outcome.ok).toBe(shouldPass);
+        if (!shouldPass) {
+          expect((outcome.error as CryptoError).type).toBe(
+            CryptoErrorType.INVALID_INPUT
+          );
+        }
+      }),
+      POLICY_FUZZ_CONFIG
+    );
   });
 });

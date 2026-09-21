@@ -33,6 +33,7 @@ import type {
   ContainerMetadataInput,
   ContainerMetadata,
   DecryptedContainer,
+  ResolvedDecryptKdfLimits,
 } from './types.js';
 import {
   CryptoError,
@@ -57,6 +58,8 @@ import {
   MAX_ARGON2_PARALLELISM,
   MAX_PBKDF2_ITERATIONS,
   assertGcmPlaintextLimit,
+  assertKdfWithinDecryptLimits,
+  resolveDecryptKdfLimits,
 } from './format-core.js';
 import {
   utf8Encode,
@@ -786,11 +789,24 @@ export abstract class CryptoCore {
   protected readonly engine: CryptoEngine;
 
   /**
+   * Resolved ceilings (and optional floors) on the KDF cost this manager will
+   * honour from an untrusted ciphertext header. Every field is concrete; a
+   * floor of `0` means "no floor". See `DecryptKdfLimits` (in `types.ts`) for why this
+   * exists and {@link assertDecryptKdfPolicy} for where it is enforced.
+   */
+  protected readonly decryptKdfLimits: ResolvedDecryptKdfLimits;
+
+  /**
    * @param options - user-supplied manager options (validated here).
    * @param engine - the runtime cryptographic engine.
    * @param defaultProfile - the runtime's default Argon2id cost profile,
    *   used when the corresponding `options` field is omitted (Node injects
-   *   the HIGH tier at `p=1`; the browser injects a lighter 32 MiB profile).
+   *   the HIGH tier at `p=1`; the browser injects a lighter 32 MiB profile),
+   *   plus that runtime's default decrypt-side KDF budget in
+   *   `decryptKdfLimits`. Both subclasses must supply the latter — the browser
+   *   budget is deliberately tighter than Node's, because `hash-wasm` enforces
+   *   no memory ceiling of its own and blocks the calling thread. See
+   *   `DEFAULT_DECRYPT_KDF_LIMITS`.
    */
   constructor(
     options: CryptoManagerOptions,
@@ -799,6 +815,7 @@ export abstract class CryptoCore {
       memoryCost: number;
       timeCost: number;
       parallelism: number;
+      decryptKdfLimits: ResolvedDecryptKdfLimits;
     }
   ) {
     this.engine = engine;
@@ -1043,6 +1060,73 @@ export abstract class CryptoCore {
     // affects v1 ciphertexts only — v0 ciphertexts always use `this.aad`
     // alone (they have no header to bind).
     this.legacyHeaderAad = options.legacyHeaderAad === true;
+
+    // Resolve the decrypt-side KDF budget LAST, because an omitted ceiling
+    // widens to this instance's own cost and that is only known once
+    // `argon2Options` and the PBKDF2 counts above have been defaulted. This is
+    // what guarantees a manager can always decrypt its own output, whatever it
+    // was configured with, so upgrading cannot render stored data unreadable.
+    this.decryptKdfLimits = resolveDecryptKdfLimits(
+      options.decryptKdfLimits,
+      defaultProfile.decryptKdfLimits,
+      {
+        memoryCost: this.argon2Options.memoryCost,
+        timeCost: this.argon2Options.timeCost,
+        parallelism: this.argon2Options.parallelism,
+        pbkdf2Iterations: this.pbkdf2Iterations,
+        legacyPbkdf2Iterations: this.legacyPbkdf2Iterations,
+      }
+    );
+  }
+
+  /**
+   * Refuse a header whose KDF parameters fall outside this manager's decrypt
+   * budget, before any key derivation happens.
+   *
+   * Called by every decrypt path that honours header-derived parameters, from a
+   * position OUTSIDE the `legacyMode` header-parse `try`/`catch`. That placement
+   * is deliberate and load-bearing: in the default `'auto'` mode a
+   * header-parse failure is swallowed and the blob retried as legacy v0, and a
+   * policy rejection must never be swallowed that way. Being outside the catch,
+   * there is no allowlist to remember — compare the explicit
+   * `KDF_PARAMS_OUT_OF_BOUNDS` carve-outs that a check inside the parser would
+   * have needed in four separate places.
+   *
+   * Only ever called with parameters that came FROM a header. The legacy v0
+   * fallback derives from this instance's own configuration, which is trusted
+   * and deliberately unpoliced.
+   *
+   * @param params - KDF parameters decoded from the untrusted header
+   * @param exceedsCode - code for an over-budget header; the v2 container paths
+   *   pass the `CONTAINER_`-prefixed form
+   * @param belowCode - code for a header below an opt-in floor
+   */
+  protected assertDecryptKdfPolicy(
+    params: KdfHeaderParams,
+    exceedsCode?: string,
+    belowCode?: string
+  ): void {
+    assertKdfWithinDecryptLimits(
+      params,
+      this.decryptKdfLimits,
+      exceedsCode,
+      belowCode
+    );
+  }
+
+  /**
+   * Get the decrypt-side KDF budget actually in force on this instance.
+   *
+   * Returns a copy, so a caller mutating the result cannot alter the manager's
+   * policy. These are the RESOLVED values: an omitted option was widened to
+   * this instance's own cost, and the runtime baseline differs between Node and
+   * the browser, so this — not the exported `DEFAULT_DECRYPT_KDF_LIMITS` table —
+   * is the answer to "what will this manager accept?".
+   *
+   * @returns the effective ceilings and floors; a floor of `0` means no floor
+   */
+  public getDecryptKdfLimits(): ResolvedDecryptKdfLimits {
+    return { ...this.decryptKdfLimits };
   }
 
   /**
@@ -1479,6 +1563,10 @@ export abstract class CryptoCore {
       // Detect format version. v1 starts with HPCR magic; otherwise we fall
       // back to v0 if legacyMode allows it.
       let bodyOffset: number;
+      // Non-null exactly when the KDF parameters came from a header, which is
+      // the only case the decrypt cost policy applies to. The legacy v0
+      // fallback below leaves it null and derives from trusted instance config.
+      let headerKdfParams: KdfHeaderParams | null = null;
       let argonOverrides:
         | { memoryCost: number; timeCost: number; parallelism: number }
         | undefined;
@@ -1501,6 +1589,7 @@ export abstract class CryptoCore {
         try {
           const parsed = parseHeader(combined);
           this.assertKdfMatches(parsed, KDF_ID_ARGON2ID);
+          headerKdfParams = parsed.params;
           if (parsed.params.kind === 'argon2id') {
             argonOverrides = {
               memoryCost: parsed.params.memoryCost,
@@ -1536,6 +1625,17 @@ export abstract class CryptoCore {
       } else {
         this.enforceLegacyMode();
         bodyOffset = 0;
+      }
+
+      // Refuse a header demanding more KDF work than this manager accepts,
+      // before deriving a key. Deliberately placed OUTSIDE the header-parse
+      // try/catch above: in `legacyMode: 'auto'` that catch swallows a parse
+      // failure and retries the blob as v0, and a policy rejection must never
+      // be swallowed that way. Being out here, there is no allowlist to
+      // remember. Guarded on `headerKdfParams` so the v0 fallback, whose
+      // parameters are this instance's own, stays unpoliced.
+      if (headerKdfParams !== null) {
+        this.assertDecryptKdfPolicy(headerKdfParams);
       }
 
       // Validate minimum size (after the header, the body is salt + iv + tag).
@@ -2252,6 +2352,20 @@ export abstract class CryptoCore {
     // rejects any v0/v1 blob) BEFORE any Argon2id work — so a malformed or
     // foreign-version input can never trigger a KDF computation.
     const parsed = parseV2Container(container);
+
+    // Refuse a container header demanding more KDF work than this manager
+    // accepts, before deriving the KEK. `parseV2Container` returns a bare
+    // `{ memoryCost, timeCost, parallelism }` with no `kind` discriminant, so
+    // it is adapted to the `KdfHeaderParams` union here rather than widening
+    // the shared helper's parameter type — the discriminated union is what keeps
+    // its Argon2id-vs-PBKDF2 branch exhaustive under `strict`. There is no
+    // `legacyMode` fallback on this path, so no carve-out is needed.
+    this.assertDecryptKdfPolicy(
+      { kind: 'argon2id', ...parsed.argonParams },
+      'CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+      'CONTAINER_KDF_COST_BELOW_DECRYPT_MINIMUM'
+    );
+
     // Must reproduce the exact AAD the producer bound: context string + header
     // (see encryptContainer). A container sealed under a different `aad` value
     // therefore fails the DEK-unwrap GCM tag, giving the configured

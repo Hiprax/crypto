@@ -513,6 +513,121 @@ process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(pro
     }
   });
 
+  it('publishes the decrypt KDF cost policy symmetrically from the Node AND browser entries', () => {
+    // Same asymmetry tripwire as the AES-GCM case above, for the three symbols
+    // the decrypt-side cost policy adds to `format-core.ts`. The name-level
+    // guard below would catch a missing export, but not a broken one — so this
+    // pins live behaviour from BOTH entries: the default table is present and
+    // frozen, the resolver widens an omitted ceiling to the instance's own
+    // cost, and the assertion actually refuses an over-budget header with the
+    // documented code while accepting one exactly at the ceiling.
+    const tmpDir = path.join(
+      TEST_DIR,
+      `kdf-policy-export-${crypto.randomBytes(8).toString('hex')}`
+    );
+    mkdirSync(tmpDir, { recursive: true });
+    const probeFile = path.join(tmpDir, 'probe.mjs');
+
+    const nodeUrl = pathToFileURL(DIST_INDEX).href;
+    const browserUrl = pathToFileURL(DIST_BROWSER_INDEX).href;
+
+    writeFileSync(
+      probeFile,
+      `
+import * as node from ${JSON.stringify(nodeUrl)};
+import * as browser from ${JSON.stringify(browserUrl)};
+
+const problems = [];
+
+for (const [label, mod] of [['node', node], ['browser', browser]]) {
+  const table = mod.DEFAULT_DECRYPT_KDF_LIMITS;
+  if (!table || typeof table !== 'object') {
+    problems.push(label + '.DEFAULT_DECRYPT_KDF_LIMITS=' + typeof table);
+    continue;
+  }
+  if (!Object.isFrozen(table) || !Object.isFrozen(table.node) || !Object.isFrozen(table.browser)) {
+    problems.push(label + ': default table not deeply frozen');
+  }
+  if (typeof mod.resolveDecryptKdfLimits !== 'function') {
+    problems.push(label + '.resolveDecryptKdfLimits=' + typeof mod.resolveDecryptKdfLimits);
+    continue;
+  }
+  if (typeof mod.assertKdfWithinDecryptLimits !== 'function') {
+    problems.push(label + '.assertKdfWithinDecryptLimits=' + typeof mod.assertKdfWithinDecryptLimits);
+    continue;
+  }
+
+  // The resolver must widen an omitted ceiling to the instance's own cost.
+  const own = {
+    memoryCost: 2 ** 21,
+    timeCost: 1,
+    parallelism: 1,
+    pbkdf2Iterations: 1000,
+    legacyPbkdf2Iterations: 100,
+  };
+  const resolved = mod.resolveDecryptKdfLimits(undefined, table.node, own);
+  if (resolved.maxMemoryCost !== 2 ** 21) {
+    problems.push(label + ': resolver did not widen, got ' + resolved.maxMemoryCost);
+  }
+
+  // And the assertion must be live: at the ceiling passes, over it throws.
+  const limits = mod.resolveDecryptKdfLimits(
+    { maxMemoryCost: 2 ** 14, maxTimeCost: 2, maxParallelism: 2, maxWork: 2 ** 15 },
+    table.node,
+    own
+  );
+  try {
+    mod.assertKdfWithinDecryptLimits(
+      { kind: 'argon2id', memoryCost: 2 ** 14, timeCost: 1, parallelism: 1 },
+      limits
+    );
+  } catch {
+    problems.push(label + ': rejected a header exactly at the ceiling');
+  }
+  let code = null;
+  try {
+    mod.assertKdfWithinDecryptLimits(
+      { kind: 'argon2id', memoryCost: 2 ** 14 + 1, timeCost: 1, parallelism: 1 },
+      limits
+    );
+  } catch (err) {
+    code = err && err.code;
+  }
+  if (code !== 'KDF_COST_EXCEEDS_DECRYPT_LIMITS') {
+    problems.push(label + ': over-ceiling code=' + code);
+  }
+}
+
+// The browser budget must be the tighter of the two, on both bounded axes.
+const t = node.DEFAULT_DECRYPT_KDF_LIMITS;
+if (!(t.browser.maxMemoryCost < t.node.maxMemoryCost)) {
+  problems.push('browser maxMemoryCost is not tighter than node');
+}
+if (!(t.browser.maxWork < t.node.maxWork)) {
+  problems.push('browser maxWork is not tighter than node');
+}
+
+process.stdout.write(problems.length === 0 ? 'OK' : 'BAD: ' + JSON.stringify(problems));
+`,
+      'utf8'
+    );
+
+    try {
+      const result = spawnSync(process.execPath, [probeFile], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        windowsHide: true,
+      });
+
+      expect(result.stdout).toContain('OK');
+      expect(result.stdout).not.toContain('BAD');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('re-exports every format-core symbol from the Node entry, and differs from the browser entry by exactly utils.js', () => {
     // The CLASS-level version of the tripwire above. That one pins the two
     // symbols that actually went missing once (`MAX_GCM_PLAINTEXT_BYTES` and

@@ -28,6 +28,9 @@ import {
   FORMAT_VERSION,
   KDF_ID_ARGON2ID,
   KDF_ID_PBKDF2_SHA256,
+  DEFAULT_DECRYPT_KDF_LIMITS,
+  resolveDecryptKdfLimits,
+  assertKdfWithinDecryptLimits,
   MAX_ARGON2_MEMORY_COST,
   MAX_ARGON2_TIME_COST,
   MAX_ARGON2_PARALLELISM,
@@ -515,5 +518,222 @@ describe('format.ts wrapper: preserves the Buffer-only input contract', () => {
       timeCost: 3,
       parallelism: 1,
     });
+  });
+});
+
+describe('decrypt-side KDF cost policy (pure layer)', () => {
+  /**
+   * Local copy of the assertion helper: the one in the error-codes block above
+   * is scoped to that describe, and `jest.config.js`'s `testMatch` collects any
+   * `.ts` under `__tests__/`, so a shared module there would be picked up as a
+   * suite with no tests. Same reason the Argon2-provider helpers are duplicated.
+   */
+  function expectPolicyError(
+    fn: () => unknown,
+    code: string,
+    type?: CryptoErrorType
+  ): void {
+    expect(fn).toThrow(CryptoError);
+    try {
+      fn();
+    } catch (error) {
+      expect((error as CryptoError).code).toBe(code);
+      if (type !== undefined) {
+        expect((error as CryptoError).type).toBe(type);
+      }
+    }
+  }
+
+  const OWN = {
+    memoryCost: 2 ** 14,
+    timeCost: 1,
+    parallelism: 1,
+    pbkdf2Iterations: 1000,
+    legacyPbkdf2Iterations: 100,
+  } as const;
+
+  it('freezes DEFAULT_DECRYPT_KDF_LIMITS recursively so an untyped consumer cannot widen it', () => {
+    expect(Object.isFrozen(DEFAULT_DECRYPT_KDF_LIMITS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_DECRYPT_KDF_LIMITS.node)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_DECRYPT_KDF_LIMITS.browser)).toBe(true);
+    const nodeTable = DEFAULT_DECRYPT_KDF_LIMITS.node as unknown as Record<
+      string,
+      number
+    >;
+    expect(() => {
+      nodeTable['maxMemoryCost'] = 2 ** 22;
+    }).toThrow(TypeError);
+    expect(DEFAULT_DECRYPT_KDF_LIMITS.node.maxMemoryCost).toBe(2 ** 19);
+  });
+
+  it('keeps the browser budget strictly tighter than Node on both bounded axes', () => {
+    expect(DEFAULT_DECRYPT_KDF_LIMITS.browser.maxMemoryCost).toBeLessThan(
+      DEFAULT_DECRYPT_KDF_LIMITS.node.maxMemoryCost
+    );
+    expect(DEFAULT_DECRYPT_KDF_LIMITS.browser.maxWork).toBeLessThan(
+      DEFAULT_DECRYPT_KDF_LIMITS.node.maxWork
+    );
+    // Both floors ship disabled: a floor cannot be defaulted on without
+    // refusing legitimate low-cost ciphertext.
+    expect(DEFAULT_DECRYPT_KDF_LIMITS.node.minWork).toBe(0);
+    expect(DEFAULT_DECRYPT_KDF_LIMITS.browser.minWork).toBe(0);
+  });
+
+  it('accepts every tier this library recommends under the Node default budget', () => {
+    const node = DEFAULT_DECRYPT_KDF_LIMITS.node;
+    // ULTRA (2**19 / t4), HIGH (2**17 / t3), MEDIUM (2**14 / t2), browser (2**15 / t3).
+    for (const [memoryCost, timeCost] of [
+      [2 ** 19, 4],
+      [2 ** 17, 3],
+      [2 ** 14, 2],
+      [2 ** 15, 3],
+    ] as const) {
+      expect(() =>
+        assertKdfWithinDecryptLimits(
+          { kind: 'argon2id', memoryCost, timeCost, parallelism: 1 },
+          node
+        )
+      ).not.toThrow();
+    }
+  });
+
+  it('widens an omitted ceiling to the instance own cost but never narrows it', () => {
+    const resolved = resolveDecryptKdfLimits(
+      undefined,
+      DEFAULT_DECRYPT_KDF_LIMITS.node,
+      { ...OWN, memoryCost: 2 ** 21, timeCost: 40 }
+    );
+    expect(resolved.maxMemoryCost).toBe(2 ** 21);
+    expect(resolved.maxTimeCost).toBe(40);
+    expect(resolved.maxWork).toBe(2 ** 21 * 40);
+    // A cheap instance keeps the runtime baseline rather than shrinking to it.
+    const cheap = resolveDecryptKdfLimits(
+      undefined,
+      DEFAULT_DECRYPT_KDF_LIMITS.node,
+      OWN
+    );
+    expect(cheap.maxMemoryCost).toBe(
+      DEFAULT_DECRYPT_KDF_LIMITS.node.maxMemoryCost
+    );
+    expect(cheap.maxPbkdf2Iterations).toBe(
+      DEFAULT_DECRYPT_KDF_LIMITS.node.maxPbkdf2Iterations
+    );
+  });
+
+  it('honours an explicit ceiling exactly, even below the instance own cost', () => {
+    const resolved = resolveDecryptKdfLimits(
+      { maxMemoryCost: 2 ** 12 },
+      DEFAULT_DECRYPT_KDF_LIMITS.node,
+      { ...OWN, memoryCost: 2 ** 21 }
+    );
+    expect(resolved.maxMemoryCost).toBe(2 ** 12);
+  });
+
+  it('reports the offending axis by name, so a caller knows which limit to raise', () => {
+    const limits = resolveDecryptKdfLimits(
+      {
+        maxMemoryCost: 2 ** 14,
+        maxTimeCost: 2,
+        maxParallelism: 2,
+        maxWork: 2 ** 15,
+      },
+      DEFAULT_DECRYPT_KDF_LIMITS.node,
+      OWN
+    );
+    const cases: ReadonlyArray<[Record<string, number>, RegExp]> = [
+      [{ memoryCost: 2 ** 15, timeCost: 1, parallelism: 1 }, /maxMemoryCost/],
+      [{ memoryCost: 2 ** 12, timeCost: 3, parallelism: 1 }, /maxTimeCost/],
+      [{ memoryCost: 2 ** 12, timeCost: 1, parallelism: 3 }, /maxParallelism/],
+    ];
+    for (const [params, axis] of cases) {
+      expectPolicyError(
+        () =>
+          assertKdfWithinDecryptLimits(
+            {
+              kind: 'argon2id',
+              ...(params as unknown as {
+                memoryCost: number;
+                timeCost: number;
+                parallelism: number;
+              }),
+            },
+            limits
+          ),
+        'KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+        CryptoErrorType.INVALID_INPUT
+      );
+      let message = '';
+      try {
+        assertKdfWithinDecryptLimits(
+          {
+            kind: 'argon2id',
+            ...(params as unknown as {
+              memoryCost: number;
+              timeCost: number;
+              parallelism: number;
+            }),
+          },
+          limits
+        );
+      } catch (error) {
+        message = (error as CryptoError).message;
+      }
+      expect(message).toMatch(axis);
+    }
+  });
+
+  it('never fires a floor that is left at zero', () => {
+    expect(() =>
+      assertKdfWithinDecryptLimits(
+        { kind: 'argon2id', memoryCost: 8, timeCost: 1, parallelism: 1 },
+        DEFAULT_DECRYPT_KDF_LIMITS.node
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertKdfWithinDecryptLimits(
+        { kind: 'pbkdf2-sha256', iterations: 1 },
+        DEFAULT_DECRYPT_KDF_LIMITS.node
+      )
+    ).not.toThrow();
+  });
+
+  it('uses the caller-supplied codes instead of the defaults when given them', () => {
+    // A satisfiable policy: with maxTimeCost at its default of 10 the largest
+    // reachable work is 2 ** 14 * 10 = 163 840, comfortably above the floor.
+    const limits = resolveDecryptKdfLimits(
+      { maxMemoryCost: 2 ** 14, minWork: 2 ** 13 },
+      DEFAULT_DECRYPT_KDF_LIMITS.node,
+      OWN
+    );
+    expectPolicyError(
+      () =>
+        assertKdfWithinDecryptLimits(
+          {
+            kind: 'argon2id',
+            memoryCost: 2 ** 15,
+            timeCost: 1,
+            parallelism: 1,
+          },
+          limits,
+          'CUSTOM_OVER',
+          'CUSTOM_UNDER'
+        ),
+      'CUSTOM_OVER'
+    );
+    expectPolicyError(
+      () =>
+        assertKdfWithinDecryptLimits(
+          {
+            kind: 'argon2id',
+            memoryCost: 2 ** 12,
+            timeCost: 1,
+            parallelism: 1,
+          },
+          limits,
+          'CUSTOM_OVER',
+          'CUSTOM_UNDER'
+        ),
+      'CUSTOM_UNDER'
+    );
   });
 });

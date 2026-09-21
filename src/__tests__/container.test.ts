@@ -648,6 +648,52 @@ describe('v2 container — encrypt input validation', () => {
 // so it must never throw a non-CryptoError and never hang. Pumping random and
 // magic-prefixed byte arrays through it proves the DoS-bounded contract.
 // ===========================================================================
+describe('v2 container — decrypt-side KDF cost policy', () => {
+  it('refuses a container whose header demands more KDF work than the manager accepts, before deriving the KEK', async () => {
+    const cm = new NodeCryptoManager(LOW_COST);
+    const sealed = await cm.encryptContainer(
+      new TextEncoder().encode('payload'),
+      PASSWORD
+    );
+    // Rewrite memoryCost in place. The v2 header reuses the v1 shape, so the
+    // Argon2id memoryCost is the big-endian u32 at offset 6.
+    const tampered = Uint8Array.from(sealed);
+    new DataView(
+      tampered.buffer,
+      tampered.byteOffset,
+      tampered.byteLength
+    ).setUint32(6, 2 ** 21, false);
+    const deriveSpy = jest.spyOn(nodeEngine, 'deriveArgon2id');
+
+    let thrown: unknown;
+    try {
+      await cm.decryptContainer(tampered, PASSWORD);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(CryptoError);
+    const err = thrown as CryptoError;
+    // Container-prefixed code, matching every other container rejection.
+    expect(err.code).toBe('CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS');
+    expect(err.type).toBe(CryptoErrorType.INVALID_INPUT);
+    // The whole point: no key derivation happened.
+    expect(deriveSpy).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('still decrypts a container sealed inside the budget', async () => {
+    const cm = new NodeCryptoManager(LOW_COST);
+    const sealed = await cm.encryptContainer(
+      new TextEncoder().encode('payload'),
+      PASSWORD,
+      { filename: 'a.txt' }
+    );
+    const opened = await cm.decryptContainer(sealed, PASSWORD);
+    expect(new TextDecoder().decode(opened.data)).toBe('payload');
+    expect(opened.meta.filename).toBe('a.txt');
+  }, 60_000);
+});
+
 describe('parseV2Container fuzzing harness', () => {
   const FUZZ_CONFIG: fc.Parameters = {
     numRuns: 1000,

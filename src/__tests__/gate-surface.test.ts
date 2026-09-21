@@ -53,8 +53,8 @@ const VERIFY_GATES = [
 
 /**
  * The ratchet floor. These are the measured `All files` coverage values floored
- * to integers (2026-09-21: statements 96.02, branches 87.37, functions 98.03,
- * lines 96.03 over 27 suites / 1152 tests). The configured thresholds may be
+ * to integers (2026-09-22: statements 96.17, branches 88.03, functions 98.11,
+ * lines 96.18 over 28 suites / 1224 tests). The configured thresholds may be
  * RAISED above these when a run measures higher; they may never fall below
  * them.
  *
@@ -67,7 +67,7 @@ const VERIFY_GATES = [
  */
 const COVERAGE_FLOOR = {
   statements: 96,
-  branches: 87,
+  branches: 88,
   functions: 98,
   lines: 96,
 } as const;

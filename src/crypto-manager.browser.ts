@@ -38,6 +38,7 @@ import type { CryptoManagerOptions, ProgressCallback } from './types.js';
 import { CryptoError, CryptoErrorType } from './types.js';
 import { CryptoCore, SECURITY_THRESHOLDS, isValidPassword } from './core.js';
 import { webEngine } from './engine.web.js';
+import { DEFAULT_DECRYPT_KDF_LIMITS } from './format-core.js';
 
 // Re-export the shared threshold table and the pure password validator so
 // browser consumers importing from this module (and, transitively, from
@@ -103,6 +104,17 @@ export class CryptoManager extends CryptoCore {
       memoryCost: BROWSER_ARGON2_PROFILE.memoryCost,
       timeCost: BROWSER_ARGON2_PROFILE.timeCost,
       parallelism: BROWSER_ARGON2_PROFILE.parallelism,
+      // The browser's decrypt-side KDF budget is deliberately TIGHTER than
+      // Node's (256 MiB / 2 ** 20 KiB-passes against 512 MiB / 2 ** 22).
+      // `hash-wasm` is the only Argon2id provider here, it enforces no memory
+      // ceiling of its own, and it computes synchronously on the calling
+      // thread — so this is the runtime where a large allocation actually
+      // succeeds and freezes the UI. Node's HIGH profile (128 MiB), by far the
+      // most common cross-runtime case, is still accepted; ULTRA (512 MiB) is
+      // not, which is honest rather than restrictive, since even 128 MiB can
+      // exhaust a constrained mobile tab. Raise it explicitly if a browser
+      // consumer must read ULTRA-cost ciphertext.
+      decryptKdfLimits: DEFAULT_DECRYPT_KDF_LIMITS.browser,
     });
   }
 

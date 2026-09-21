@@ -33,13 +33,15 @@ the library at risk.
 
 Use one of these private channels instead:
 
-1. **GitHub Security Advisories (preferred).** Open a draft advisory at
-   <https://github.com/Hiprax/crypto/security/advisories/new>. This is private
-   to the maintainers, free, and gives us a structured workflow for issuing
-   fixes and CVEs. This is the channel we will use to coordinate the fix and
-   disclosure with you.
+1. **GitHub Security Advisories (preferred).** Use the **Report a
+   vulnerability** button on the repository's
+   [Security tab](https://github.com/Hiprax/crypto/security/advisories/new).
+   Private vulnerability reporting is enabled, so this form is open to anyone
+   with a GitHub account, not just maintainers. It is private, free, and gives
+   us a structured workflow for issuing fixes and CVEs. This is the channel we
+   will use to coordinate the fix and disclosure with you.
 2. **Email.** If GitHub's advisory flow is not available to you, send the
-   report to `security@hiprax.dev`. Please include the same information as a
+   report to `security@hiprax.com`. Please include the same information as a
    GitHub advisory would: affected version(s), a clear reproduction (or proof
    of concept), the impact, and any suggested mitigations or patches.
 
@@ -99,6 +101,14 @@ treated as security incidents:
   header parser (`format.ts` / the pure `format-core.ts`) and the v2 container
   parser (`core.ts`) — that allow malformed input to cause crashes, infinite
   loops, out-of-bounds reads, or the wrong KDF / parameters being applied.
+- **Resource amplification from unauthenticated ciphertext parameters.** A
+  ciphertext carries the KDF parameters that produced it, and they cannot be
+  authenticated until after a key has been derived. A small attacker-supplied
+  blob that causes disproportionate CPU, memory, thread or event-loop
+  consumption _before_ authentication is in scope, and is bounded by the
+  wire-format caps together with the per-instance `decryptKdfLimits` budget.
+  This is distinct from the large-input exclusion below: the concern is
+  amplification relative to input size, not cost proportional to it.
 - **Path traversal in the file APIs.** Any path that lets an attacker-supplied
   string write outside the intended directory tree, beyond the documented
   syntactic guarantees of `validatePath`.
@@ -110,7 +120,7 @@ treated as security incidents:
   packages is in scope here, while a defect in Node's own `crypto.argon2`
   belongs to the Node.js project and should be reported through
   <https://github.com/nodejs/node/security>. If it affects how this library
-  *uses* the built-in — wrong parameters, a mishandled error, a key not
+  _uses_ the built-in — wrong parameters, a mishandled error, a key not
   cleared — that part is ours; tell us as well.
 
 ## Out of Scope
@@ -119,11 +129,19 @@ The following are **not** treated as security issues by this project. Please
 file them as regular GitHub issues instead — we still want the bug reports,
 just through the normal channel:
 
-- **Denial of service via large input.** Encrypting a 100 GiB file is going
-  to use a lot of disk and memory; that's not a vulnerability, that's how
-  encryption works. The library streams inputs where possible (see the
-  README "File Encryption" section), but a caller that passes pathologically
-  large inputs is responsible for their own resource limits.
+- **Denial of service via large _legitimate_ input.** Encrypting a 100 GiB
+  file is going to use a lot of disk and memory; that's not a vulnerability,
+  that's how encryption works. The library streams inputs where possible (see
+  the README "File Encryption" section), but a caller that passes
+  pathologically large inputs is responsible for their own resource limits.
+  **This exclusion is about cost proportional to input size only.** Resource
+  _amplification_ — a small attacker-controlled ciphertext causing
+  disproportionate work before authentication — is explicitly **in scope**; see
+  the Scope section above. Two things that remain caller responsibilities even
+  so, and are documented rather than treated as defects: the synchronous
+  PBKDF2 paths run on the calling thread, so they are unsuitable for untrusted
+  input at any iteration count; and the async Argon2id paths share the libuv
+  threadpool, so concurrency control and rate limiting are yours.
 - **Vulnerabilities in transitive dev dependencies.** Issues in `jest`,
   `eslint`, `rimraf`, `typescript` etc. that only affect the development
   toolchain and not the published package are tracked through GitHub Issues
@@ -287,7 +305,7 @@ please call that out explicitly in the report.
   OOM on memory-constrained mobile browsers, and still strictly above OWASP's
   stated minimum configuration on both axes: ≈1.68× its 19 MiB of memory, at
   `t=3` against its `t=2`. Note the library classifies this profile `MEDIUM`,
-  whose *threshold* (16 MiB / `t=2`) does sit below that minimum; the browser
+  whose _threshold_ (16 MiB / `t=2`) does sit below that minimum; the browser
   default itself does not. This is a runtime-specific default, not a
   format change; each ciphertext embeds the exact KDF parameters used, so a
   ciphertext decrypts anywhere that can afford its embedded `memoryCost`.
@@ -332,6 +350,16 @@ please call that out explicitly in the report.
   downgrade to PBKDF2 or to a weaker profile.
   The browser build is unaffected by this: it uses `hash-wasm`
   unconditionally, because Web Crypto has no Argon2id.
+
+- **Decrypt-side KDF budget** (`decryptKdfLimits`, since v1.8.0): the ceilings
+  this library will honour from a ciphertext's own header. Node defaults to
+  `maxMemoryCost: 2 ** 19` (512 MiB), `maxTimeCost: 10`, `maxParallelism: 16`,
+  `maxWork: 2 ** 22` KiB-passes and `maxPbkdf2Iterations: 2_000_000`; the
+  browser build is tighter, at `2 ** 18` and `2 ** 20`, because its only
+  Argon2id provider blocks the calling thread and enforces no memory ceiling of
+  its own. Each omitted ceiling widens to the instance's own configured cost, so
+  a manager can always decrypt its own output. The optional `minWork` /
+  `minPbkdf2Iterations` floors default to off.
 
 See the [README](README.md) for the full parameter reference.
 

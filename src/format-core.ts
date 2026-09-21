@@ -34,6 +34,7 @@
  */
 
 import { CryptoError, CryptoErrorType } from './types.js';
+import type { DecryptKdfLimits, ResolvedDecryptKdfLimits } from './types.js';
 
 /**
  * ASCII "HPCR" — magic bytes that identify v1 ciphertext.
@@ -144,6 +145,335 @@ export const MAX_PBKDF2_ITERATIONS = 10_000_000;
  * @see https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38d.pdf
  */
 export const MAX_GCM_PLAINTEXT_BYTES = 2 ** 36 - 32;
+
+/**
+ * Runtime default decrypt-side KDF budgets: the per-runtime tables that back an
+ * omitted {@link DecryptKdfLimits} field.
+ *
+ * **These are NOT any instance's effective limits.** Each omitted ceiling
+ * resolves to `max(the value here, the instance's own corresponding cost)`, so
+ * a manager configured above a default carries a correspondingly wider budget.
+ * Read the effective values with `getDecryptKdfLimits()`; this table is
+ * exported for introspection and documentation, not as an answer to "what will
+ * my manager accept?".
+ *
+ * **Why the two runtimes differ.** `node` accepts `memoryCost` up to `2 ** 19`
+ * — exactly the `ULTRA` tier — so every profile this library has ever
+ * recommended still decrypts, while the worst case falls from 4 GiB to 512 MiB
+ * (and from ~531 CPU-seconds to ~5 s). `browser` is tighter because it is the
+ * least-defended runtime: `hash-wasm` is its only Argon2id provider, it
+ * enforces no memory ceiling of its own, and it computes synchronously on the
+ * calling thread — so a large allocation there actually succeeds and freezes
+ * the UI. Node's `HIGH` profile (128 MiB), by far the most common cross-runtime
+ * case, is still accepted in the browser; `ULTRA` is not, which is honest
+ * rather than restrictive, since even 128 MiB can exhaust a constrained mobile
+ * tab.
+ *
+ * Frozen recursively, and `as const`, for the same reason `SECURITY_THRESHOLDS`
+ * is: a consumer may introspect the table but must not be able to widen it at
+ * runtime through an untyped reference.
+ */
+export const DEFAULT_DECRYPT_KDF_LIMITS = Object.freeze({
+  node: Object.freeze({
+    maxMemoryCost: 2 ** 19,
+    maxTimeCost: 10,
+    maxParallelism: 16,
+    maxWork: 2 ** 22,
+    maxPbkdf2Iterations: 2_000_000,
+    minWork: 0,
+    minPbkdf2Iterations: 0,
+  }),
+  browser: Object.freeze({
+    maxMemoryCost: 2 ** 18,
+    maxTimeCost: 10,
+    maxParallelism: 16,
+    maxWork: 2 ** 20,
+    maxPbkdf2Iterations: 2_000_000,
+    minWork: 0,
+    minPbkdf2Iterations: 0,
+  }),
+} as const);
+
+/** The instance's own costs, used to widen an omitted ceiling. */
+interface OwnKdfCost {
+  memoryCost: number;
+  timeCost: number;
+  parallelism: number;
+  pbkdf2Iterations: number;
+  legacyPbkdf2Iterations: number;
+}
+
+/** Per-field format-level maximum, used to reject an incoherent explicit limit. */
+const LIMIT_FORMAT_CEILING: Readonly<
+  Record<keyof ResolvedDecryptKdfLimits, number>
+> = Object.freeze({
+  maxMemoryCost: MAX_ARGON2_MEMORY_COST,
+  maxTimeCost: MAX_ARGON2_TIME_COST,
+  maxParallelism: MAX_ARGON2_PARALLELISM,
+  maxWork: MAX_ARGON2_MEMORY_COST * MAX_ARGON2_TIME_COST,
+  maxPbkdf2Iterations: MAX_PBKDF2_ITERATIONS,
+  minWork: MAX_ARGON2_MEMORY_COST * MAX_ARGON2_TIME_COST,
+  minPbkdf2Iterations: MAX_PBKDF2_ITERATIONS,
+});
+
+const CEILING_FIELDS = [
+  'maxMemoryCost',
+  'maxTimeCost',
+  'maxParallelism',
+  'maxWork',
+  'maxPbkdf2Iterations',
+] as const;
+
+const FLOOR_FIELDS = ['minWork', 'minPbkdf2Iterations'] as const;
+
+/**
+ * Validate a caller-supplied {@link DecryptKdfLimits} and resolve every field
+ * to a concrete number.
+ *
+ * Validation lives here rather than inline in the constructor, which is this
+ * codebase's usual shape for option checking, because seven sub-fields times
+ * two checks each would be some 120 lines of duplication for one option. The
+ * error messages keep the house form: they interpolate the offending value,
+ * name the bound, and say what to do.
+ *
+ * Resolution rule: a field the caller omitted becomes
+ * `max(defaults[field], the instance's own corresponding cost)`, so an instance
+ * can always read back its own output. A field the caller set is used exactly
+ * as given — an explicit limit is a deliberate policy statement and is never
+ * silently widened.
+ *
+ * Only `limits` is validated, because it is the only untrusted parameter. The
+ * other two are PRECONDITIONS of the caller: `defaults` must be one of the
+ * frozen tables in {@link DEFAULT_DECRYPT_KDF_LIMITS} and `own` must hold
+ * resolved, already-constructor-validated costs. Passing a malformed value for
+ * either from untyped JavaScript yields `NaN` ceilings, and every comparison
+ * against `NaN` is false, so the resulting policy would accept everything. The
+ * library's own call site always passes a frozen table.
+ *
+ * @param limits - the caller's option value, or `undefined`; the only validated
+ *   parameter
+ * @param defaults - the runtime default table; must be one of the frozen tables
+ *   in {@link DEFAULT_DECRYPT_KDF_LIMITS} (precondition, not validated)
+ * @param own - this instance's own resolved KDF costs (precondition, not
+ *   validated)
+ * @throws CryptoError `INVALID_INPUT` `'INVALID_DECRYPT_KDF_LIMITS'` for a
+ *   non-object, a non-integer, a non-positive ceiling, a negative floor, or a
+ *   floor above its own ceiling (an unsatisfiable policy, caught at
+ *   construction rather than on first decrypt)
+ * @throws CryptoError `INVALID_INPUT` `'DECRYPT_KDF_LIMIT_TOO_LARGE'` for a
+ *   ceiling above the corresponding wire-format cap, which could never bind
+ */
+export function resolveDecryptKdfLimits(
+  limits: DecryptKdfLimits | undefined,
+  defaults: ResolvedDecryptKdfLimits,
+  own: OwnKdfCost
+): ResolvedDecryptKdfLimits {
+  if (limits !== undefined) {
+    if (
+      typeof limits !== 'object' ||
+      limits === null ||
+      Array.isArray(limits)
+    ) {
+      throw new CryptoError(
+        'decryptKdfLimits must be a plain object of numeric limits',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_DECRYPT_KDF_LIMITS'
+      );
+    }
+    for (const field of [...CEILING_FIELDS, ...FLOOR_FIELDS]) {
+      const value = limits[field];
+      if (value === undefined) {
+        continue;
+      }
+      const isFloor = (FLOOR_FIELDS as readonly string[]).includes(field);
+      if (!Number.isInteger(value) || (isFloor ? value < 0 : value <= 0)) {
+        throw new CryptoError(
+          `decryptKdfLimits.${field} must be a ${isFloor ? 'non-negative' : 'positive'} integer`,
+          CryptoErrorType.INVALID_INPUT,
+          'INVALID_DECRYPT_KDF_LIMITS'
+        );
+      }
+      const ceiling = LIMIT_FORMAT_CEILING[field];
+      if (value > ceiling) {
+        throw new CryptoError(
+          `decryptKdfLimits.${field} (${value}) exceeds the wire-format cap of ` +
+            `${ceiling}. No ciphertext can carry a value above that cap, so this ` +
+            `limit could never bind. Use a value between ${isFloor ? 0 : 1} and ${ceiling}.`,
+          CryptoErrorType.INVALID_INPUT,
+          'DECRYPT_KDF_LIMIT_TOO_LARGE'
+        );
+      }
+    }
+  }
+
+  const pick = (
+    field: (typeof CEILING_FIELDS)[number],
+    ownValue: number
+  ): number => limits?.[field] ?? Math.max(defaults[field], ownValue);
+
+  const resolved: ResolvedDecryptKdfLimits = {
+    maxMemoryCost: pick('maxMemoryCost', own.memoryCost),
+    maxTimeCost: pick('maxTimeCost', own.timeCost),
+    maxParallelism: pick('maxParallelism', own.parallelism),
+    maxWork: pick('maxWork', own.memoryCost * own.timeCost),
+    maxPbkdf2Iterations: pick(
+      'maxPbkdf2Iterations',
+      Math.max(own.pbkdf2Iterations, own.legacyPbkdf2Iterations)
+    ),
+    minWork: limits?.minWork ?? defaults.minWork,
+    minPbkdf2Iterations:
+      limits?.minPbkdf2Iterations ?? defaults.minPbkdf2Iterations,
+  };
+
+  // An unsatisfiable policy refuses every ciphertext; say so now rather than
+  // on first decrypt. Checked on the RESOLVED values, because a floor can be
+  // explicit while the ceiling it contradicts came from a default.
+  //
+  // The reachable work ceiling is the LOWER of `maxWork` and
+  // `maxMemoryCost * maxTimeCost`: no header can exceed either, so a `minWork`
+  // above their minimum is unsatisfiable even when it sits under `maxWork`
+  // alone. Comparing against `maxWork` by itself would miss, for example,
+  // `minWork: 2 ** 20` with `maxMemoryCost: 2 ** 12, maxTimeCost: 10`, whose
+  // largest possible work is 40 960.
+  const reachableMaxWork = Math.min(
+    resolved.maxWork,
+    resolved.maxMemoryCost * resolved.maxTimeCost
+  );
+  if (resolved.minWork > reachableMaxWork) {
+    throw new CryptoError(
+      `decryptKdfLimits.minWork (${resolved.minWork}) exceeds the largest work ` +
+        `this policy can accept (${reachableMaxWork}, the lower of maxWork ` +
+        `${resolved.maxWork} and maxMemoryCost x maxTimeCost ` +
+        `${resolved.maxMemoryCost * resolved.maxTimeCost}); no ciphertext could ` +
+        'satisfy both. Lower minWork, or raise maxWork / maxMemoryCost / maxTimeCost.',
+      CryptoErrorType.INVALID_INPUT,
+      'INVALID_DECRYPT_KDF_LIMITS'
+    );
+  }
+  if (resolved.minPbkdf2Iterations > resolved.maxPbkdf2Iterations) {
+    throw new CryptoError(
+      `decryptKdfLimits.minPbkdf2Iterations (${resolved.minPbkdf2Iterations}) ` +
+        `exceeds the effective maxPbkdf2Iterations ` +
+        `(${resolved.maxPbkdf2Iterations}); no ciphertext could satisfy both. ` +
+        'Lower minPbkdf2Iterations or raise maxPbkdf2Iterations.',
+      CryptoErrorType.INVALID_INPUT,
+      'INVALID_DECRYPT_KDF_LIMITS'
+    );
+  }
+
+  return resolved;
+}
+
+/**
+ * Throw unless a header's KDF parameters fall inside `limits`.
+ *
+ * Applied at every decrypt entry point that honours header-derived parameters,
+ * BEFORE any key derivation, temp-file creation or cipher construction, so a
+ * refused ciphertext costs a handful of integer comparisons. Values exactly AT
+ * a ceiling are accepted; only strictly larger ones are refused. A floor of `0`
+ * never fires.
+ *
+ * The message names WHICH ceiling fired, the offending value and the effective
+ * limit, because five ceilings can refuse the same ciphertext and an operator
+ * who raises one only to be stopped by another needs to know which.
+ *
+ * This is a policy check, not an input validator: `params` is a
+ * PRECONDITION of the caller and must already have come from `parseHeader` or
+ * the v2 container parser, both of which have applied the wire-format caps and
+ * the RFC 9106 floor.
+ *
+ * @param params - KDF parameters decoded from an untrusted header
+ * @param limits - the resolved per-instance budget
+ * @param exceedsCode - `CryptoError` code for an over-budget header; defaults
+ *   to `'KDF_COST_EXCEEDS_DECRYPT_LIMITS'`, which every v1 call site in this
+ *   library uses (the v2 container paths pass the `CONTAINER_`-prefixed form)
+ * @param belowCode - `CryptoError` code for a header under an opt-in floor;
+ *   defaults to `'KDF_COST_BELOW_DECRYPT_MINIMUM'`
+ * @throws CryptoError `INVALID_INPUT` when a parameter is outside the budget
+ */
+export function assertKdfWithinDecryptLimits(
+  params: KdfHeaderParams,
+  limits: ResolvedDecryptKdfLimits,
+  exceedsCode: string = 'KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+  belowCode: string = 'KDF_COST_BELOW_DECRYPT_MINIMUM'
+): void {
+  const refuse = (detail: string, code: string): never => {
+    throw new CryptoError(
+      `This ciphertext's header asks for more key-derivation work than this ` +
+        `manager accepts: ${detail}. The parameters travel in the ciphertext ` +
+        'and are not authenticated until after the key is derived, so they are ' +
+        'bounded before any work happens. Raise the corresponding ' +
+        '`decryptKdfLimits` option if this ciphertext is trusted.',
+      CryptoErrorType.INVALID_INPUT,
+      code
+    );
+  };
+
+  if (params.kind === 'argon2id') {
+    const { memoryCost, timeCost, parallelism } = params;
+    if (memoryCost > limits.maxMemoryCost) {
+      refuse(
+        `memoryCost ${memoryCost} KiB exceeds maxMemoryCost ${limits.maxMemoryCost} KiB`,
+        exceedsCode
+      );
+    }
+    if (timeCost > limits.maxTimeCost) {
+      refuse(
+        `timeCost ${timeCost} exceeds maxTimeCost ${limits.maxTimeCost}`,
+        exceedsCode
+      );
+    }
+    if (parallelism > limits.maxParallelism) {
+      refuse(
+        `parallelism ${parallelism} exceeds maxParallelism ${limits.maxParallelism}`,
+        exceedsCode
+      );
+    }
+    const work = memoryCost * timeCost;
+    if (work > limits.maxWork) {
+      refuse(
+        `work (memoryCost x timeCost) ${work} KiB-passes exceeds maxWork ` +
+          `${limits.maxWork} KiB-passes`,
+        exceedsCode
+      );
+    }
+    if (limits.minWork > 0 && work < limits.minWork) {
+      throw new CryptoError(
+        `This ciphertext's header asks for LESS key-derivation work than this ` +
+          `manager accepts: work (memoryCost x timeCost) ${work} KiB-passes is ` +
+          `below minWork ${limits.minWork} KiB-passes. A deliberately cheap ` +
+          'ciphertext removes the KDF cost that rate-limits guessing against a ' +
+          'held passphrase. Lower `decryptKdfLimits.minWork` if this ciphertext ' +
+          'is trusted.',
+        CryptoErrorType.INVALID_INPUT,
+        belowCode
+      );
+    }
+    return;
+  }
+
+  const { iterations } = params;
+  if (iterations > limits.maxPbkdf2Iterations) {
+    refuse(
+      `PBKDF2 iterations ${iterations} exceeds maxPbkdf2Iterations ` +
+        `${limits.maxPbkdf2Iterations}`,
+      exceedsCode
+    );
+  }
+  if (
+    limits.minPbkdf2Iterations > 0 &&
+    iterations < limits.minPbkdf2Iterations
+  ) {
+    throw new CryptoError(
+      `This ciphertext's header asks for LESS key-derivation work than this ` +
+        `manager accepts: PBKDF2 iterations ${iterations} is below ` +
+        `minPbkdf2Iterations ${limits.minPbkdf2Iterations}. Lower ` +
+        '`decryptKdfLimits.minPbkdf2Iterations` if this ciphertext is trusted.',
+      CryptoErrorType.INVALID_INPUT,
+      belowCode
+    );
+  }
+}
 
 /**
  * Throw unless `byteLength` fits within a single AES-GCM invocation.

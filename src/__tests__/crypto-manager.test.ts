@@ -4808,6 +4808,158 @@ describe('CryptoManager', () => {
       expect(cm.getLegacyMode()).toBe('reject');
     });
 
+    it('should reject a non-object decryptKdfLimits', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          decryptKdfLimits: 7 as unknown as Record<string, number>,
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+      expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+    });
+
+    it('should reject an array decryptKdfLimits', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          decryptKdfLimits: [] as unknown as Record<string, number>,
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught?.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+    });
+
+    it.each([
+      ['maxMemoryCost', 0],
+      ['maxMemoryCost', 1.5],
+      ['maxTimeCost', -1],
+      ['maxParallelism', 0],
+      ['maxWork', 0],
+      ['maxPbkdf2Iterations', 0],
+      ['minWork', -1],
+      ['minPbkdf2Iterations', -1],
+    ])(
+      'should reject decryptKdfLimits.%s = %p with INVALID_DECRYPT_KDF_LIMITS',
+      (field, value) => {
+        let caught: CryptoError | undefined;
+        try {
+          new CryptoManager({ decryptKdfLimits: { [field]: value } });
+        } catch (e) {
+          caught = e as CryptoError;
+        }
+        expect(caught).toBeInstanceOf(CryptoError);
+        expect(caught?.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+        expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+        expect(caught?.message).toContain(field);
+      }
+    );
+
+    it.each([
+      ['maxMemoryCost', MAX_ARGON2_MEMORY_COST + 1],
+      ['maxTimeCost', MAX_ARGON2_TIME_COST + 1],
+      ['maxParallelism', MAX_ARGON2_PARALLELISM + 1],
+      ['maxPbkdf2Iterations', MAX_PBKDF2_ITERATIONS + 1],
+    ])(
+      'should reject decryptKdfLimits.%s above the wire-format cap with DECRYPT_KDF_LIMIT_TOO_LARGE',
+      (field, value) => {
+        let caught: CryptoError | undefined;
+        try {
+          new CryptoManager({ decryptKdfLimits: { [field]: value } });
+        } catch (e) {
+          caught = e as CryptoError;
+        }
+        expect(caught).toBeInstanceOf(CryptoError);
+        expect(caught?.code).toBe('DECRYPT_KDF_LIMIT_TOO_LARGE');
+        expect(caught?.type).toBe(CryptoErrorType.INVALID_INPUT);
+      }
+    );
+
+    it('should accept decryptKdfLimits values exactly at the wire-format caps', () => {
+      expect(
+        () =>
+          new CryptoManager({
+            decryptKdfLimits: {
+              maxMemoryCost: MAX_ARGON2_MEMORY_COST,
+              maxTimeCost: MAX_ARGON2_TIME_COST,
+              maxParallelism: MAX_ARGON2_PARALLELISM,
+              maxPbkdf2Iterations: MAX_PBKDF2_ITERATIONS,
+            },
+          })
+      ).not.toThrow();
+    });
+
+    it('should reject a minWork unreachable via maxMemoryCost x maxTimeCost, not just via maxWork', () => {
+      // minWork sits UNDER maxWork, so a naive `minWork > maxWork` check would
+      // pass it — but the largest work these axes can actually produce is
+      // 2 ** 12 * 10 = 40 960, so no ciphertext could ever satisfy the floor.
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          decryptKdfLimits: {
+            maxMemoryCost: 2 ** 12,
+            maxTimeCost: 10,
+            maxWork: 2 ** 22,
+            minWork: 2 ** 20,
+          },
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+      expect(caught?.message).toMatch(/largest work this policy can accept/);
+    });
+
+    it('should reject a FLOOR above the wire-format cap, reporting the floor range', () => {
+      // The floor branch of the range hint (`between 0 and ...`), distinct from
+      // the ceiling branch exercised above.
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          decryptKdfLimits: { minPbkdf2Iterations: MAX_PBKDF2_ITERATIONS + 1 },
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('DECRYPT_KDF_LIMIT_TOO_LARGE');
+      expect(caught?.message).toMatch(/between 0 and/);
+    });
+
+    it('should reject an unsatisfiable policy where a floor exceeds its ceiling', () => {
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          decryptKdfLimits: { maxWork: 2 ** 16, minWork: 2 ** 17 },
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught).toBeInstanceOf(CryptoError);
+      expect(caught?.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+      expect(caught?.message).toMatch(/no ciphertext could satisfy both/);
+    });
+
+    it('should reject a floor that exceeds a ceiling it inherited from the default', () => {
+      // minPbkdf2Iterations is explicit; maxPbkdf2Iterations came from the
+      // runtime default (2_000_000). The check runs on RESOLVED values, so this
+      // unsatisfiable combination is still caught at construction.
+      let caught: CryptoError | undefined;
+      try {
+        new CryptoManager({
+          decryptKdfLimits: { minPbkdf2Iterations: 9_000_000 },
+        });
+      } catch (e) {
+        caught = e as CryptoError;
+      }
+      expect(caught?.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+    });
+
     it('should reject invalid legacyMode', () => {
       expect(
         () =>

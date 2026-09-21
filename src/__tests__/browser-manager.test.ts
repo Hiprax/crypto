@@ -32,7 +32,13 @@ import {
 } from '../crypto-manager.browser';
 import { CryptoError, CryptoErrorType, SecurityLevel } from '../types';
 import { utf8Encode, utf8Decode, bytesToHex } from '../codec';
-import { FORMAT_VERSION, KDF_ID_ARGON2ID, HEADER_LENGTH } from '../format-core';
+import {
+  FORMAT_VERSION,
+  KDF_ID_ARGON2ID,
+  HEADER_LENGTH,
+  packHeader,
+  DEFAULT_DECRYPT_KDF_LIMITS,
+} from '../format-core';
 
 // Test-only low-cost Argon2id profile so many hash-wasm derivations stay cheap
 // while still exercising the REAL KDF path. Never lower production parameters
@@ -305,6 +311,68 @@ describe('browser CryptoManager — Node-only methods throw UNSUPPORTED_IN_BROWS
     mgr.secureClear(buf);
     expect(bytesToHex(buf)).toBe('00'.repeat(buf.length));
     expect(utf8Decode(new Uint8Array(0))).toBe('');
+  });
+});
+
+describe('browser CryptoManager — decrypt-side KDF cost policy', () => {
+  it('ships a budget strictly tighter than Node, because hash-wasm has no ceiling of its own', () => {
+    const limits = new CryptoManager().getDecryptKdfLimits();
+    expect(limits.maxMemoryCost).toBe(
+      DEFAULT_DECRYPT_KDF_LIMITS.browser.maxMemoryCost
+    );
+    expect(limits.maxMemoryCost).toBeLessThan(
+      DEFAULT_DECRYPT_KDF_LIMITS.node.maxMemoryCost
+    );
+    expect(limits.maxWork).toBeLessThan(
+      DEFAULT_DECRYPT_KDF_LIMITS.node.maxWork
+    );
+  });
+
+  it('still accepts a Node HIGH-profile ciphertext, the common cross-runtime case', () => {
+    const limits = new CryptoManager().getDecryptKdfLimits();
+    expect(2 ** 17).toBeLessThanOrEqual(limits.maxMemoryCost);
+    expect(2 ** 17 * 3).toBeLessThanOrEqual(limits.maxWork);
+  });
+
+  it('refuses an ULTRA-cost header by default, naming the axis, and that is deliberate', async () => {
+    const mgr = new CryptoManager(LOW_COST);
+    const header = packHeader(KDF_ID_ARGON2ID, {
+      kind: 'argon2id',
+      memoryCost: 2 ** 19,
+      timeCost: 4,
+      parallelism: 1,
+    });
+    const blob = new Uint8Array(header.length + 32 + 12 + 16 + 1);
+    blob.set(header, 0);
+    crypto.getRandomValues(blob.subarray(header.length));
+
+    let thrown: unknown;
+    try {
+      await mgr.decryptBytes(blob, PASSWORD);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(CryptoError);
+    const err = thrown as InstanceType<typeof CryptoError>;
+    expect(err.code).toBe('KDF_COST_EXCEEDS_DECRYPT_LIMITS');
+    expect(err.type).toBe(CryptoErrorType.INVALID_INPUT);
+    // 512 MiB computed synchronously on the UI thread is a frozen tab, so the
+    // browser budget refuses it rather than trying.
+    expect(err.message).toMatch(/memoryCost/);
+  });
+
+  it('rejects an invalid decryptKdfLimits with the same code Node reports', () => {
+    let thrown: unknown;
+    try {
+      new CryptoManager({ decryptKdfLimits: { maxMemoryCost: 0 } });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CryptoError);
+    const err = thrown as InstanceType<typeof CryptoError>;
+    expect(err.code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+    expect(err.type).toBe(CryptoErrorType.INVALID_INPUT);
   });
 });
 

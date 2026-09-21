@@ -766,6 +766,26 @@ describe('cross-runtime interop — one wire format round-trips Node <-> browser
           type: CryptoErrorType.INVALID_INPUT,
           code: 'TRUNCATED_CONTAINER',
         },
+        {
+          // Distinct from the CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS case above,
+          // and the distinction is the whole point of the decrypt-side policy:
+          // 2 ** 21 KiB is comfortably WITHIN the wire-format cap of 2 ** 22,
+          // so the parser accepts it. It is the per-instance budget that
+          // refuses it, before any key derivation.
+          label:
+            'a memoryCost inside the format cap but over the decrypt budget',
+          mutate: (c): Uint8Array => {
+            const copy = Uint8Array.from(c);
+            new DataView(
+              copy.buffer,
+              copy.byteOffset,
+              copy.byteLength
+            ).setUint32(CONTAINER_MEMORY_COST_OFFSET, 2 ** 21, false);
+            return copy;
+          },
+          type: CryptoErrorType.INVALID_INPUT,
+          code: 'CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+        },
       ];
 
       for (const preAuth of preAuthCases) {

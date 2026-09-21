@@ -54,6 +54,9 @@ import {
   utf8Decode,
   bytesToBase64url,
   base64urlToBytes,
+  packHeader,
+  KDF_ID_ARGON2ID,
+  DEFAULT_DECRYPT_KDF_LIMITS,
 } from '../../../dist/index.browser.js';
 // Committed Node-produced golden vectors. Bundled by Vite as a JSON module.
 import nodeVectors from '../fixtures/node-vectors.json';
@@ -691,6 +694,25 @@ describe('@hiprax/crypto browser build — real headless Chromium (Vitest Browse
         type: CryptoErrorType.INVALID_INPUT,
         code: 'TRUNCATED_CONTAINER',
       },
+      {
+        // Within the wire-format cap (2 ** 22) so the parser accepts it; it is
+        // the browser's own decrypt budget that refuses it. In a real engine
+        // this is the case that matters most, because hash-wasm computes
+        // synchronously on the UI thread and enforces no memory ceiling itself.
+        label:
+          'a memoryCost inside the format cap but over the browser decrypt budget',
+        mutate: (c): Uint8Array => {
+          const copy = Uint8Array.from(c);
+          new DataView(copy.buffer, copy.byteOffset, copy.byteLength).setUint32(
+            CONTAINER_MEMORY_COST_OFFSET,
+            2 ** 21,
+            false
+          );
+          return copy;
+        },
+        type: CryptoErrorType.INVALID_INPUT,
+        code: 'CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+      },
     ];
 
     for (const preAuth of preAuthCases) {
@@ -707,6 +729,53 @@ describe('@hiprax/crypto browser build — real headless Chromium (Vitest Browse
         );
       });
     }
+
+    it('refuses an over-budget v1 ciphertext on decryptBytes AND decryptText, in a real engine', async () => {
+      // The in-memory path is the most used isomorphic surface, so it gets its
+      // own real-Chromium proof rather than relying on the container table.
+      const header = packHeader(KDF_ID_ARGON2ID, {
+        kind: 'argon2id',
+        memoryCost: 2 ** 21,
+        timeCost: 1,
+        parallelism: 1,
+      });
+      const blob = new Uint8Array(header.length + 32 + 12 + 16 + 1);
+      blob.set(header, 0);
+      crypto.getRandomValues(blob.subarray(header.length));
+
+      const invocations: Array<() => Promise<unknown>> = [
+        (): Promise<Uint8Array> => cm.decryptBytes(blob, PASSWORD),
+        (): Promise<string> => cm.decryptText(bytesToBase64url(blob), PASSWORD),
+      ];
+      for (const invoke of invocations) {
+        let thrown: unknown;
+        try {
+          await invoke();
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(CryptoError);
+        const err = thrown as CryptoError;
+        expect(err.code).toBe('KDF_COST_EXCEEDS_DECRYPT_LIMITS');
+        expect(err.type).toBe(CryptoErrorType.INVALID_INPUT);
+        expect(err.message).toMatch(/memoryCost/);
+      }
+    });
+
+    it('exposes a browser budget tighter than Node on both bounded axes', () => {
+      const limits = new CryptoManager().getDecryptKdfLimits();
+      expect(limits.maxMemoryCost).toBe(
+        DEFAULT_DECRYPT_KDF_LIMITS.browser.maxMemoryCost
+      );
+      expect(DEFAULT_DECRYPT_KDF_LIMITS.browser.maxMemoryCost).toBeLessThan(
+        DEFAULT_DECRYPT_KDF_LIMITS.node.maxMemoryCost
+      );
+      expect(DEFAULT_DECRYPT_KDF_LIMITS.browser.maxWork).toBeLessThan(
+        DEFAULT_DECRYPT_KDF_LIMITS.node.maxWork
+      );
+      // Node's HIGH profile, the common cross-runtime case, still fits.
+      expect(2 ** 17 * 3).toBeLessThanOrEqual(limits.maxWork);
+    });
 
     it('does not open a container sealed under a different `aad`', async () => {
       const appA = new CryptoManager({ ...LOW_COST, aad: 'application-A' });

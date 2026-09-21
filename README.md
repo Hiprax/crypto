@@ -16,16 +16,16 @@
 
 ## Contents
 
-| | |
-| --- | --- |
-| **Getting started** | [Features](#-features) · [Installation](#-installation) · [Module system](#module-system) · [Argon2 providers](#argon2-providers-native-node-built-in-wasm) · [Browser build](#browser-build) · [CommonJS interop](#commonjs-interop) · [Quick Start](#-quick-start) |
-| **Reference** | [API Reference](#-api-reference) · [Constructor options](#constructor) · [Methods](#methods) · [Types and enums](#types-and-enums) · [Utility functions](#utility-functions) · [Wire-format and codec exports](#wire-format-and-codec-exports) · [Full export surface](#full-export-surface-at-a-glance) |
-| **Runtimes** | [Isomorphic API & browser support](#-isomorphic-api--browser-support) · [Cross-runtime interop](#cross-runtime-interop) · [Browser Argon2id profile](#browser-argon2id-profile-32-mib-default-and-the-128-mib-decrypt-caveat) · [CSP for WASM](#content-security-policy-wasm) · [Node-only methods in the browser](#node-only-methods-throw-in-the-browser) |
-| **Formats** | [Ciphertext format (v1)](#ciphertext-format-v1) · [Container mode (v2)](#-container-mode-v2-envelope) · [Container format (v2)](#container-format-v2) · [Telling the formats apart](#telling-the-formats-apart) |
-| **Configuration** | [Sync vs async](#asynchronous-vs-synchronous-operations) · [Progress callbacks](#progress-callbacks-for-file-ops) · [Security levels](#security-levels) · [Password requirements](#password-requirements) |
-| **Security** | [Security features](#-security-features) · [(key, IV) reuse boundary](#aes-gcm-key-iv-reuse--security-boundary-for-the-low-level-api) · [Post-quantum security](#-post-quantum-security) · [Threat model](#-threat-model) · [SECURITY.md](SECURITY.md) |
-| **Errors** | [Error handling](#-error-handling) · [Error types](#error-types) · [AES-GCM size limit](#the-aes-gcm-per-invocation-size-limit) · [Container error codes](#container-error-codes) |
-| **Project** | [Testing](#-testing) · [Benchmarks](#-benchmarks) · [Development](#-development) · [Contributing](#-contributing) · [Changelog](CHANGELOG.md) · [License](#-license) |
+|                     |                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Getting started** | [Features](#-features) · [Installation](#-installation) · [Module system](#module-system) · [Argon2 providers](#argon2-providers-native-node-built-in-wasm) · [Browser build](#browser-build) · [CommonJS interop](#commonjs-interop) · [Quick Start](#-quick-start)                                                                                        |
+| **Reference**       | [API Reference](#-api-reference) · [Constructor options](#constructor) · [Methods](#methods) · [Types and enums](#types-and-enums) · [Utility functions](#utility-functions) · [Wire-format and codec exports](#wire-format-and-codec-exports) · [Full export surface](#full-export-surface-at-a-glance)                                                    |
+| **Runtimes**        | [Isomorphic API & browser support](#-isomorphic-api--browser-support) · [Cross-runtime interop](#cross-runtime-interop) · [Browser Argon2id profile](#browser-argon2id-profile-32-mib-default-and-the-128-mib-decrypt-caveat) · [CSP for WASM](#content-security-policy-wasm) · [Node-only methods in the browser](#node-only-methods-throw-in-the-browser) |
+| **Formats**         | [Ciphertext format (v1)](#ciphertext-format-v1) · [Container mode (v2)](#-container-mode-v2-envelope) · [Container format (v2)](#container-format-v2) · [Telling the formats apart](#telling-the-formats-apart)                                                                                                                                             |
+| **Configuration**   | [Sync vs async](#asynchronous-vs-synchronous-operations) · [Progress callbacks](#progress-callbacks-for-file-ops) · [Security levels](#security-levels) · [Password requirements](#password-requirements)                                                                                                                                                   |
+| **Security**        | [Security features](#-security-features) · [(key, IV) reuse boundary](#aes-gcm-key-iv-reuse--security-boundary-for-the-low-level-api) · [Post-quantum security](#-post-quantum-security) · [Threat model](#-threat-model) · [SECURITY.md](SECURITY.md)                                                                                                      |
+| **Errors**          | [Error handling](#-error-handling) · [Error types](#error-types) · [AES-GCM size limit](#the-aes-gcm-per-invocation-size-limit) · [Container error codes](#container-error-codes)                                                                                                                                                                           |
+| **Project**         | [Testing](#-testing) · [Benchmarks](#-benchmarks) · [Development](#-development) · [Contributing](#-contributing) · [Changelog](CHANGELOG.md) · [License](#-license)                                                                                                                                                                                        |
 
 ---
 
@@ -41,7 +41,7 @@
 - ✅ **Strong password** validation with detailed feedback
 - 🔄 **Cross-platform** compatibility
 - 📝 **Full TypeScript** support with strict typing
-- 🧪 **Comprehensive testing** — 1,186 tests: 1,152 in the Node suite (27 files, Jest) plus 34 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (96% statements / 87% branches / 98% functions / 96% lines)
+- 🧪 **Comprehensive testing** — 1,261 tests: 1,224 in the Node suite (28 files, Jest) plus 37 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (96% statements / 88% branches / 98% functions / 96% lines)
 - 🚀 **Modern ES modules** with tree-shaking support
 - 🔒 **Security-focused** with constant-time comparisons
 - 🔑 **Default passphrase** support for simplified usage
@@ -316,22 +316,25 @@ const crypto = new CryptoManager(options?: CryptoManagerOptions);
 - `pbkdf2Iterations` (number): PBKDF2 iteration count for sync key derivation (default: **600000** — matches OWASP 2023+ recommendation for PBKDF2-HMAC-SHA256). The chosen value is embedded in every v1 ciphertext header produced by sync paths so it travels with the ciphertext and decryption remains correct even if you change the default later. Must be a positive integer.
 - `legacyPbkdf2Iterations` (number): PBKDF2 iteration count assumed when decrypting **legacy v0** sync ciphertexts (those produced before the versioned ciphertext format and which carry no embedded iteration count). Default: 100000 — the value baked into every v0 sync ciphertext produced by versions of this library prior to 0.11.0. Override only if you have legacy data that was produced with a non-default iteration count. Has no effect on v1 ciphertexts.
 - `skipPasswordValidation` (boolean): When `true`, the constructor skips strength validation of `defaultPassphrase` only (default: `false`). This does **not** disable encryption-time password validation, and does **not** disable Unicode NFC normalisation — use it solely to construct a manager for decrypting legacy data whose password predates the current strength rules. See [Password Requirements](#password-requirements).
+- `decryptKdfLimits` (object): Ceilings — and optional floors — on the KDF cost this manager will honour from a **ciphertext's own header** when decrypting. A ciphertext carries the Argon2id/PBKDF2 parameters that produced it, and those bytes are not authenticated until after a key has been derived, so they control how much work an attacker can make you do before you can reject their input. Defaults to a generous but bounded budget (Node: `maxMemoryCost: 2 ** 19` = 512 MiB, `maxTimeCost: 10`, `maxParallelism: 16`, `maxWork: 2 ** 22` KiB-passes, `maxPbkdf2Iterations: 2_000_000`; the browser build is tighter still at `2 ** 18` / `2 ** 20`). Each omitted ceiling widens to _this instance's own_ cost, so a manager can always decrypt its own output. See [Decrypting untrusted ciphertext](#decrypting-untrusted-ciphertext).
 - `legacyHeaderAad` (boolean): Backward-compat shim for v1 ciphertexts produced by **v1.0.0** (default: `false`). When `true`, v1 ciphertext AAD reverts to the v1.0.0 format (just `aad`, header bytes not bound) so v1.0.0-produced ciphertexts still decrypt; the default `false` binds the header bytes into the AAD. Affects v1 ciphertexts only (v0 always uses `aad` alone). Leave `false` for new code; use only as a temporary migration aid. See [Migration: v1.0.0 → v1.1.0](#migration-v100--v110).
 
 **Every option is validated in the constructor, so a misconfiguration fails at construction rather than at first use.** Each rejection is a `CryptoError` with a specific `code`:
 
-| Rejected value | `code` | `type` |
-| --- | --- | --- |
-| `memoryCost` not a positive integer / above `2 ** 22` / below `8 * parallelism` | `INVALID_MEMORY_COST` / `MEMORY_COST_TOO_LARGE` / `MEMORY_COST_TOO_SMALL` | `INVALID_INPUT` |
-| `timeCost` not a positive integer / above `100` | `INVALID_TIME_COST` / `TIME_COST_TOO_LARGE` | `INVALID_INPUT` |
-| `parallelism` not a positive integer / above `64` | `INVALID_PARALLELISM` / `PARALLELISM_TOO_LARGE` | `INVALID_INPUT` |
-| `pbkdf2Iterations` not a positive integer / above `10_000_000` | `INVALID_PBKDF2_ITERATIONS` / `PBKDF2_ITERATIONS_TOO_LARGE` | `INVALID_INPUT` |
-| `legacyPbkdf2Iterations` not a positive integer / above `10_000_000` | `INVALID_LEGACY_PBKDF2_ITERATIONS` / `LEGACY_PBKDF2_ITERATIONS_TOO_LARGE` | `INVALID_INPUT` |
-| `legacyMode` not one of `'auto'`/`'strict'`/`'reject'` | `INVALID_LEGACY_MODE` | `INVALID_INPUT` |
-| `aad` not a string | `INVALID_AAD` | `INVALID_INPUT` |
-| `defaultPassphrase` too weak (unless `skipPasswordValidation: true`) | `WEAK_PASSWORD` | `INVALID_PASSWORD` |
+| Rejected value                                                                                                                                                                                                                                                                                                 | `code`                                                                    | `type`             |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------ |
+| `memoryCost` not a positive integer / above `2 ** 22` / below `8 * parallelism`                                                                                                                                                                                                                                | `INVALID_MEMORY_COST` / `MEMORY_COST_TOO_LARGE` / `MEMORY_COST_TOO_SMALL` | `INVALID_INPUT`    |
+| `timeCost` not a positive integer / above `100`                                                                                                                                                                                                                                                                | `INVALID_TIME_COST` / `TIME_COST_TOO_LARGE`                               | `INVALID_INPUT`    |
+| `parallelism` not a positive integer / above `64`                                                                                                                                                                                                                                                              | `INVALID_PARALLELISM` / `PARALLELISM_TOO_LARGE`                           | `INVALID_INPUT`    |
+| `pbkdf2Iterations` not a positive integer / above `10_000_000`                                                                                                                                                                                                                                                 | `INVALID_PBKDF2_ITERATIONS` / `PBKDF2_ITERATIONS_TOO_LARGE`               | `INVALID_INPUT`    |
+| `legacyPbkdf2Iterations` not a positive integer / above `10_000_000`                                                                                                                                                                                                                                           | `INVALID_LEGACY_PBKDF2_ITERATIONS` / `LEGACY_PBKDF2_ITERATIONS_TOO_LARGE` | `INVALID_INPUT`    |
+| `legacyMode` not one of `'auto'`/`'strict'`/`'reject'`                                                                                                                                                                                                                                                         | `INVALID_LEGACY_MODE`                                                     | `INVALID_INPUT`    |
+| `aad` not a string                                                                                                                                                                                                                                                                                             | `INVALID_AAD`                                                             | `INVALID_INPUT`    |
+| `defaultPassphrase` too weak (unless `skipPasswordValidation: true`)                                                                                                                                                                                                                                           | `WEAK_PASSWORD`                                                           | `INVALID_PASSWORD` |
+| `decryptKdfLimits` not a plain object / a ceiling that is not a positive integer / a floor that is negative / a floor above the largest value its ceilings can actually reach (`min(maxWork, maxMemoryCost × maxTimeCost)`, so an unsatisfiable policy is caught at construction rather than on first decrypt) | `INVALID_DECRYPT_KDF_LIMITS`                                              | `INVALID_INPUT`    |
+| any `decryptKdfLimits` field — ceiling **or** floor — above the corresponding wire-format cap (no header could carry such a value, so the limit could never bind)                                                                                                                                              | `DECRYPT_KDF_LIMIT_TOO_LARGE`                                             | `INVALID_INPUT`    |
 
-The `memoryCost >= 8 * parallelism` floor is RFC 9106 §3.1 and is checked on the *resolved* values, after defaults are applied — so `new CryptoManager({ memoryCost: 256, parallelism: 64 })` is rejected with `MEMORY_COST_TOO_SMALL` (256 < 512), while raising `parallelism` alone is fine because the 128 MiB default clears the floor for every legal `parallelism`. The three upper bounds mirror the wire-format DoS caps enforced by `parseHeader`: a value above them would produce a ciphertext this library then refuses to decrypt.
+The `memoryCost >= 8 * parallelism` floor is RFC 9106 §3.1 and is checked on the _resolved_ values, after defaults are applied — so `new CryptoManager({ memoryCost: 256, parallelism: 64 })` is rejected with `MEMORY_COST_TOO_SMALL` (256 < 512), while raising `parallelism` alone is fine because the 128 MiB default clears the floor for every legal `parallelism`. The three upper bounds mirror the wire-format DoS caps enforced by `parseHeader`: a value above them would produce a ciphertext this library then refuses to decrypt.
 
 #### Methods
 
@@ -823,7 +826,7 @@ console.log('Extension:', fileInfo.extension);
 console.log('Is Text:', fileInfo.isTextFile);
 ```
 
-> **Sizing random secrets for a post-quantum margin.** `generateRandomString` and `generateRandomHex` draw from the OS CSPRNG, so their strength is purely a function of length. Grover's algorithm halves the effective entropy of a random secret against a quantum adversary, so to preserve a 128-bit post-quantum margin, size bearer secrets (API keys, session tokens, capability URLs) at **256 bits**: `generateRandomHex(64)` (64 hex chars) or `generateRandomString(44)` (≈262 bits). The defaults (32 chars) are ample for identifiers and classical threat models. `generateUUID` output carries 122 random bits and is designed as a collision-resistant *identifier* — do not use it as an unguessable bearer token where post-quantum unpredictability matters. See [Post-Quantum Security](#-post-quantum-security).
+> **Sizing random secrets for a post-quantum margin.** `generateRandomString` and `generateRandomHex` draw from the OS CSPRNG, so their strength is purely a function of length. Grover's algorithm halves the effective entropy of a random secret against a quantum adversary, so to preserve a 128-bit post-quantum margin, size bearer secrets (API keys, session tokens, capability URLs) at **256 bits**: `generateRandomHex(64)` (64 hex chars) or `generateRandomString(44)` (≈262 bits). The defaults (32 chars) are ample for identifiers and classical threat models. `generateUUID` output carries 122 random bits and is designed as a collision-resistant _identifier_ — do not use it as an unguessable bearer token where post-quantum unpredictability matters. See [Post-Quantum Security](#-post-quantum-security).
 
 ### Wire-format and codec exports
 
@@ -887,17 +890,18 @@ Three notes that decide whether code written against these behaves the same in b
   ```typescript
   const bytes = await cm.encryptBytes(plaintext, password); // Uint8Array, starts "HPCR"
 
-  hasMagic(bytes);                 // Node entry: false (!)   Browser entry: true
-  parseHeader(bytes);              // Node entry: THROWS INVALID_HEADER_INPUT
-  hasMagic(Buffer.from(bytes));    // Node entry: true
+  hasMagic(bytes); // Node entry: false (!)   Browser entry: true
+  parseHeader(bytes); // Node entry: THROWS INVALID_HEADER_INPUT
+  hasMagic(Buffer.from(bytes)); // Node entry: true
   parseHeader(Buffer.from(bytes)); // Node entry: the parsed header
-  cm.inspectHeader(bytes);         // works on BOTH entries — prefer this
+  cm.inspectHeader(bytes); // works on BOTH entries — prefer this
   ```
 
   The contract is preserved on purpose (these two were `Buffer`-typed long before the
   browser build existed). For code that must behave identically in both runtimes, use the
   `inspectHeader` **method**, or compare against `MAGIC_BYTES` element-wise; see
   [Telling the formats apart](#telling-the-formats-apart).
+
 - **The codecs are byte-for-byte compatible with the Node `Buffer` equivalents**, leniency
   included: `base64urlToBytes` terminates at `=`, skips non-alphabet code units (so
   line-wrapped input decodes), accepts the standard `+`/`/` alphabet as aliases, and
@@ -909,15 +913,16 @@ Three notes that decide whether code written against these behaves the same in b
 
 ### Full export surface at a glance
 
-| | Node entry | Browser entry |
-| --- | --- | --- |
-| Runtime bindings | **53** (52 named + `default`) | **34** (33 named + `default`) |
-| `CryptoManager`, `SECURITY_THRESHOLDS`, `isValidPassword`, `CONTAINER_VERSION` | ✅ | ✅ |
-| `CryptoError`, `CryptoErrorType`, `SecurityLevel`, `EncryptionAlgorithm` | ✅ | ✅ |
-| Wire-format constants + `hasMagic`/`packHeader`/`parseHeader` | ✅ (`Buffer`-typed) | ✅ (`Uint8Array`-typed) |
-| Codecs (`bytesToBase64url`, …) | ✅ | ✅ |
-| The 19 `utils` helpers (`validatePath`, `sha256`, `sleep`, …) | ✅ | ❌ Node-only (`node:fs`/`node:path`) |
-| `EncryptionResult`, `ValidatePathOptions` (types) | ✅ | ❌ Node-only |
+|                                                                                                              | Node entry                    | Browser entry                        |
+| ------------------------------------------------------------------------------------------------------------ | ----------------------------- | ------------------------------------ |
+| Runtime bindings                                                                                             | **56** (55 named + `default`) | **37** (36 named + `default`)        |
+| `CryptoManager`, `SECURITY_THRESHOLDS`, `isValidPassword`, `CONTAINER_VERSION`                               | ✅                            | ✅                                   |
+| `CryptoError`, `CryptoErrorType`, `SecurityLevel`, `EncryptionAlgorithm`                                     | ✅                            | ✅                                   |
+| Wire-format constants + `hasMagic`/`packHeader`/`parseHeader`                                                | ✅ (`Buffer`-typed)           | ✅ (`Uint8Array`-typed)              |
+| Decrypt KDF policy (`DEFAULT_DECRYPT_KDF_LIMITS`, `resolveDecryptKdfLimits`, `assertKdfWithinDecryptLimits`) | ✅                            | ✅                                   |
+| Codecs (`bytesToBase64url`, …)                                                                               | ✅                            | ✅                                   |
+| The 19 `utils` helpers (`validatePath`, `sha256`, `sleep`, …)                                                | ✅                            | ❌ Node-only (`node:fs`/`node:path`) |
+| `EncryptionResult`, `ValidatePathOptions` (types)                                                            | ✅                            | ❌ Node-only                         |
 
 Count them yourself against a build:
 
@@ -954,7 +959,10 @@ const ct = await cm.encryptText('secret', 'MySecureP@ssw0rd123!');
 // ...transmit `ct` (a base64url string) to a Node service...
 
 // In Node:
-const plaintext = await new CryptoManager().decryptText(ct, 'MySecureP@ssw0rd123!');
+const plaintext = await new CryptoManager().decryptText(
+  ct,
+  'MySecureP@ssw0rd123!'
+);
 // -> 'secret'   (Node reads the KDF params embedded in the ciphertext header)
 ```
 
@@ -974,14 +982,20 @@ import { CryptoManager } from '@hiprax/crypto';
 const cm = new CryptoManager();
 
 // Encrypt a File/Blob the user selected, entirely client-side:
-async function encryptFileInBrowser(file: File, password: string): Promise<Blob> {
+async function encryptFileInBrowser(
+  file: File,
+  password: string
+): Promise<Blob> {
   const plaintext = new Uint8Array(await file.arrayBuffer());
   const ct = await cm.encryptBytes(plaintext, password); // Uint8Array
   return new Blob([ct], { type: 'application/octet-stream' });
 }
 
 // Decrypt back to a Blob for download:
-async function decryptToBlob(ciphertext: Uint8Array, password: string): Promise<Blob> {
+async function decryptToBlob(
+  ciphertext: Uint8Array,
+  password: string
+): Promise<Blob> {
   const plaintext = await cm.decryptBytes(ciphertext, password);
   return new Blob([plaintext]);
 }
@@ -993,7 +1007,7 @@ Browser large-file handling is **in-memory** (read the file, `encryptBytes`/`dec
 
 The Node default is 128 MiB Argon2id (`memoryCost = 2 ** 17`, classified `HIGH`). The **browser default is a lighter 32 MiB** profile (`memoryCost = 2 ** 15`, `timeCost = 3`, `parallelism = 1`) — which still **strictly exceeds OWASP's stated minimum configuration on both axes**: 32 MiB against its 19 MiB, at `t=3` against its `t=2`. That is ≈1.68x the minimum's memory with an extra iteration on top. It is nevertheless classified `MEDIUM` by `getSecurityLevel()`, because 32 MiB is below this library's own `HIGH` threshold. This is a runtime-specific **default**, not a format change; you can pass an explicit `memoryCost`, and every ciphertext carries its own KDF parameters on the wire.
 
-> **⚠️ Decrypt-side memory caveat.** Because each ciphertext header embeds the *exact* `memoryCost` used to derive its key, decrypting a ciphertext produced at 128 MiB requires allocating 128 MiB — which can OOM a memory-constrained mobile browser tab (iOS Safari WASM ceilings are as low as ~64–120 MB). **Data intended to be decrypted in browsers should be encrypted at ≤ the browser memory profile** (e.g. the 32 MiB browser default). The wire format is identical across runtimes; only the affordable KDF cost differs. Node → browser interop is only reliable when the Node side encrypts within the browser's memory budget.
+> **⚠️ Decrypt-side memory caveat.** Because each ciphertext header embeds the _exact_ `memoryCost` used to derive its key, decrypting a ciphertext produced at 128 MiB requires allocating 128 MiB — which can OOM a memory-constrained mobile browser tab (iOS Safari WASM ceilings are as low as ~64–120 MB). **Data intended to be decrypted in browsers should be encrypted at ≤ the browser memory profile** (e.g. the 32 MiB browser default). The wire format is identical across runtimes; only the affordable KDF cost differs. Node → browser interop is only reliable when the Node side encrypts within the browser's memory budget.
 
 ### Content-Security-Policy (WASM)
 
@@ -1080,12 +1094,12 @@ Container mode and the v1 ciphertext path reject each other's blobs:
 The complete set, grouped by when it can fire:
 
 - **Argument type**: a `container` that is not a `Uint8Array` throws `INVALID_ENCRYPTED_DATA`, not a container-specific code — `decryptContainer` type-checks its own argument before it reaches the parser. (The parser has its own `INVALID_CONTAINER_INPUT` for the same condition, but the internal parser is not exported, so that code is unreachable through the public API.)
-- **Pre-authentication structural parse** (before any key derivation): `TRUNCATED_CONTAINER` (shorter than the 174-byte fixed overhead, or a `metaLen` that overruns the buffer), `CONTAINER_INVALID_MAGIC`, `CONTAINER_UNSUPPORTED_VERSION` (version byte ≠ `0x02`), `CONTAINER_UNSUPPORTED_KDF`, `CONTAINER_INVALID_HEADER_PARAM` (a non-positive parameter, or `memoryCost < 8 * parallelism`), `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`.
+- **Pre-authentication structural parse** (before any key derivation): `TRUNCATED_CONTAINER` (shorter than the 174-byte fixed overhead, or a `metaLen` that overruns the buffer), `CONTAINER_INVALID_MAGIC`, `CONTAINER_UNSUPPORTED_VERSION` (version byte ≠ `0x02`), `CONTAINER_UNSUPPORTED_KDF`, `CONTAINER_INVALID_HEADER_PARAM` (a non-positive parameter, or `memoryCost < 8 * parallelism`), `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`, `CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS` and `CONTAINER_KDF_COST_BELOW_DECRYPT_MINIMUM` (within the wire-format caps but outside this manager's `decryptKdfLimits` budget).
 - **Input validation on the seal side**: `INVALID_CONTAINER_META` (non-string `filename`/`mime`), `CONTAINER_METADATA_TOO_LARGE` (a field over 65535 UTF-8 bytes), `CONTAINER_DATA_TOO_LARGE` (payload over `0xffffffff`).
 - **Post-authentication**: `CONTAINER_METADATA_MALFORMED` (the decrypted metadata block has an unknown flag bit, a length prefix that overruns, or trailing bytes), `CONTAINER_INTEGRITY_FAILED` (the decrypted payload does not match its embedded SHA-256, or its length does not match the sealed `size`).
 - **Operation wrappers**, for a non-`CryptoError` that escapes the engine: `CONTAINER_ENCRYPTION_FAILED` (type `ENCRYPTION_FAILED`) and `CONTAINER_DECRYPTION_FAILED` (type `DECRYPTION_FAILED`).
 
-Every code above carries type `DECRYPTION_FAILED` except `INVALID_ENCRYPTED_DATA`, `TRUNCATED_CONTAINER`, `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`, `INVALID_CONTAINER_META`, `CONTAINER_METADATA_TOO_LARGE`, `CONTAINER_DATA_TOO_LARGE` and the unreachable `INVALID_CONTAINER_INPUT`, which are `INVALID_INPUT`, and `CONTAINER_ENCRYPTION_FAILED`, which is `ENCRYPTION_FAILED`. All of the above were confirmed by probe against this build. A wrong password, a mismatched `aad`, or any single-bit tamper surfaces as the generic `DECRYPTION_FAILED` — never as one of the specific codes — so there is no oracle. The byte layout is documented under [Container Format (v2)](#container-format-v2).
+Every code above carries type `DECRYPTION_FAILED` except `INVALID_ENCRYPTED_DATA`, `TRUNCATED_CONTAINER`, `CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS`, `CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS`, `CONTAINER_KDF_COST_BELOW_DECRYPT_MINIMUM`, `INVALID_CONTAINER_META`, `CONTAINER_METADATA_TOO_LARGE`, `CONTAINER_DATA_TOO_LARGE` and the unreachable `INVALID_CONTAINER_INPUT`, which are `INVALID_INPUT`, and `CONTAINER_ENCRYPTION_FAILED`, which is `ENCRYPTION_FAILED`. All of the above were confirmed by probe against this build. A wrong password, a mismatched `aad`, or any single-bit tamper surfaces as the generic `DECRYPTION_FAILED` — never as one of the specific codes — so there is no oracle. The byte layout is documented under [Container Format (v2)](#container-format-v2).
 
 ## 🔧 Configuration
 
@@ -1121,12 +1135,12 @@ All four file methods accept an optional fourth argument: a `progress` callback 
 
 #### Contract
 
-| Method             | Initial event       | Per-chunk events             | Final event                    | Total denomination                |
-| ------------------ | ------------------- | ---------------------------- | ------------------------------ | --------------------------------- |
-| `encryptFile`      | `(0, totalBytes)`   | per readable `data` event    | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
-| `decryptFile`      | `(0, totalBytes)`   | per readable `data` event    | `(totalBytes, totalBytes)`     | input file size (ciphertext)      |
-| `encryptFileSync`  | `(0, totalBytes)`   | _none_ — no per-chunk events | `(totalBytes, totalBytes)`     | input file size (plaintext bytes) |
-| `decryptFileSync`  | `(0, totalBytes)`   | per 64 KiB chunk             | `(totalBytes, totalBytes)`     | input file size (ciphertext)      |
+| Method            | Initial event     | Per-chunk events             | Final event                | Total denomination                |
+| ----------------- | ----------------- | ---------------------------- | -------------------------- | --------------------------------- |
+| `encryptFile`     | `(0, totalBytes)` | per readable `data` event    | `(totalBytes, totalBytes)` | input file size (plaintext bytes) |
+| `decryptFile`     | `(0, totalBytes)` | per readable `data` event    | `(totalBytes, totalBytes)` | input file size (ciphertext)      |
+| `encryptFileSync` | `(0, totalBytes)` | _none_ — no per-chunk events | `(totalBytes, totalBytes)` | input file size (plaintext bytes) |
+| `decryptFileSync` | `(0, totalBytes)` | per 64 KiB chunk             | `(totalBytes, totalBytes)` | input file size (ciphertext)      |
 
 Universal invariants: `processed` is monotonically non-decreasing across events for a single call, every event reports the same `total`, and the **final** invocation always has `processed === total` (so callers can rely on a single "100% done" signal).
 
@@ -1199,7 +1213,7 @@ The `progress` argument is fully optional — every call shape that worked befor
 The library supports different security levels based on Argon2 parameters. The current threshold table is the one that ships with the v1.0.0 stable release; it was last tightened during pre-1.0 development (in the v0.15.0 dev iteration, Task 18) to track OWASP 2026 guidance for Argon2id — the **HIGH** tier moved from `memoryCost: 2^16` (64 MiB) up to `memoryCost: 2^17` (128 MiB), and **ULTRA** moved from `2^18` up to `2^19` (512 MiB):
 
 - **Low**: `memoryCost < 2^14` OR `timeCost < 2` (Fast, less secure — fallback tier)
-- **Medium**: `memoryCost: 2^14` (16 MiB), `timeCost: 2` — **this library's own floor, and it sits below OWASP's stated minimum**: the same `t=2`, but 16 MiB against the 19 MiB OWASP asks for. Treat `MEDIUM` as a deliberate trade for resource-constrained devices, not as a recommended configuration. The 12/9/7 MiB rows in OWASP's list are not cover for it, because each pairs its lower memory with *more* iterations, which `MEDIUM` does not. (The browser default is also classified `MEDIUM` by this table, but at 32 MiB / `t=3` it exceeds OWASP's minimum on both axes — the tier label is coarser than the comparison.)
+- **Medium**: `memoryCost: 2^14` (16 MiB), `timeCost: 2` — **this library's own floor, and it sits below OWASP's stated minimum**: the same `t=2`, but 16 MiB against the 19 MiB OWASP asks for. Treat `MEDIUM` as a deliberate trade for resource-constrained devices, not as a recommended configuration. The 12/9/7 MiB rows in OWASP's list are not cover for it, because each pairs its lower memory with _more_ iterations, which `MEDIUM` does not. (The browser default is also classified `MEDIUM` by this table, but at 32 MiB / `t=3` it exceeds OWASP's minimum on both axes — the tier label is coarser than the comparison.)
 - **High**: `memoryCost: 2^17` (128 MiB), `timeCost: 3` (**the Node default** — above every configuration OWASP lists, which top out at `m=47104` / 46 MiB, and far above the stated minimum)
 - **Ultra**: `memoryCost: 2^19` (512 MiB), `timeCost: 4` (Maximum — paranoid tier for offline / async-only workloads)
 
@@ -1242,7 +1256,7 @@ if (
 v1.1.0 ships **two security fixes** that change the on-disk wire format for v1 ciphertexts (a security-fix patch release; v0 ciphertexts are unaffected):
 
 1. **The 22-byte v1 header is now bound to the AES-GCM auth tag** (via the AAD). Pre-fix, an attacker could flip bits in the header's reserved-byte regions (offsets 16–21 for Argon2id, 10–21 for PBKDF2-SHA256) without invalidating the auth tag — a categorical break of the integrity contract. Post-fix, ANY mutation of the header bytes (including reserved-byte regions) flips the GCM tag and decryption fails with `DECRYPTION_FAILED`.
-2. **`parseHeader` rejects pathologically-large KDF parameters** with `KDF_PARAMS_OUT_OF_BOUNDS` BEFORE invoking the KDF. Pre-fix, a malicious 100-byte ciphertext could request `memoryCost = 4 GiB` or `iterations = 100M` and pin the host for seconds-to-minutes. Caps: Argon2id `memoryCost <= 2^22` (4 GiB), `timeCost <= 100`, `parallelism <= 64`; PBKDF2 `iterations <= 10_000_000`. Additionally, `parseHeader` enforces the Argon2id RFC 9106 §3.1 cross-field floor `memoryCost >= 8 * parallelism` (code `INVALID_HEADER_PARAM`); no legitimately-produced ciphertext can violate this floor since the constructor enforces it at construction time.
+2. **`parseHeader` rejects out-of-range KDF parameters** with `KDF_PARAMS_OUT_OF_BOUNDS` BEFORE invoking the KDF. Caps: Argon2id `memoryCost <= 2^22` (4 GiB), `timeCost <= 100`, `parallelism <= 64`; PBKDF2 `iterations <= 10_000_000`. Note these bounds are **inclusive**, so they do not by themselves stop a ~100-byte ciphertext from requesting `memoryCost = 4 GiB`: that is what the per-instance `decryptKdfLimits` budget added in 1.8.0 is for — see [Decrypting untrusted ciphertext](#decrypting-untrusted-ciphertext). Additionally, `parseHeader` enforces the Argon2id RFC 9106 §3.1 cross-field floor `memoryCost >= 8 * parallelism` (code `INVALID_HEADER_PARAM`); no legitimately-produced ciphertext can violate this floor since the constructor enforces it at construction time.
 
 **Impact on existing v1 ciphertexts:** v1 ciphertexts produced by **v1.0.0 specifically** were encrypted with the unbound AAD and therefore will NOT decrypt under v1.1.0's default. Two migration paths:
 
@@ -1287,12 +1301,12 @@ Every ciphertext produced by this library — text or file, async or sync — be
 
 **Header layout (22 bytes total)**
 
-| Offset | Length | Field          | Meaning                                                        |
-| ------ | ------ | -------------- | -------------------------------------------------------------- |
-| 0      | 4      | `magic`        | ASCII `"HPCR"` — identifies a v1 ciphertext                    |
-| 4      | 1      | `version`      | `0x01` — current format version                                |
-| 5      | 1      | `kdf-id`       | `0x00` = Argon2id (async paths), `0x01` = PBKDF2-SHA256 (sync) |
-| 6      | 16     | `kdf-params`   | KDF-specific parameter block (see below)                       |
+| Offset | Length | Field        | Meaning                                                        |
+| ------ | ------ | ------------ | -------------------------------------------------------------- |
+| 0      | 4      | `magic`      | ASCII `"HPCR"` — identifies a v1 ciphertext                    |
+| 4      | 1      | `version`    | `0x01` — current format version                                |
+| 5      | 1      | `kdf-id`     | `0x00` = Argon2id (async paths), `0x01` = PBKDF2-SHA256 (sync) |
+| 6      | 16     | `kdf-params` | KDF-specific parameter block (see below)                       |
 
 **KDF parameter block (16 bytes, big-endian)**
 
@@ -1356,16 +1370,17 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 - `KDF_MISMATCH`: ciphertext was produced by the sync path but is being decrypted by the async path (or vice-versa).
 - `INVALID_MAGIC`: only emitted by the low-level `parseHeader` helper when the magic check fails (the high-level decrypt methods treat that case as v0 and apply `legacyMode`).
 - `TRUNCATED_HEADER`, `INVALID_HEADER_PARAM`: defensive parser errors for malformed v1 input.
-- `KDF_PARAMS_OUT_OF_BOUNDS`: a header asking for KDF work beyond the DoS caps.
+- `KDF_PARAMS_OUT_OF_BOUNDS`: a header asking for KDF work beyond the wire-format caps.
+- `KDF_COST_EXCEEDS_DECRYPT_LIMITS` / `KDF_COST_BELOW_DECRYPT_MINIMUM`: a header within the wire-format caps but outside this manager's own `decryptKdfLimits` budget. Raised before any key derivation; the message names which ceiling fired.
 - `LEGACY_FORMAT_REJECTED` / `UNSUPPORTED_FORMAT`: emitted in `'strict'`/`'reject'` modes when a v0 ciphertext is presented.
 
-**In the default `legacyMode: 'auto'`, most of the codes above are not what a decrypt call will actually report.** `auto` treats *any* header-parse failure as "this might be a v0 ciphertext whose 32-byte random salt happened to start with `HPCR`", so it swallows the specific code and retries the blob as v0. Concretely:
+**In the default `legacyMode: 'auto'`, most of the codes above are not what a decrypt call will actually report.** `auto` treats _any_ header-parse failure as "this might be a v0 ciphertext whose 32-byte random salt happened to start with `HPCR`", so it swallows the specific code and retries the blob as v0. Concretely:
 
-| | Behaviour |
-| --- | --- |
-| Masked in `auto`, visible in `strict`/`reject` | `UNSUPPORTED_VERSION`, `UNSUPPORTED_KDF`, `KDF_MISMATCH`, `INVALID_HEADER_PARAM`, `TRUNCATED_HEADER` |
-| Never masked, in any mode | `KDF_PARAMS_OUT_OF_BOUNDS` — DoS rejection is never traded away for legacy recovery |
-| What `auto` reports instead | `INVALID_ENCRYPTED_DATA_SIZE` if the blob is under 60 bytes, otherwise the generic `DECRYPTION_FAILED` |
+|                                                | Behaviour                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Masked in `auto`, visible in `strict`/`reject` | `UNSUPPORTED_VERSION`, `UNSUPPORTED_KDF`, `KDF_MISMATCH`, `INVALID_HEADER_PARAM`, `TRUNCATED_HEADER`                                                                                                                                                                           |
+| Never masked, in any mode                      | `KDF_PARAMS_OUT_OF_BOUNDS`, `KDF_COST_EXCEEDS_DECRYPT_LIMITS`, `KDF_COST_BELOW_DECRYPT_MINIMUM` — DoS rejection is never traded away for legacy recovery. The cost-policy check is enforced _outside_ the header-parse `try`/`catch`, so `auto` structurally cannot swallow it |
+| What `auto` reports instead                    | `INVALID_ENCRYPTED_DATA_SIZE` if the blob is under 60 bytes, otherwise the generic `DECRYPTION_FAILED`                                                                                                                                                                         |
 
 That 60 is `salt + iv + tag` (32 + 12 + 16): the v0 retry treats the whole blob as a body with no header, so anything shorter fails the minimum-size check before any key derivation, and anything longer reaches GCM and fails authentication. Measured on this build: `decryptText` of an `encryptTextSync` ciphertext reports `DECRYPTION_FAILED` under `auto` and `KDF_MISMATCH` under `strict`; a 10-byte blob beginning `HPCR` reports `INVALID_ENCRYPTED_DATA_SIZE` under `auto` and `TRUNCATED_HEADER` under `strict`. **If you are debugging a format problem, construct a `strict` manager to see the real reason.**
 
@@ -1388,11 +1403,7 @@ The `kdf-params` block is the same Argon2id layout as v1 (`[memoryCost u32BE][ti
 The version byte sits at offset 4 in both formats, and both version constants are exported from the Node **and** the browser entry point — `FORMAT_VERSION` (`0x01`, v1 text/file ciphertext) and `CONTAINER_VERSION` (`0x02`, v2 container). So a consumer holding raw bytes can route them without decrypting and without hard-coding a magic number:
 
 ```typescript
-import {
-  CONTAINER_VERSION,
-  FORMAT_VERSION,
-  MAGIC_BYTES,
-} from '@hiprax/crypto';
+import { CONTAINER_VERSION, FORMAT_VERSION, MAGIC_BYTES } from '@hiprax/crypto';
 
 const hasHpcrMagic = (bytes: Uint8Array): boolean =>
   bytes.length > MAGIC_BYTES.length &&
@@ -1417,9 +1428,143 @@ if (isHpcr && bytes[4] === CONTAINER_VERSION) {
 Two details make this correct rather than merely plausible:
 
 - **Check the magic before reading byte 4.** A legacy v0 ciphertext opens with a 32-byte random salt, so roughly one in `2 ** 32` of them begins with the four `HPCR` bytes by chance (the library's `legacyMode: 'auto'` recovery exists for exactly that case). Reading `bytes[4]` on its own would misclassify any v0 blob whose fifth byte happens to be `0x02`.
-- **Use `MAGIC_BYTES`, not the exported `hasMagic()`, on a `Uint8Array`.** The Node entry's `hasMagic` keeps its original contract of accepting only a real `Buffer` and returns `false` for anything else, while `encryptBytes` / `encryptContainer` return a plain `Uint8Array` in both runtimes. The browser entry's `hasMagic` accepts any `Uint8Array`. The byte comparison above behaves identically on both entries; `hasMagic` does not. Wrap the value (`hasMagic(Buffer.from(bytes))`) if you want the Node helper specifically. The same `Buffer`-only contract applies to the exported **`parseHeader`**, which throws `INVALID_HEADER_INPUT` on a plain `Uint8Array` from the Node entry — the `inspectHeader` *method* used above takes `Uint8Array` and works on both entries, which is why the example calls that instead.
+- **Use `MAGIC_BYTES`, not the exported `hasMagic()`, on a `Uint8Array`.** The Node entry's `hasMagic` keeps its original contract of accepting only a real `Buffer` and returns `false` for anything else, while `encryptBytes` / `encryptContainer` return a plain `Uint8Array` in both runtimes. The browser entry's `hasMagic` accepts any `Uint8Array`. The byte comparison above behaves identically on both entries; `hasMagic` does not. Wrap the value (`hasMagic(Buffer.from(bytes))`) if you want the Node helper specifically. The same `Buffer`-only contract applies to the exported **`parseHeader`**, which throws `INVALID_HEADER_INPUT` on a plain `Uint8Array` from the Node entry — the `inspectHeader` _method_ used above takes `Uint8Array` and works on both entries, which is why the example calls that instead.
 
 Note that `inspectHeader` is deliberately **not** part of this decision: it parses v1 headers only and throws `UNSUPPORTED_VERSION` on a container. Classify first, then call it on the v1 branch.
+
+### Decrypting untrusted ciphertext
+
+Every ciphertext this library produces carries, in cleartext, the KDF parameters
+that produced it — that is what lets a ciphertext outlive a change to your
+defaults. The cost is that those parameters are **unauthenticated at the moment
+they are read**: the AES-GCM tag covering the header cannot be verified until a
+key has been derived, and deriving that key is precisely the expensive step the
+header controls. An attacker who can hand you a ~100-byte blob therefore chooses
+how much work you do before you can reject it.
+
+Two layers bound that. The **wire-format caps** in `parseHeader` bound what the
+format can express (`memoryCost <= 2 ** 22`, `timeCost <= 100`,
+`parallelism <= 64`, `iterations <= 10_000_000`) and are the same for everyone.
+They are inclusive, so on their own they still admit 4 GiB and 100 passes. The
+**per-instance decrypt budget**, `decryptKdfLimits`, is what bounds the work
+_your_ process is willing to do:
+
+```typescript
+const cm = new CryptoManager({
+  decryptKdfLimits: {
+    maxMemoryCost: 2 ** 18, // KiB — peak RAM per derivation (256 MiB)
+    maxTimeCost: 4,
+    maxParallelism: 4,
+    maxWork: 2 ** 20, // memoryCost × timeCost, the real CPU bound
+    maxPbkdf2Iterations: 600_000,
+  },
+});
+```
+
+Anything over budget is refused with
+`CryptoError(INVALID_INPUT, 'KDF_COST_EXCEEDS_DECRYPT_LIMITS')` — or the
+`CONTAINER_`-prefixed form for a v2 container — **before any key is derived**,
+and the message names which ceiling fired so you know which one to raise. You do
+not have to set the option: the defaults below are already applied.
+
+| Field                            | Node default         | Browser default     | Bounds                                                                                                                                                             |
+| -------------------------------- | -------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `maxMemoryCost`                  | `2 ** 19` (512 MiB)  | `2 ** 18` (256 MiB) | peak resident memory                                                                                                                                               |
+| `maxTimeCost`                    | `10`                 | `10`                | passes, and with `maxParallelism`, thread churn. Not simultaneously reachable with `maxMemoryCost`: `maxWork` binds first, so at 512 MiB only `t <= 8` is accepted |
+| `maxParallelism`                 | `16`                 | `16`                | lanes, i.e. OS threads                                                                                                                                             |
+| `maxWork`                        | `2 ** 22` KiB-passes | `2 ** 20`           | CPU time (`memoryCost × timeCost`)                                                                                                                                 |
+| `maxPbkdf2Iterations`            | `2_000_000`          | `2_000_000`         | sync-path CPU                                                                                                                                                      |
+| `minWork`, `minPbkdf2Iterations` | `0` (off)            | `0` (off)           | see "the opposite direction" below                                                                                                                                 |
+
+**An omitted ceiling widens to this instance's own cost.** A manager configured
+with `memoryCost: 2 ** 21` carries a `maxMemoryCost` of `2 ** 21`, so **a manager
+can always decrypt its own output** and upgrading cannot make stored data
+unreadable. A ceiling you set explicitly is used exactly as given and never
+widened. Read the effective budget with `getDecryptKdfLimits()`; the exported
+`DEFAULT_DECRYPT_KDF_LIMITS` is the default _table_, not your instance's budget.
+
+**Why `maxWork` exists alongside the per-axis caps.** Argon2id's cost is
+approximately `memoryCost × timeCost`, so capping only each axis bounds the
+product at their multiple. `maxWork` bounds it directly, which is what lets the
+per-axis ceilings stay generous: a cheap-but-many-passes header
+(`m = 2 ** 17, t = 10`) is accepted while an expensive combination whose axes are
+each individually legal (`m = 2 ** 19, t = 9`) is not. Conversely `maxTimeCost`
+and `maxParallelism` are **not** redundant with `maxWork`: libargon2 is compiled
+with threading and sets `threads = parallelism`, so a header of
+`m = 512, t = 100, p = 64` is only 51,200 KiB-passes of hashing — invisible to a
+product budget — yet asks for roughly 25,600 OS thread create/joins.
+
+#### What this does not buy you
+
+- **The synchronous paths are still unsuitable for untrusted input.**
+  `decryptTextSync` and `decryptFileSync` call `crypto.pbkdf2Sync`, which runs on
+  the calling thread. Even at the default ceiling of 2,000,000 iterations a
+  single request blocks the Node event loop for roughly 0.9 s, so on the order of
+  one request per second saturates a process. Use the async paths for anything an
+  untrusted party can reach.
+- **The async paths share a small pool.** The native Argon2id addon runs on the
+  libuv threadpool, which defaults to **four** slots, so four concurrent
+  derivations starve every other async `fs`, `dns`, `zlib` and `crypto` operation
+  in the process. Bounding per-request cost is necessary but not sufficient:
+  rate limiting and concurrency control remain yours.
+- **In the browser, Argon2id blocks the UI thread.** `hash-wasm` computes
+  synchronously and enforces no memory ceiling of its own, which is why the
+  browser default budget is tighter. Consider tightening it further and running
+  decryption in a Web Worker. This is the receiver-side answer to the
+  [128 MiB-decrypt caveat](#browser-argon2id-profile-32-mib-default-and-the-128-mib-decrypt-caveat)
+  above: rather than trusting whoever produced the ciphertext, cap what you will
+  honour.
+- **Do not echo `CryptoError.message` to untrusted callers.** It names the
+  configured budget and the offending value, which is for your logs.
+- **The budget is probeable.** Because an omitted ceiling widens to this
+  instance's own cost, an attacker who can submit ciphertexts and observe
+  accept-versus-reject can binary-search each boundary and learn your configured
+  `memoryCost`/`timeCost`/`parallelism`/`pbkdf2Iterations` where they exceed the
+  defaults. Low value — any ciphertext you _produce_ already publishes its
+  Argon2 parameters in cleartext in the header — but it is new information for a
+  service that only ever decrypts.
+
+#### Pre-screening without decrypting
+
+`inspectHeader` is deliberately **not** subject to this policy, so it can
+classify any ciphertext. That makes it the right tool for a gateway that wants to
+triage before committing to a decrypt, and the assertion helper is exported from
+both entry points:
+
+```typescript
+import { assertKdfWithinDecryptLimits } from '@hiprax/crypto';
+
+const header = cm.inspectHeader(blob); // null for a legacy v0 ciphertext
+if (header) {
+  // Throws before you spend anything.
+  assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits());
+}
+```
+
+#### The opposite direction: floors
+
+An attacker can also make a ciphertext **too cheap**. If a service decrypts
+attacker-supplied blobs using a held `defaultPassphrase` and the outcome is
+observable, a header asking for minimal work removes the KDF cost that was
+supposed to rate-limit guessing, turning the service into a cheap oracle for
+candidates computed offline. `minWork` and `minPbkdf2Iterations` set a floor.
+
+**A floor does not reach legacy v0 input, and that matters if you set one.** A
+v0 ciphertext carries no header, so there are no attacker-supplied parameters to
+police: the count comes from `legacyPbkdf2Iterations` (default 100,000), which is
+your own configuration. The consequence is that an attacker can sidestep a floor
+by stripping the header, so pair a floor with `legacyMode: 'strict'` (or
+`'reject'`), or raise `legacyPbkdf2Iterations` to the same level.
+
+They default to **off**, for two reasons. A floor would refuse legitimate
+low-cost ciphertext — this library's own browser default is 32 MiB, and the
+`MEDIUM` tier is only 32,768 work. More importantly a floor is in direct tension
+with the ceilings beside it: enforcing a minimum forces a full Argon2id
+derivation on _your_ server for every request an attacker sends. Application-level
+rate limiting remains the primary defence there. One knob is enough for both
+axes: since `timeCost <= maxTimeCost`, requiring `m × t >= minWork` implies
+`m >= minWork / maxTimeCost`, so at the default `maxTimeCost` of 10 a `minWork`
+of 393,216 already forces `memoryCost >= ~38 MiB`.
 
 ## 🛡️ Security Features
 
@@ -1438,7 +1583,7 @@ Note that `inspectHeader` is deliberately **not** part of this decision: it pars
 >
 > - **Use a fresh random IV for every message.** Generate it with `cm.generateSecureRandom(12)` and never persist or reuse it under the same key.
 > - **Cap each key at roughly `2 ** 32` invocations.** With random 96-bit IVs, collisions become non-negligible beyond this birthday bound (NIST SP 800-38D); rotate the key — for example, by re-deriving from a fresh per-message salt — well before then.
-> - **Treat `encryptData` with a fixed `(key, iv)` as deterministic by design.** This is *not* a feature, it is a symptom of the attack surface above. The test `encryptData with reused (key, iv) is deterministic — security boundary documentation` in the test suite locks this property in as a guardrail.
+> - **Treat `encryptData` with a fixed `(key, iv)` as deterministic by design.** This is _not_ a feature, it is a symptom of the attack surface above. The test `encryptData with reused (key, iv) is deterministic — security boundary documentation` in the test suite locks this property in as a guardrail.
 >
 > The high-level methods (`encryptText`/`encryptFile` and their `Sync` siblings) do **not** expose this footgun: they generate a fresh random IV per message AND derive a fresh key from a fresh per-message salt, so a `(key, iv)` collision across two messages is computationally negligible. Prefer the high-level API for any work that does not have a specific reason to manage IVs by hand.
 
@@ -1465,17 +1610,17 @@ Quantum computers threaten cryptography through two very different algorithms:
 
 The NIST post-quantum standards (FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA) replace **public-key** primitives only; NIST states explicitly that its symmetric standards are **not** part of the PQC transition. A symmetric-only library therefore needs **no post-quantum migration** — no algorithm swap, no format change, and nothing for consumers to update, ever, for quantum reasons.
 
-This posture is **identical in the browser build.** The [isomorphic browser build](#-isomorphic-api--browser-support) uses the same symmetric primitives (AES-256-GCM, Argon2id, SHA-256) over the same wire format — Web Crypto and WebAssembly Argon2id are different *implementations* of the same algorithms, not different algorithms. The only cross-runtime difference is the Argon2id default *memory cost* (32 MiB in the browser vs 128 MiB in Node), which changes brute-force cost, not the post-quantum standing of any primitive.
+This posture is **identical in the browser build.** The [isomorphic browser build](#-isomorphic-api--browser-support) uses the same symmetric primitives (AES-256-GCM, Argon2id, SHA-256) over the same wire format — Web Crypto and WebAssembly Argon2id are different _implementations_ of the same algorithms, not different algorithms. The only cross-runtime difference is the Argon2id default _memory cost_ (32 MiB in the browser vs 128 MiB in Node), which changes brute-force cost, not the post-quantum standing of any primitive.
 
 ### Primitive-by-primitive
 
-| Primitive                          | Role                     | Post-quantum status                                                                                                                                                                                                              |
-| ---------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **AES-256-GCM**                    | Authenticated encryption | NIST post-quantum security **Category 5** (the highest tier). NSA CNSA 2.0 retains AES-256 for National Security Systems **up to TOP SECRET** in the quantum era. BSI recommends 256-bit symmetric keys for long-term protection. |
-| **Argon2id** (async KDF)           | Password → key           | Memory-hardness _survives_ quantum evaluation: peer-reviewed analysis shows the memory cost carries over into the reversible circuits Grover requires, making every quantum guess astronomically expensive.                       |
-| **PBKDF2-HMAC-SHA256** (sync KDF)  | Password → key           | HMAC and KDF constructions are listed by NIST IR 8547 among the symmetric standards that will **not** be transitioned. 256-bit output ≈ 128-bit effective post-quantum strength.                                                  |
-| **SHA-256** (utility)              | Hashing                  | 256-bit preimage strength = NIST post-quantum **Category 5**.                                                                                                                                                                     |
-| **CSPRNG** (`crypto.randomBytes`)  | Salts, IVs               | OS-level SP 800-90A DRBGs reseeded from kernel entropy; quantum computing changes nothing structural about their security.                                                                                                        |
+| Primitive                         | Role                     | Post-quantum status                                                                                                                                                                                                               |
+| --------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **AES-256-GCM**                   | Authenticated encryption | NIST post-quantum security **Category 5** (the highest tier). NSA CNSA 2.0 retains AES-256 for National Security Systems **up to TOP SECRET** in the quantum era. BSI recommends 256-bit symmetric keys for long-term protection. |
+| **Argon2id** (async KDF)          | Password → key           | Memory-hardness _survives_ quantum evaluation: peer-reviewed analysis shows the memory cost carries over into the reversible circuits Grover requires, making every quantum guess astronomically expensive.                       |
+| **PBKDF2-HMAC-SHA256** (sync KDF) | Password → key           | HMAC and KDF constructions are listed by NIST IR 8547 among the symmetric standards that will **not** be transitioned. 256-bit output ≈ 128-bit effective post-quantum strength.                                                  |
+| **SHA-256** (utility)             | Hashing                  | 256-bit preimage strength = NIST post-quantum **Category 5**.                                                                                                                                                                     |
+| **CSPRNG** (`crypto.randomBytes`) | Salts, IVs               | OS-level SP 800-90A DRBGs reseeded from kernel entropy; quantum computing changes nothing structural about their security.                                                                                                        |
 
 ### The proofs
 
@@ -1547,13 +1692,13 @@ npm run verify
 
 It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball`, and takes roughly two minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 96% statements, 87% branches, 98% functions, 96% lines), and `npm run test:browser` covers the real-Chromium tier.
 
-Those commands form three tiers, measured on **2026-09-21** on Node v24.19.0 at the current 27 suites / 1,152 tests. Read FAST and the 1 m 58 s FULL figure as one paired measurement from a single session — that pairing is what makes FULL equal FAST plus the four `check:*` gates. The wider FULL band spans eight runs under different machine loads, so its floor sits below this session's FAST number and is not something to subtract from it; the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
+Those commands form three tiers, measured on **2026-09-22** on Node v24.19.0 at the current 28 suites / 1,224 tests. Read FAST and the 1 m 56 s FULL figure as one paired measurement from a single session — that pairing is what makes FULL equal FAST plus the four `check:*` gates. The Jest step dominates every tier and its run-to-run spread is wide (observed 92 s to 140 s across sessions and machine loads), so treat these as an order of magnitude rather than a budget, and re-measure when a tier's contents change:
 
-| Tier | Command | Measured | When |
-| --- | --- | --- | --- |
-| FAST | `npm run lint && npm run type-check && npm run build && npm test` | ~1 m 50 s (lint 6.7 s, type-check 1.3 s, build 1.7 s, test 100.1 s) | every change |
-| FULL | `npm run verify` | 1 m 58 s paired with the FAST row above; 1 m 45 s to 2 m 19 s across eight runs — FAST plus `check:browser` 0.2 s, `check:types:browser` 1.8 s, `check:exports` 3.9 s, `check:tarball` 0.7 s | before every push; also `prepublishOnly` |
-| BROWSER | `npm run build && npm run test:browser` | ~7 s, after a one-time `npx playwright install --with-deps chromium` | when the browser graph, the wire format or the container format changes, and before every release |
+| Tier    | Command                                                           | Measured                                                                                 | When                                                                                              |
+| ------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| FAST    | `npm run lint && npm run type-check && npm run build && npm test` | ~1 m 41 s (lint 6.9 s, type-check 1.3 s, build 1.7 s, test 91.0 s)                       | every change                                                                                      |
+| FULL    | `npm run verify`                                                  | 1 m 56 s paired with the FAST row above — FAST plus the four `check:*` gates             | before every push; also `prepublishOnly`                                                          |
+| BROWSER | `npm run build && npm run test:browser`                           | ~5 s (37 Chromium tests), after a one-time `npx playwright install --with-deps chromium` | when the browser graph, the wire format or the container format changes, and before every release |
 
 FAST is a strict prefix of FULL, and within one session the ~9 seconds between them buy all four remaining gates, so there is no reason to run FAST when FULL is affordable. The coverage ratchet is enforced by `npm run test:coverage`, which CI runs in its equivalent form (`npm test -- --coverage`) on its Ubuntu / Node 22 leg; note that `npm run verify` runs Jest without `--coverage`, so a green `verify` does not by itself assert the coverage floor.
 
@@ -1607,7 +1752,7 @@ try {
 - `MEMORY_ERROR`: Memory-related errors
 - `VALIDATION_ERROR`: Validation failures
 
-**Branch on `code`, not on `type`.** `CryptoError.type` is one of the seven coarse categories above; `CryptoError.code` is the specific, stable discriminator — the library raises **78** distinct codes. New codes are only ever added to `code` (a plain `string`), never to the `CryptoErrorType` enum, so a release can describe a new failure without a breaking type change.
+**Branch on `code`, not on `type`.** `CryptoError.type` is one of the seven coarse categories above; `CryptoError.code` is the specific, stable discriminator — the library raises **84** distinct codes. New codes are only ever added to `code` (a plain `string`), never to the `CryptoErrorType` enum, so a release can describe a new failure without a breaking type change.
 
 Two consequences worth knowing when writing handlers:
 
@@ -1627,7 +1772,10 @@ The bound is asserted on the ciphertext body too, which has one consequence when
 The bound and its assertion helper are exported from both entry points, so you can range-check ahead of a call:
 
 ```typescript
-import { MAX_GCM_PLAINTEXT_BYTES, assertGcmPlaintextLimit } from '@hiprax/crypto';
+import {
+  MAX_GCM_PLAINTEXT_BYTES,
+  assertGcmPlaintextLimit,
+} from '@hiprax/crypto';
 
 console.log(MAX_GCM_PLAINTEXT_BYTES); // 68719476704
 
@@ -1635,7 +1783,7 @@ console.log(MAX_GCM_PLAINTEXT_BYTES); // 68719476704
 assertGcmPlaintextLimit(fileSizeInBytes);
 ```
 
-In practice this is a bound on a *single* call, not on how much data the library can protect: split larger payloads across separate calls, each of which gets its own fresh salt, key and IV. Container mode is already stricter — a v2 container's payload is capped at `0xffffffff` bytes (just under 4 GiB, the width of the size field in its metadata block) and rejects anything larger with `CONTAINER_DATA_TOO_LARGE`, well below the GCM limit — and the text API is bounded far earlier still by V8's maximum string length. Read it off your own runtime rather than trusting a figure here: `require('buffer').constants.MAX_STRING_LENGTH` is `536870888` (512 MiB of characters) on Node 24.19.0, and base64url expands 4:3, so `encryptText` tops out near **384 MiB of plaintext**. `encryptBytes` has no such ceiling — it never materialises a string.
+In practice this is a bound on a _single_ call, not on how much data the library can protect: split larger payloads across separate calls, each of which gets its own fresh salt, key and IV. Container mode is already stricter — a v2 container's payload is capped at `0xffffffff` bytes (just under 4 GiB, the width of the size field in its metadata block) and rejects anything larger with `CONTAINER_DATA_TOO_LARGE`, well below the GCM limit — and the text API is bounded far earlier still by V8's maximum string length. Read it off your own runtime rather than trusting a figure here: `require('buffer').constants.MAX_STRING_LENGTH` is `536870888` (512 MiB of characters) on Node 24.19.0, and base64url expands 4:3, so `encryptText` tops out near **384 MiB of plaintext**. `encryptBytes` has no such ceiling — it never materialises a string.
 
 ## 📦 Development
 
@@ -1690,7 +1838,7 @@ A cryptography library is only as useful as its honesty about what it does and d
 - **Confidentiality of plaintext** under a strong password, against a passive observer who captures the ciphertext at rest or in transit. Confidentiality is bounded by AES-256-GCM and the chosen KDF (Argon2id or PBKDF2-HMAC-SHA256 — see [Security Levels](#security-levels)).
 - **Ciphertext indistinguishability under chosen-plaintext attack (IND-CPA).** Each encryption draws a fresh 32-byte salt and a fresh 96-bit IV from the OS CSPRNG, so two encryptions of the same plaintext under the same password are distinct ciphertexts and cannot be correlated by an observer who has seen previous outputs. AES-256-GCM's underlying CTR-mode keystream provides the standard IND-CPA guarantee.
 - **Authenticity and integrity of ciphertext (including the v1 header).** AES-256-GCM produces a 128-bit authentication tag covering the salt, IV, ciphertext body, and AAD. As of v1.1.0 the AAD bound to v1 ciphertexts includes the configured AAD context string (`"secure-crypto-tool-v2"` by default) **concatenated with the verbatim 22 bytes of the v1 header** — so any single-bit modification to the ciphertext, salt, IV, header (including the reserved-byte regions inside the KDF parameter block), or AAD context causes `decrypt*` to fail with `DECRYPTION_FAILED` rather than return wrong plaintext. v0 (legacy) ciphertexts use just the AAD context string for AAD, since they have no header to bind. v1 ciphertexts produced by v1.0.0 (which pre-dates the header binding) can be decrypted by setting the constructor option `legacyHeaderAad: true` — see [Migration: v1.0.0 → v1.1.0](#migration-v100--v110) below.
-- **DoS protection at the v1 header parser.** `parseHeader` enforces conservative upper bounds on the parsed KDF parameters: `memoryCost <= 2^22` (4 GiB), `timeCost <= 100`, `parallelism <= 64` for Argon2id; `iterations <= 10_000_000` for PBKDF2-SHA256. Out-of-range parameters surface as `CryptoError(INVALID_INPUT, 'KDF_PARAMS_OUT_OF_BOUNDS')` BEFORE any KDF work runs, so a malicious 100-byte ciphertext cannot pin gigabytes of RAM or block the event loop for minutes. The same caps apply to `inspectHeader` so tooling-facing introspection sees the same bounded values as decrypt.
+- **DoS protection against attacker-controlled KDF cost, in two layers.** The header of a ciphertext carries the KDF parameters that produced it, and those bytes are unauthenticated at the moment they are read — the GCM tag covering them cannot be checked until a key has been derived, which is the expensive step they control. **Layer one, the wire-format caps:** `parseHeader` refuses `memoryCost > 2^22` (4 GiB), `timeCost > 100`, `parallelism > 64`, or PBKDF2 `iterations > 10_000_000` with `CryptoError(INVALID_INPUT, 'KDF_PARAMS_OUT_OF_BOUNDS')`. These bound what the format can _express_, and they apply to `inspectHeader` too, so tooling sees the same bounded values as decrypt. **Layer two, the per-instance decrypt budget** (`decryptKdfLimits`, added in 1.8.0): what _this process_ is willing to spend before it knows the ciphertext is genuine, defaulting to 512 MiB / `2^22` KiB-passes on Node and tighter in the browser. Both layers reject before any key derivation, so a malicious ~100-byte ciphertext cannot pin gigabytes of RAM or burn minutes of CPU. See [Decrypting untrusted ciphertext](#decrypting-untrusted-ciphertext) for what the second layer does and does not buy — in particular, the synchronous PBKDF2 paths remain unsuitable for untrusted input.
 - **Format integrity.** The v1 ciphertext header (`HPCR` magic + version + KDF id + KDF params) is parsed with explicit length checks and bounded numeric ranges; malformed input surfaces as `CryptoError` with a specific code (`TRUNCATED_HEADER`, `INVALID_HEADER_PARAM`, `KDF_PARAMS_OUT_OF_BOUNDS`, `UNSUPPORTED_VERSION`, etc.) rather than a crash, infinite loop, or out-of-bounds read. See [Ciphertext Format (v1)](#ciphertext-format-v1).
 - **Path traversal in the file APIs (syntactic).** `validatePath` rejects null bytes, ASCII control characters (`< 0x20` or `0x7F`), Windows-illegal characters, and literal `..` segments after `path.normalize`. The optional `allowedRoot` option performs a segment-aware resolved-prefix containment check so within-drive cross-traversal (e.g. `C:\\Users\\..\\Windows` against `allowedRoot: 'C:\\Users'`) is caught even though `path.normalize` collapses the `..` to a clean string. `sanitizeFilename` neutralises literal `..` sequences and preserves the file extension when truncating to 255 chars.
 - **Constant-time comparison primitives.** `secureStringCompare` uses `crypto.timingSafeEqual` so equal-length string compares do not leak bytewise differences via timing. (Length itself is leaked — see Out of Scope.)
@@ -1706,7 +1854,7 @@ A cryptography library is only as useful as its honesty about what it does and d
 - **String-copy memory leaks via V8.** `secureClear` zeroes the underlying `ArrayBuffer` slab of a Buffer, but V8 may have already created internal string copies of password or plaintext data for hashing, interning, or deoptimisation paths. Those copies are unreachable to `Buffer.fill(0)` and live until garbage collection. Treat `secureClear` as defence-in-depth, not as a forensic-grade wipe. The same caveat applies — more directly, by deliberate retention rather than incidental V8 behaviour — to `CryptoManager` instances configured with `defaultPassphrase`: the library stores the passphrase as a regular V8 string for the manager's lifetime and cannot scrub it. For sensitive workloads, pass the password explicitly to each `encrypt*` / `decrypt*` call instead of configuring `defaultPassphrase`. See [Password Requirements](#password-requirements) for the full retention discussion.
 - **Symlink-based path traversal.** `validatePath` is a syntactic check; it does not call `fs.realpath` and does not prevent a path like `/safe/dir/symlinkToEtc` from escaping via the symlink. Callers that need symlink-safe path validation must perform their own `realpath`-based check or operate inside a chroot/sandbox.
 - **Length leaks in comparison.** `secureStringCompare` only protects against bytewise timing differences within an equal-length compare. The lengths of the inputs are leaked via the early-return-on-length-mismatch path. For comparing values where length itself is sensitive, hash both sides first.
-- **Denial of service via legitimate-input resource exhaustion.** A caller that asks the library to encrypt a 100 GiB file will see 100 GiB of disk and memory pressure on the streaming write — that is a workload property, not a vulnerability. Argon2id at the default `memoryCost: 2^17` allocates 128 MiB per derivation; an attacker who can trigger many concurrent derivations against a single host can DoS it. Rate-limiting and resource sandboxing are caller responsibilities. Note: DoS *via maliciously-crafted ciphertext headers* (asking the parser to honour a `memoryCost = 4 GiB` or `iterations = 100M`) is **in scope** and is rejected with `KDF_PARAMS_OUT_OF_BOUNDS` before any KDF work runs — see "What this library defends against" above.
+- **Denial of service via legitimate-input resource exhaustion.** A caller that asks the library to encrypt a 100 GiB file will see 100 GiB of disk and memory pressure on the streaming write — that is a workload property, not a vulnerability. Argon2id at the default `memoryCost: 2^17` allocates 128 MiB per derivation; an attacker who can trigger many concurrent derivations against a single host can DoS it. Rate-limiting and resource sandboxing are caller responsibilities. Note: DoS _via maliciously-crafted ciphertext headers_ — a ~100-byte ciphertext asking the parser to honour an expensive `memoryCost`/`timeCost`/`iterations` — is **in scope**, and is bounded in two layers: `KDF_PARAMS_OUT_OF_BOUNDS` for anything past the wire-format caps, and `KDF_COST_EXCEEDS_DECRYPT_LIMITS` for anything past this instance's `decryptKdfLimits` budget. Both fire before any KDF work runs. Note that the wire-format caps are _inclusive_: `memoryCost = 4 GiB` is exactly the largest value they accept, which is why the second layer exists. See "What this library defends against" above.
 
 ### Reporting
 
@@ -1741,7 +1889,7 @@ For the full security policy — including the [Threat Model](#-threat-model) se
 
 ### Reporting a Vulnerability
 
-If you believe you have found a security issue in `@hiprax/crypto`, **please do not file a public issue**. Read [SECURITY.md](SECURITY.md) for the full disclosure policy and report the issue privately via [GitHub Security Advisories](https://github.com/Hiprax/crypto/security/advisories/new) or by emailing `security@hiprax.dev`. Initial acknowledgements are sent within 72 hours.
+If you believe you have found a security issue in `@hiprax/crypto`, **please do not file a public issue**. Read [SECURITY.md](SECURITY.md) for the full disclosure policy and report the issue privately via [GitHub Security Advisories](https://github.com/Hiprax/crypto/security/advisories/new) or by emailing `security@hiprax.com`. Initial acknowledgements are sent within 72 hours.
 
 ## 🆘 Support
 

@@ -58,6 +58,15 @@ export {
   // silence the guard.
   MAX_GCM_PLAINTEXT_BYTES,
   assertGcmPlaintextLimit,
+  // The decrypt-side KDF cost policy (issue #2). Same rule as the two symbols
+  // above and for the same reason: this is a named list, so a value added to
+  // `format-core.ts` and forgotten here ships to browser consumers (via
+  // `index.browser.ts`'s `export *`) while being invisible to Node ones. These
+  // three take and return plain objects and numbers, so unlike `hasMagic` /
+  // `parseHeader` they need no Buffer wrapper — they are re-exported as-is.
+  DEFAULT_DECRYPT_KDF_LIMITS,
+  resolveDecryptKdfLimits,
+  assertKdfWithinDecryptLimits,
 } from './format-core.js';
 
 // Re-export all types unchanged.

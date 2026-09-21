@@ -76,5 +76,5 @@ body:
           required: true
         - label: "I am on a supported Node version (>=22.0.0)."
           required: true
-        - label: "This is not a security vulnerability (I would email per SECURITY.md instead)."
+        - label: "This is not a security vulnerability (those go through the private 'Report a vulnerability' form on the Security tab — see SECURITY.md)."
           required: true

@@ -15,6 +15,154 @@ export type LegacyMode = 'auto' | 'strict' | 'reject';
 /**
  * Configuration options for CryptoManager
  */
+/**
+ * Per-instance ceilings (and optional floors) on the KDF cost this manager is
+ * willing to honour from a ciphertext's own header when DECRYPTING.
+ *
+ * **Why this is separate from the wire-format caps.** Every v1 ciphertext and
+ * v2 container carries the Argon2id / PBKDF2 parameters that produced it, and
+ * those bytes are UNAUTHENTICATED at the moment they are read: the AES-GCM tag
+ * covering them cannot be verified until a key has been derived, and deriving
+ * that key is precisely the expensive step the header controls. The `MAX_*`
+ * constants in the format layer bound what the format can *express*
+ * (`memoryCost <= 2 ** 22` = 4 GiB, `timeCost <= 100`, `parallelism <= 64`,
+ * `iterations <= 10_000_000`). They say nothing about what *this process* is
+ * willing to spend before it knows the ciphertext is genuine. At those caps an
+ * ~87-byte input buys roughly 400 GiB-passes of Argon2id and 4 GiB of resident
+ * memory, or ~4.6 s of fully-blocked event loop on the synchronous PBKDF2
+ * paths. This option is the second budget.
+ *
+ * Every field is optional. An omitted ceiling resolves to
+ * `max(runtime default, this instance's own corresponding cost)` — so a manager
+ * can **always** decrypt its own output, whatever it was configured with, and
+ * no stored ciphertext becomes unreadable by upgrading. A ceiling you set
+ * explicitly is honoured exactly and never widened, because an explicit limit
+ * is a deliberate policy statement. One consequence worth knowing: an instance
+ * deliberately configured at the wire-format caps widens its own defaults to
+ * those caps, and the policy becomes a no-op for it.
+ *
+ * Read the effective values back with
+ * {@link CryptoCore.getDecryptKdfLimits}; the exported
+ * `DEFAULT_DECRYPT_KDF_LIMITS` is the *runtime default table*, not any
+ * particular instance's resolved budget.
+ *
+ * Only the high-level decrypt paths consult this. The low-level primitives
+ * (`deriveKey`, `deriveKeySync`, `encryptData`, `decryptData`) take the
+ * caller's own parameters rather than a ciphertext's and are deliberately
+ * unpoliced.
+ */
+export interface DecryptKdfLimits {
+  /**
+   * Maximum Argon2id `memoryCost`, in KiB, accepted from a header. Bounds peak
+   * resident memory, which is an OOM kill rather than a slow request and is
+   * therefore capped independently of {@link DecryptKdfLimits.maxWork}.
+   * Defaults to `2 ** 19` (512 MiB — exactly the `ULTRA` tier) in Node and
+   * `2 ** 18` (256 MiB) in the browser. Must be a positive integer no greater
+   * than `MAX_ARGON2_MEMORY_COST`.
+   */
+  maxMemoryCost?: number;
+  /**
+   * Maximum Argon2id `timeCost` (passes) accepted from a header. Default `10`.
+   *
+   * **Not redundant with {@link DecryptKdfLimits.maxWork}, and not to be removed
+   * as covered by the product cap.** libargon2 is built
+   * with threading and sets `threads = parallelism`, creating `lanes` OS
+   * threads per sync point per pass, so `timeCost` and `parallelism` together
+   * bound thread churn — a cost the `memoryCost x timeCost` product cannot see
+   * at all. A header of `m=512, t=100, p=64` is only 51 200 KiB-passes of
+   * hashing — a fraction of a percent of the default `maxWork` — yet asks for
+   * ~25 600 thread create/joins. The asymmetry is sharper than it looks:
+   * libargon2 dispatches to a single-threaded fill when `threads === 1`, and
+   * every profile this library ships uses `parallelism: 1`, so these two
+   * ceilings are the only thing between the library's real-world zero-thread
+   * behaviour and an attacker-chosen fan-out. Must be a positive
+   * integer no greater than `MAX_ARGON2_TIME_COST`.
+   */
+  maxTimeCost?: number;
+  /**
+   * Maximum Argon2id `parallelism` (lanes) accepted from a header. Default
+   * `16`. Bounds OS thread fan-out — see
+   * {@link DecryptKdfLimits.maxTimeCost}. Must be a positive integer no
+   * greater than `MAX_ARGON2_PARALLELISM`.
+   */
+  maxParallelism?: number;
+  /**
+   * Maximum Argon2id work, as `memoryCost * timeCost` in KiB-passes. This is
+   * the real CPU bound: Argon2id's compression count is `m' * t` where
+   * `m' = 4p * floor(m / 4p) <= m`, so the product is a sound conservative
+   * upper bound on CPU time while `memoryCost` alone bounds peak memory.
+   * Capping the product rather than only each axis is what allows the per-axis
+   * ceilings to stay generous — a cheap-but-many-passes header
+   * (`m=2 ** 17, t=10`) is accepted while an expensive combination in which
+   * each axis is individually legal (`m=2 ** 19, t=9`) is not. Defaults to
+   * `2 ** 22` (4 GiB-passes) in Node and `2 ** 20` in the browser.
+   */
+  maxWork?: number;
+  /**
+   * Maximum PBKDF2-SHA256 `iterations` accepted from a header, used by the
+   * synchronous paths. Default `2_000_000` (3.3x both this library's own
+   * default and the OWASP recommendation).
+   *
+   * **This ceiling bounds the damage; it does not remove it.** `pbkdf2Sync`
+   * runs on the calling thread, so even at the default a single request blocks
+   * the Node event loop for roughly 0.9 s. A service decrypting untrusted
+   * ciphertext should not use the synchronous paths at all. Must be a positive
+   * integer no greater than `MAX_PBKDF2_ITERATIONS`.
+   */
+  maxPbkdf2Iterations?: number;
+  /**
+   * Minimum Argon2id work (`memoryCost * timeCost`, KiB-passes) accepted from
+   * a header. Defaults to `0`, meaning **no floor**.
+   *
+   * This is the mirror image of the ceilings and guards a different attack: an
+   * attacker who supplies a ciphertext sealed at the *minimum* cost removes the
+   * KDF's rate-limiting from any service that decrypts with a held
+   * `defaultPassphrase`, turning it into a cheap oracle for guesses computed
+   * offline. It is opt-in for two reasons. A floor would refuse legitimate
+   * low-cost ciphertexts (this library's own browser default is 32 MiB, and the
+   * `MEDIUM` tier is only 32 768 work); and, more importantly, a floor is in
+   * direct tension with the ceilings beside it, because enforcing a minimum
+   * forces a full Argon2id derivation on *your* server for every request an
+   * attacker sends. Application-level rate limiting remains the primary
+   * defence for that scenario.
+   *
+   * **A floor does not reach legacy v0 input.** A v0 ciphertext carries no
+   * header, so there are no attacker-supplied parameters to police and the
+   * count comes from `legacyPbkdf2Iterations` instead. An attacker can
+   * therefore sidestep a floor by stripping the header: pair one with
+   * `legacyMode: 'strict'`/`'reject'`, or raise `legacyPbkdf2Iterations` to
+   * match.
+   *
+   * No separate minimum-memory field is needed: since
+   * `timeCost <= maxTimeCost`, requiring `m * t >= minWork` implies
+   * `m >= minWork / maxTimeCost`. At the default `maxTimeCost` of `10`, a
+   * `minWork` of `393_216` already forces `memoryCost >= ~38 MiB`. Must be a
+   * non-negative integer.
+   */
+  minWork?: number;
+  /**
+   * Minimum PBKDF2-SHA256 `iterations` accepted from a header. Defaults to `0`
+   * (no floor). Same rationale as {@link DecryptKdfLimits.minWork}. Must be a
+   * non-negative integer.
+   */
+  minPbkdf2Iterations?: number;
+}
+
+/**
+ * {@link DecryptKdfLimits} with every field resolved to a concrete number —
+ * what {@link CryptoCore.getDecryptKdfLimits} returns and what the format
+ * layer's assertion helper consumes. A floor of `0` means "no floor".
+ */
+export interface ResolvedDecryptKdfLimits {
+  maxMemoryCost: number;
+  maxTimeCost: number;
+  maxParallelism: number;
+  maxWork: number;
+  maxPbkdf2Iterations: number;
+  minWork: number;
+  minPbkdf2Iterations: number;
+}
+
 export interface CryptoManagerOptions {
   /** Argon2 memory cost (default: 131072 — 2 ** 17, 128 MiB) */
   memoryCost?: number;
@@ -114,6 +262,18 @@ export interface CryptoManagerOptions {
    * `legacyHeaderAad: backward-compat decrypt of v1.0.0 ciphertexts`.
    */
   legacyHeaderAad?: boolean;
+  /**
+   * Ceilings (and optional floors) on the KDF cost this manager will honour
+   * from a ciphertext's own header when decrypting. See
+   * {@link DecryptKdfLimits} for the threat this closes, the per-field
+   * defaults, and why an omitted ceiling widens to this instance's own cost.
+   *
+   * Omit it and the runtime defaults apply, which is the secure configuration;
+   * the option exists to tighten the budget for a service exposed to untrusted
+   * ciphertext, or to raise it deliberately in order to read a third party's
+   * unusually expensive data.
+   */
+  decryptKdfLimits?: DecryptKdfLimits;
 }
 
 /**

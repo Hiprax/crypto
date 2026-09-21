@@ -879,7 +879,15 @@ describe('serializeV2Meta / parseV2Meta', () => {
     // flags = filename present; declared length 100 but no bytes follow.
     const block = new Uint8Array(39);
     block[0] = 0x01;
-    new DataView(block.buffer).setUint16(37, 100, false);
+    // Offset and length are explicit even though `block` is a freshly
+    // allocated array at offset 0. A bare `new DataView(x.buffer)` is the
+    // exact hazard this suite pins elsewhere (a view's `byteOffset` silently
+    // ignored), and it should not appear in the file that guards it.
+    new DataView(block.buffer, block.byteOffset, block.byteLength).setUint16(
+      37,
+      100,
+      false
+    );
     try {
       parseV2Meta(block);
       throw new Error('expected parseV2Meta to throw');

@@ -301,7 +301,17 @@ describe('Node built-in crypto.argon2 provider', () => {
       // NEGATIVES. The ciphertext is not the plaintext in disguise; the key
       // really is password-derived, so a different password does not open it;
       // and `hash-wasm` was never reached across any of these derivations.
-      expect(ciphertext).not.toContain(plaintext);
+      //
+      // The first one searches the DECODED bytes, not the base64url string,
+      // and the difference is the whole value of the assertion. `plaintext`
+      // contains spaces, which the base64url alphabet cannot produce, so
+      // `expect(ciphertext).not.toContain(plaintext)` would be true of every
+      // possible input and could never fail — decoration rather than a test.
+      // Against the decoded payload it is a real claim: replace the AEAD with
+      // a passthrough and this line goes red.
+      expect(Buffer.from(ciphertext, 'base64url').includes(plaintext)).toBe(
+        false
+      );
       await expect(
         manager.decryptText(ciphertext, `${KAT_PASSWORD}-wrong`)
       ).rejects.toBeInstanceOf(CryptoError);

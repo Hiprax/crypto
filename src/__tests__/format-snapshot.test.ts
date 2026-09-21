@@ -202,6 +202,18 @@ describe('v1 ciphertext format snapshot tests (Task 13)', () => {
     });
 
     afterEach(() => {
+      // Un-register the `argon2` module mock this block installs. Neither line
+      // below does it: `jest.resetModules()` clears the module REGISTRY but
+      // leaves mock state alone, and `jest.restoreAllMocks()` only restores
+      // `jest.spyOn` spies. The mock is dormant in this file today (nothing
+      // else here performs a real Argon2id derivation), but leaving it
+      // registered means the first one that ever does would cache the fixed
+      // key forever via `engine.node.ts`'s `argon2ModuleCache`, and every
+      // password would then derive the same KEK. The identical omission was a
+      // live, reproducible defect in `container.test.ts`. Safe for the
+      // checked-in snapshot: `afterEach` runs only after the test body and all
+      // of its `toMatchSnapshot` calls have completed.
+      jest.unstable_unmockModule('argon2');
       jest.resetModules();
       jest.restoreAllMocks();
     });

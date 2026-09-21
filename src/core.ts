@@ -498,8 +498,11 @@ export function parseV2Meta(meta: Uint8Array): ParsedV2Meta {
   // `Uint8Array.prototype.slice` and returns an aliasing VIEW, so a bare
   // `.slice(...)` here would be a copy in the browser and a view in Node —
   // where `meta` is always a `Buffer`, because `nodeAeadDecrypt` returns
-  // `Buffer.concat(...)`. `new Uint8Array(view)` copies in both runtimes, so
-  // the caller can scrub the block without blanking the digest.
+  // `Buffer.concat(...)`. Wrapping the subarray in `new Uint8Array(...)`
+  // copies in both runtimes, so the caller can scrub the block without
+  // blanking the digest. (Do NOT read that as `new Uint8Array(view)`: `view`
+  // is the DataView bound above, and a DataView is neither a TypedArray nor
+  // iterable, so that spelling would yield an EMPTY array.)
   const sha256 = new Uint8Array(meta.subarray(5, META_FIXED_PREFIX_BYTES));
   let offset = META_FIXED_PREFIX_BYTES;
 

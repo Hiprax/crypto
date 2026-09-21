@@ -104,7 +104,14 @@ treated as security incidents:
   syntactic guarantees of `validatePath`.
 - **Vulnerabilities in `argon2` or other runtime dependencies that materially
   weaken the library's guarantees.** These will be fixed by bumping the
-  affected dep; please report them privately the same way.
+  affected dep; please report them privately the same way. Note that as of
+  v1.7.0 the Node build's Argon2id can come from any of three providers (see
+  "Argon2id providers" below): a defect in the optional `argon2` or `hash-wasm`
+  packages is in scope here, while a defect in Node's own `crypto.argon2`
+  belongs to the Node.js project and should be reported through
+  <https://github.com/nodejs/node/security>. If it affects how this library
+  *uses* the built-in — wrong parameters, a mishandled error, a key not
+  cleared — that part is ours; tell us as well.
 
 ## Out of Scope
 
@@ -295,6 +302,31 @@ please call that out explicitly in the report.
   re-verified on decrypt (`CONTAINER_INTEGRITY_FAILED` on mismatch). It does
   not touch the v0/v1 paths and each format rejects the other's blobs.
 - **AAD**: `"secure-crypto-tool-v2"` by default, configurable per instance.
+- **Argon2id providers** (async paths, Node build): three, tried in a fixed
+  order — the optional native [`argon2`](https://www.npmjs.com/package/argon2)
+  addon, then Node's own `crypto.argon2` (built into the runtime from **Node
+  24.7.0**), then the optional pure-WebAssembly
+  [`hash-wasm`](https://www.npmjs.com/package/hash-wasm). All three implement
+  the RFC 9106 Argon2id reference and derive **bit-identical** keys for the
+  same `(password, salt, memoryCost, timeCost, parallelism, hashLength)`
+  tuple — verified across nine parameter sets at development time, including
+  the `memoryCost === 8 * parallelism` floor, four of which are pinned as
+  standing regression tests — so which one answers is a
+  performance and packaging question and has **no effect on the strength or
+  the portability of a ciphertext**. There is deliberately no way to select
+  one: interchangeable providers make a switch a way to choose a slower one
+  and nothing else. Two consequences are worth stating for a threat model.
+  First, the **supply-chain surface is now optional**: on Node >= 24.7.0,
+  `npm i @hiprax/crypto --omit=optional` gives a fully working async API with
+  **no third-party Argon2id code in the dependency tree at all**, which is the
+  smallest attack surface this library can be installed with. Second, on
+  **Node 22** — the `engines.node` floor — there is no built-in, so one of the
+  two optional packages remains required for any async path. If none of the
+  three is available, the async paths **refuse** with
+  `CryptoError(MEMORY_ERROR, 'ARGON2_NOT_AVAILABLE')`; they never silently
+  downgrade to PBKDF2 or to a weaker profile.
+  The browser build is unaffected by this: it uses `hash-wasm`
+  unconditionally, because Web Crypto has no Argon2id.
 
 See the [README](README.md) for the full parameter reference.
 

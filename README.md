@@ -18,7 +18,7 @@
 
 | | |
 | --- | --- |
-| **Getting started** | [Features](#-features) · [Installation](#-installation) · [Module system](#module-system) · [Argon2 providers](#argon2-native-dependency-optional-with-wasm-fallback) · [Browser build](#browser-build) · [CommonJS interop](#commonjs-interop) · [Quick Start](#-quick-start) |
+| **Getting started** | [Features](#-features) · [Installation](#-installation) · [Module system](#module-system) · [Argon2 providers](#argon2-providers-native-node-built-in-wasm) · [Browser build](#browser-build) · [CommonJS interop](#commonjs-interop) · [Quick Start](#-quick-start) |
 | **Reference** | [API Reference](#-api-reference) · [Constructor options](#constructor) · [Methods](#methods) · [Types and enums](#types-and-enums) · [Utility functions](#utility-functions) · [Wire-format and codec exports](#wire-format-and-codec-exports) · [Full export surface](#full-export-surface-at-a-glance) |
 | **Runtimes** | [Isomorphic API & browser support](#-isomorphic-api--browser-support) · [Cross-runtime interop](#cross-runtime-interop) · [Browser Argon2id profile](#browser-argon2id-profile-32-mib-default-and-the-128-mib-decrypt-caveat) · [CSP for WASM](#content-security-policy-wasm) · [Node-only methods in the browser](#node-only-methods-throw-in-the-browser) |
 | **Formats** | [Ciphertext format (v1)](#ciphertext-format-v1) · [Container mode (v2)](#-container-mode-v2-envelope) · [Container format (v2)](#container-format-v2) · [Telling the formats apart](#telling-the-formats-apart) |
@@ -41,7 +41,7 @@
 - ✅ **Strong password** validation with detailed feedback
 - 🔄 **Cross-platform** compatibility
 - 📝 **Full TypeScript** support with strict typing
-- 🧪 **Comprehensive testing** — 1,160 tests: 1,126 in the Node suite (26 files, Jest) plus 34 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
+- 🧪 **Comprehensive testing** — 1,185 tests: 1,151 in the Node suite (27 files, Jest) plus 34 in a real headless Chromium (Vitest Browser Mode), behind a one-way coverage ratchet (95% statements / 87% branches / 97% functions / 95% lines)
 - 🚀 **Modern ES modules** with tree-shaking support
 - 🔒 **Security-focused** with constant-time comparisons
 - 🔑 **Default passphrase** support for simplified usage
@@ -58,28 +58,36 @@ This package is **ESM-only** (`"type": "module"`). It is not shipped with a Comm
 
 The main entry (`.`) is an **[isomorphic](#-isomorphic-api--browser-support)** conditional export: Node resolves the Node build (`dist/index.js`) and browser bundlers resolve a separate, `node:`-free browser build (`dist/index.browser.js`). The `browser` build ships the same in-memory async API over Web Crypto + WebAssembly Argon2id — see [Browser build](#browser-build) and [Isomorphic API & Browser Support](#-isomorphic-api--browser-support).
 
-### Argon2 native dependency (optional, with WASM fallback)
+### Argon2 providers (native, Node built-in, WASM)
 
-The async key-derivation paths (`encryptText`, `decryptText`, `encryptFile`, `decryptFile`, `deriveKey`) use Argon2id — the gold standard for password hashing. Two providers are supported and tried in order:
+The async key-derivation paths (`encryptText`, `decryptText`, `encryptFile`, `decryptFile`, `deriveKey`) use Argon2id — the gold standard for password hashing. **Three** providers are supported and tried in order:
 
-1. **Native [`argon2`](https://www.npmjs.com/package/argon2)** — fastest, but requires a working C++ toolchain (Python + node-gyp) at install time on platforms without a prebuilt binary.
-2. **WASM [`hash-wasm`](https://www.npmjs.com/package/hash-wasm)** — pure WebAssembly, zero native deps, works everywhere Node.js runs. Slower than native at the default 128 MiB profile, but only by a small constant factor and the gap is host-dependent (measured at **1.8x** on the maintainer's Linux machine on 2026-09-10: ~357 ms native vs ~631 ms WASM per derivation, the native side sampled ten times across a 352-363 ms range; budget for up to ~3x on weaker hardware. A single Argon2id derivation is not a stable constant, and this repo records more than one figure for it: `bench/README.md` and `CLAUDE.md` both cite 395 ms for the same operation from an earlier session on the same machine. Treat any absolute number here as an order of magnitude and run `npm run bench` for a current one). It is the same RFC 9106 Argon2id reference, so the derived keys are **bit-identical** between providers, and v1 ciphertexts produced by either round-trip across both. Verify it yourself with `bench/kdf.mjs`, or by hashing the same `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple through each and comparing the bytes.
+1. **Native [`argon2`](https://www.npmjs.com/package/argon2)** — fastest, but requires a working C++ toolchain (Python + node-gyp) at install time on platforms without a prebuilt binary. Declared as an **optional dependency**.
+2. **Node's own `crypto.argon2`** — built into the runtime from **Node 24.7.0** onward. Nothing to install: no compiler, no WebAssembly package, no dependency of any kind. Like the native addon, it runs the derivation off the event loop.
+3. **WASM [`hash-wasm`](https://www.npmjs.com/package/hash-wasm)** — pure WebAssembly, zero native deps, works everywhere Node.js runs, including Node 22, where there is no built-in. Declared as an **optional dependency**. It is also the provider the [browser build](#browser-build) uses unconditionally, because Web Crypto has no Argon2id.
 
-Both packages are declared as **optional dependencies**. The library tries native first (highest performance) and transparently falls back to WASM if native is unavailable. If BOTH are unavailable, async encryption throws `CryptoError(MEMORY_ERROR, 'ARGON2_NOT_AVAILABLE')` with the message:
+All three implement the same RFC 9106 Argon2id reference and derive **bit-identical** keys for the same `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple — verified across nine parameter sets at development time, including the `memoryCost === 8 * parallelism` floor and memory values that are not a multiple of `4 * parallelism` (all three apply the same rounding). Four of those nine are pinned as regression tests in `src/__tests__/argon2-provider-parity.test.ts`; the rest were one-off checks. A v1 ciphertext produced under any one of them therefore round-trips under any other, and which provider answers is a performance and packaging question rather than a compatibility one. There is deliberately **no way to select one**: providers that are interchangeable by construction make a switch a way to pick a slower one and nothing else.
+
+Measured cost per derivation at the library's default 128 MiB / `t=3` / `p=1` profile, five runs each on the maintainer's Linux machine (Node v24.19.0) on **2026-09-21**: native **343 ms**, Node built-in **403 ms**, `hash-wasm` **597 ms**. Treat those as an order of magnitude rather than a budget. A single Argon2id derivation is not a stable constant, and this repository records more than one figure for the same operation — an earlier session on the same machine measured ~357 ms native against ~631 ms WASM on 2026-09-10, and [`bench/README.md`](bench/README.md) cites 395 ms — so budget for a wider spread on weaker hardware and run `npm run bench` for a number from your own host. To check the bit-identical claim yourself, hash the same tuple through each provider and compare the bytes — that is what `src/__tests__/argon2-provider-parity.test.ts` does. (`bench/kdf.mjs` will not tell you: it times whichever provider the chain resolves, it does not compare them.)
+
+**On Node >= 24.7.0 the async API needs no optional dependency at all.** `npm i @hiprax/crypto --omit=optional` installs nothing but the package itself, and `encryptText` / `decryptText` / `encryptFile` / `decryptFile` / `deriveKey` still work, because the runtime supplies Argon2id. On **Node 22** — the package minimum, in Maintenance LTS until 2027-04-30 — there is no built-in, so one of the two optional packages is required for any async path; the synchronous PBKDF2 methods need neither on any version.
+
+The library tries native first (highest performance), then the runtime's built-in, then WASM. If **all three** are unavailable, async encryption throws `CryptoError(MEMORY_ERROR, 'ARGON2_NOT_AVAILABLE')` with the message:
 
 ```text
-argon2 native module unavailable. Install build tools (Python + node-gyp) or install the optional `hash-wasm` package for a pure-WASM Argon2id fallback (slower than native but works everywhere). Alternatively, use *Sync methods (PBKDF2). Native error: <msg>. WASM error: <msg>.
+argon2 native module unavailable. Install build tools (Python + node-gyp), or run on Node >= 24.7.0 (whose built-in `crypto.argon2` needs no install at all), or install the optional `hash-wasm` package for a pure-WASM Argon2id fallback (slower than native but works everywhere). Alternatively, use *Sync methods (PBKDF2). Native error: <msg>. Node built-in error: <msg>. WASM error: <msg>.
 ```
 
-(the trailing `Native error: … WASM error: …` carries the concrete failure reason from each provider.)
+(the trailing `Native error: … Node built-in error: … WASM error: …` carries the concrete failure reason from each link of the chain, so "not installed" stays distinguishable from "installed but broken" for every one of them.)
 
-To recover from a "both unavailable" error, do any of:
+To recover from an "all three unavailable" error, do any of the following — they are listed in the chain's own order, which is also fastest-first:
 
 1. Install build tools and reinstall so `argon2`'s `node-gyp` step succeeds (best performance), **or**
-2. Install `hash-wasm` explicitly: `npm install hash-wasm` (no build tools needed; transparent fallback once installed), **or**
-3. Use the synchronous methods (`encryptTextSync`, `decryptTextSync`, `encryptFileSync`, `decryptFileSync`, `deriveKeySync`) which use PBKDF2-HMAC-SHA256 and have no native-module dependency. Note that PBKDF2 is materially weaker than Argon2id against GPU/ASIC adversaries — prefer (1) or (2) for new ciphertexts.
+2. Run on **Node >= 24.7.0**, where `crypto.argon2` is part of the runtime — the only option on this list that installs nothing, **or**
+3. Install `hash-wasm` explicitly: `npm install hash-wasm` (no build tools needed; transparent fallback once installed), **or**
+4. Use the synchronous methods (`encryptTextSync`, `decryptTextSync`, `encryptFileSync`, `decryptFileSync`, `deriveKeySync`) which use PBKDF2-HMAC-SHA256 and have no Argon2id provider dependency at all. Note that PBKDF2 is materially weaker than Argon2id against GPU/ASIC adversaries — prefer (1), (2) or (3) for new ciphertexts.
 
-Note: a successful first load is cached for the lifetime of the process (subsequent async calls reuse the same provider). A failed first load is NOT cached — the next caller retries from scratch, so transient failures (e.g. a temporary FS permission glitch on Windows during a build-tool install) can recover within the same process.
+Note: a successful first load is cached for the lifetime of the process (subsequent async calls reuse the same provider). A failed first load is NOT cached — the next caller retries the whole chain from scratch, so transient failures (e.g. a temporary FS permission glitch on Windows during a build-tool install) can recover within the same process.
 
 ### Browser build
 
@@ -919,7 +927,7 @@ node -e "import('@hiprax/crypto').then(m => console.log(Object.keys(m).sort().jo
 
 ## 🌐 Isomorphic API & Browser Support
 
-`@hiprax/crypto` runs the **same code, over the same wire format, in Node and the browser.** The in-memory async API — `encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` / `encryptContainer` / `decryptContainer` / `inspectHeader` / `validatePassword` / `getParameters` / `getSecurityLevel` — lives in a runtime-agnostic core and is available in both builds. The runtime-specific primitives (CSPRNG, Argon2id, AES-256-GCM, SHA-256) are the only thing that differs: Node uses `node:crypto` + native/WASM Argon2id, the browser uses Web Crypto (SubtleCrypto) + WebAssembly Argon2id (`hash-wasm`). There is **exactly one ciphertext format** — a blob produced in one runtime decrypts in the other.
+`@hiprax/crypto` runs the **same code, over the same wire format, in Node and the browser.** The in-memory async API — `encryptBytes` / `decryptBytes` / `encryptText` / `decryptText` / `encryptContainer` / `decryptContainer` / `inspectHeader` / `validatePassword` / `getParameters` / `getSecurityLevel` — lives in a runtime-agnostic core and is available in both builds. The runtime-specific primitives (CSPRNG, Argon2id, AES-256-GCM, SHA-256) are the only thing that differs: Node uses `node:crypto` plus one of its [three Argon2id providers](#argon2-providers-native-node-built-in-wasm), the browser uses Web Crypto (SubtleCrypto) + WebAssembly Argon2id (`hash-wasm`). There is **exactly one ciphertext format** — a blob produced in one runtime decrypts in the other.
 
 ### Isomorphic in-memory API
 
@@ -938,7 +946,7 @@ The empty `Uint8Array` is accepted and produces a valid authenticated ciphertext
 
 ### Cross-runtime interop
 
-Because both runtimes share one format and one KDF (Argon2id, whose native/WASM outputs are bit-identical for the same parameters), a ciphertext crosses the boundary transparently:
+Because both runtimes share one format and one KDF (Argon2id, whose native, Node-built-in and WASM outputs are all bit-identical for the same parameters), a ciphertext crosses the boundary transparently:
 
 ```ts
 // In the browser (32 MiB Argon2id default):
@@ -1537,17 +1545,17 @@ Everything above is chained into a single command, which stops at the first fail
 npm run verify
 ```
 
-It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball`, and takes roughly 2.5 minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
+It runs `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball`, and takes roughly two minutes. `prepublishOnly` is defined as exactly `npm run verify`, so the gate that guards a release and the gate a contributor runs are one command and cannot drift apart. `npm run test:coverage` enforces the coverage floor separately (a one-way ratchet: currently 95% statements, 87% branches, 97% functions, 95% lines), and `npm run test:browser` covers the real-Chromium tier.
 
-Those commands form three tiers. Durations were measured on Node v24.19.0 at 25 suites / 1,113 tests (the suite is now 26 / 1,126; the added file is a pure-function unit test that runs in well under a second and does not move the tier timings); the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
+Those commands form three tiers, measured on **2026-09-21** on Node v24.19.0 at the current 27 suites / 1,151 tests. Read FAST and the 1 m 58 s FULL figure as one paired measurement from a single session — that pairing is what makes FULL equal FAST plus the four `check:*` gates. The wider FULL band spans seven runs under different machine loads, so its floor sits below this session's FAST number and is not something to subtract from it; the Jest step dominates every tier and its run-to-run spread is wide, so treat them as an order of magnitude rather than a budget:
 
 | Tier | Command | Measured | When |
 | --- | --- | --- | --- |
-| FAST | `npm run lint && npm run type-check && npm run build && npm test` | ~2 min | every change |
-| FULL | `npm run verify` | ~2.5 min | before every push; also `prepublishOnly` |
+| FAST | `npm run lint && npm run type-check && npm run build && npm test` | ~1 m 50 s (lint 6.7 s, type-check 1.3 s, build 1.7 s, test 100.1 s) | every change |
+| FULL | `npm run verify` | 1 m 58 s paired with the FAST row above; 1 m 45 s to 2 m 12 s across seven runs — FAST plus `check:browser` 0.2 s, `check:types:browser` 1.8 s, `check:exports` 3.9 s, `check:tarball` 0.7 s | before every push; also `prepublishOnly` |
 | BROWSER | `npm run build && npm run test:browser` | ~7 s, after a one-time `npx playwright install --with-deps chromium` | when the browser graph, the wire format or the container format changes, and before every release |
 
-FAST is a strict prefix of FULL, so there is no reason to run FAST when FULL is affordable. The coverage ratchet is enforced by `npm run test:coverage`, which CI runs in its equivalent form (`npm test -- --coverage`) on its Ubuntu / Node 22 leg; note that `npm run verify` runs Jest without `--coverage`, so a green `verify` does not by itself assert the coverage floor.
+FAST is a strict prefix of FULL, and within one session the ~9 seconds between them buy all four remaining gates, so there is no reason to run FAST when FULL is affordable. The coverage ratchet is enforced by `npm run test:coverage`, which CI runs in its equivalent form (`npm test -- --coverage`) on its Ubuntu / Node 22 leg; note that `npm run verify` runs Jest without `--coverage`, so a green `verify` does not by itself assert the coverage floor.
 
 ## ⚡ Benchmarks
 
@@ -1606,7 +1614,7 @@ Two consequences worth knowing when writing handlers:
 - **A code is not pinned to one type.** `INVALID_HEADER_PARAM` is `INVALID_INPUT` when `packHeader` rejects an out-of-width value and `DECRYPTION_FAILED` when `parseHeader` rejects a non-positive parameter; `UNSUPPORTED_KDF` splits the same way. Matching on `code` alone is correct in both.
 - **A key-derivation failure is re-typed on decrypt paths.** `KEY_DERIVATION_FAILED` / `SYNC_KEY_DERIVATION_FAILED` carry `ENCRYPTION_FAILED` when raised by a direct `deriveKey` / `deriveKeySync` call (a derivation is neither direction), and are re-typed to `DECRYPTION_FAILED` when they surface inside a decrypt. The `code` is preserved either way.
 
-Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (install `hash-wasm` or, in Node, native build tools); `DATA_TOO_LARGE_FOR_GCM` (type `INVALID_INPUT`) — see below; and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
+Notable codes beyond the format/parser codes above: `UNSUPPORTED_IN_BROWSER` (type `INVALID_INPUT`) — a Node-only method was called on the [browser build](#-isomorphic-api--browser-support); `ARGON2_NOT_AVAILABLE` (type `MEMORY_ERROR`) — no Argon2id provider is available (in Node, run on 24.7.0+ for the built-in, or install native build tools or `hash-wasm` — see [Argon2 providers](#argon2-providers-native-node-built-in-wasm); in the browser, install `hash-wasm`); `DATA_TOO_LARGE_FOR_GCM` (type `INVALID_INPUT`) — see below; and the [container-mode codes](#container-error-codes) such as `CONTAINER_INTEGRITY_FAILED`.
 
 ### The AES-GCM per-invocation size limit
 
@@ -1637,7 +1645,7 @@ In practice this is a bound on a *single* call, not on how much data the library
 npm run verify
 ```
 
-The single gate. It chains `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball` and stops at the first failure (~2.5 minutes). `prepublishOnly` is defined as exactly this command, so a change cannot pass a working session and then fail a release. Run it before opening a pull request; the individual steps below are for iterating.
+The single gate. It chains `lint` → `type-check` → `build` → `test` → `check:browser` → `check:types:browser` → `check:exports` → `check:tarball` and stops at the first failure (roughly two minutes). `prepublishOnly` is defined as exactly this command, so a change cannot pass a working session and then fail a release. Run it before opening a pull request; the individual steps below are for iterating.
 
 ### Building
 
@@ -1692,7 +1700,7 @@ A cryptography library is only as useful as its honesty about what it does and d
 
 - **Rubber-hose cryptanalysis.** If the password is coerced out of the user, the library cannot help. Strong-password validation does not survive an attacker who can compel the user to reveal it.
 - **Weak passwords.** Encryption is only as strong as the password. The library validates strength at encryption time (8-char composition rule OR ≥20-char passphrase rule — see [Password Requirements](#password-requirements)), but the caller is responsible for sourcing high-entropy inputs and protecting against credential reuse. A weak password makes Argon2id/PBKDF2 brute-force tractable regardless of the parameters.
-- **Side-channel attacks beyond constant-time comparison.** The library uses `crypto.timingSafeEqual` for tag/string comparisons, but it does NOT defend against cache-timing, power-analysis, electromagnetic-emanation, or microarchitectural side channels in the underlying AES-256-GCM, Argon2id, or PBKDF2 implementations (which run in OpenSSL via Node.js's `crypto` module and the `argon2` native addon). Hardened deployments must rely on the host's mitigations (microcode, hypervisor isolation, etc.).
+- **Side-channel attacks beyond constant-time comparison.** The library uses `crypto.timingSafeEqual` for tag/string comparisons, but it does NOT defend against cache-timing, power-analysis, electromagnetic-emanation, or microarchitectural side channels in the underlying AES-256-GCM, Argon2id, or PBKDF2 implementations (which run in OpenSSL via Node.js's `crypto` module and, for Argon2id, in whichever of the three providers resolves — the `argon2` native addon, Node's own `crypto.argon2`, or the `hash-wasm` WebAssembly build). Hardened deployments must rely on the host's mitigations (microcode, hypervisor isolation, etc.).
 - **Low password entropy against a future quantum adversary.** The primitives themselves are quantum-resistant — the library contains no public-key cryptography for Shor's algorithm to break, and AES-256, Argon2id, and PBKDF2-HMAC-SHA256 retain ≥128-bit effective strength under Grover's algorithm per NIST, NSA CNSA 2.0, and BSI guidance (see [Post-Quantum Security](#-post-quantum-security) for the full posture and sources). What no cipher can fix is a weak password: Grover halves the effective entropy of the password search space, so a "harvest now, decrypt later" adversary with future quantum capability attacks the password, not AES-256. If that adversary is in your threat model, use the async (Argon2id) path with a high-entropy passphrase (e.g. 8-10 random diceware words, ≈103-129 bits). The deliberate absence of a Kyber/Dilithium hybrid mode is not a gap: those standards replace key exchange and signatures, and this library performs neither.
 - **OS CSPRNG compromise.** All randomness (salt, IV, container DEK, temp-file suffix) is sourced from `crypto.randomBytes`/`crypto.randomUUID` in Node and `crypto.getRandomValues` in the browser, all of which delegate to the host's CSPRNG (`getrandom(2)` on Linux, `BCryptGenRandom` on Windows, `SecRandomCopyBytes` on macOS). If the OS RNG is backdoored, virtualised onto a deterministic shim, or seeded with insufficient entropy at boot, the library inherits that compromise — IVs may collide, salts may be predictable, and the IND-CPA guarantee degrades. Detecting OS-level RNG compromise is outside the library's scope.
 - **String-copy memory leaks via V8.** `secureClear` zeroes the underlying `ArrayBuffer` slab of a Buffer, but V8 may have already created internal string copies of password or plaintext data for hashing, interning, or deoptimisation paths. Those copies are unreachable to `Buffer.fill(0)` and live until garbage collection. Treat `secureClear` as defence-in-depth, not as a forensic-grade wipe. The same caveat applies — more directly, by deliberate retention rather than incidental V8 behaviour — to `CryptoManager` instances configured with `defaultPassphrase`: the library stores the passphrase as a regular V8 string for the manager's lifetime and cannot scrub it. For sensitive workloads, pass the password explicitly to each `encrypt*` / `decrypt*` call instead of configuring `defaultPassphrase`. See [Password Requirements](#password-requirements) for the full retention discussion.

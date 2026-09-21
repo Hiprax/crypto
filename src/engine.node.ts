@@ -69,13 +69,15 @@ type Argon2Module = {
  *   - `parallelism`       ↔ `parallelism`
  *   - `hashLength`        ↔ `hashLength`
  *
- * Both libraries implement the RFC 9106 Argon2id reference, so the raw
- * 32-byte derived keys are bit-identical for the same `(password, salt,
- * memoryCost, timeCost, parallelism, hashLength)` tuple. This is verified
- * with real, unmocked known-answer vectors in `argon2-provider-parity.test.ts`
- * (the adapter-wiring cases in `argon2-lazy-load.test.ts` mock both providers
- * and are NOT parity evidence) — drift would mean a v1 ciphertext produced
- * under one runtime cannot be decrypted under the other, so those tests pin the
+ * Both libraries implement the RFC 9106 Argon2id reference, as does the third
+ * provider in the chain, Node's built-in `crypto.argon2`, so the raw 32-byte
+ * derived keys are bit-identical across ALL THREE for the same
+ * `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple.
+ * This is verified with real, unmocked known-answer vectors in
+ * `argon2-provider-parity.test.ts` (the adapter-wiring cases in
+ * `argon2-lazy-load.test.ts` mock the two importable providers and are NOT
+ * parity evidence) — drift would mean a v1 ciphertext produced under one
+ * runtime cannot be decrypted under the other, so those tests pin the
  * round-trip explicitly.
  */
 type HashWasmModule = {
@@ -144,7 +146,8 @@ export type Argon2Hasher = {
 };
 
 /**
- * Module-level cache for the loaded Argon2 hasher (native or WASM-backed).
+ * Module-level cache for the loaded Argon2 hasher (native, Node built-in,
+ * or WASM-backed).
  * Three observable states, with the in-flight loading state expressed as
  * the unsettled promise itself:
  *
@@ -410,6 +413,11 @@ async function importHashWasmArgon2(): Promise<Argon2Hasher> {
  * timeCost, parallelism, hashLength)` tuple — verified across nine parameter
  * sets, including the `memoryCost === 8 * parallelism` floor and values that
  * are not multiples of `4 * parallelism` (all three apply the same rounding).
+ * Of those nine, FOUR are pinned as standing regression tests in
+ * `argon2-provider-parity.test.ts` (the KAT tuple against all three providers,
+ * plus `m=8/p=1`, `m=9/p=1` and `m=100/p=7` between the built-in and
+ * `hash-wasm`); the rest were one-off development probes. Do not read the test
+ * file as the full record of the nine.
  * The fallback chain therefore does NOT change ciphertext compatibility: a v1
  * ciphertext produced under any one provider round-trips under any other.
  *

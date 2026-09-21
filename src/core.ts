@@ -494,7 +494,13 @@ export function parseV2Meta(meta: Uint8Array): ParsedV2Meta {
   const view = viewOf(meta);
   const flags = view.getUint8(0);
   const size = view.getUint32(1, false);
-  const sha256 = meta.slice(5, 5 + 32); // copy so `meta` can be scrubbed later
+  // Copy, explicitly: `Buffer.prototype.slice` SHADOWS
+  // `Uint8Array.prototype.slice` and returns an aliasing VIEW, so a bare
+  // `.slice(...)` here would be a copy in the browser and a view in Node —
+  // where `meta` is always a `Buffer`, because `nodeAeadDecrypt` returns
+  // `Buffer.concat(...)`. `new Uint8Array(view)` copies in both runtimes, so
+  // the caller can scrub the block without blanking the digest.
+  const sha256 = new Uint8Array(meta.subarray(5, META_FIXED_PREFIX_BYTES));
   let offset = META_FIXED_PREFIX_BYTES;
 
   const readString = (): string => {

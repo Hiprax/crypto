@@ -785,6 +785,61 @@ describe('serializeV2Meta / parseV2Meta', () => {
     expect(bytesToHex(parsed.sha256)).toBe(bytesToHex(SHA));
   });
 
+  // `parseV2Meta` is isomorphic: `core.ts` runs unchanged in Node and in the
+  // browser. Its JSDoc promises the returned `sha256` is "a fresh copy so the
+  // caller can scrub the source block independently", and `decryptContainer`
+  // does exactly that (`this.secureClear(metaPlain)`). The hazard is that
+  // `Buffer.prototype.slice` SHADOWS `Uint8Array.prototype.slice` and returns
+  // an aliasing VIEW, so the same expression is a copy in the browser and a
+  // view in Node — and in the Node build the block is always a `Buffer`,
+  // because `nodeAeadDecrypt` returns `Buffer.concat(...)`. These two twins
+  // pin the contract in BOTH runtime shapes; each asserts the digest survives
+  // the scrub AND the negative that must hold for it to keep surviving: the
+  // digest shares no backing store with the block it came from.
+  it.each([
+    [
+      'Node Buffer input (nodeAeadDecrypt returns Buffer.concat)',
+      (block: Uint8Array): Uint8Array => Buffer.from(block),
+    ],
+    [
+      'plain Uint8Array input (webAeadDecrypt returns new Uint8Array)',
+      (block: Uint8Array): Uint8Array => Uint8Array.from(block),
+    ],
+  ])(
+    'parseV2Meta returns a sha256 that survives scrubbing the source block — %s',
+    (_label, wrap) => {
+      const source = wrap(
+        serializeV2Meta({
+          size: 4242,
+          sha256: SHA,
+          filename: utf8Encode('secret.pdf'),
+          mime: utf8Encode('application/pdf'),
+        })
+      );
+
+      const parsed = parseV2Meta(source);
+      const capturedHex = bytesToHex(parsed.sha256);
+      // Guard the guard: a digest that was already zero would make the
+      // survival assertion below vacuous.
+      expect(capturedHex).toBe(bytesToHex(SHA));
+      expect(parsed.sha256.length).toBe(32);
+
+      source.fill(0); // the caller scrubs the cleartext meta block
+
+      expect(bytesToHex(parsed.sha256)).toBe(capturedHex);
+      expect(parsed.sha256.every(byte => byte === 0)).toBe(false);
+      // NEGATIVE: the copy must not alias the block at all. This is the
+      // property that keeps the survival assertion true for any future caller,
+      // not just for this scrub ordering.
+      expect(parsed.sha256.buffer).not.toBe(source.buffer);
+      // The other parsed fields were already decoded into JS strings/numbers,
+      // so they must be unaffected by the scrub too.
+      expect(parsed.size).toBe(4242);
+      expect(parsed.filename).toBe('secret.pdf');
+      expect(parsed.mime).toBe('application/pdf');
+    }
+  );
+
   it('rejects a block shorter than the fixed prefix', () => {
     expect(() => parseV2Meta(new Uint8Array(36))).toThrow(CryptoError);
     try {

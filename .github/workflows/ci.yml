@@ -34,7 +34,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        # Three release lines, and the spread is load-bearing rather than
+        # decorative. 22 is Maintenance LTS (EOL 2027-04-30) and is the
+        # `engines.node` floor; 24 is Active LTS (EOL 2028-04-30); 26 has been
+        # Current since May 2026 and enters LTS in October 2026, so it is the
+        # line consumers upgrade onto next. The split also covers BOTH halves
+        # of the Argon2 provider chain: Node 22 has no built-in Argon2id, so
+        # it exercises only the optional native `argon2` / `hash-wasm`
+        # providers, while 24 and 26 additionally exercise the runtime's own
+        # `crypto.argon2` (added in v24.7.0), which is the provider that
+        # lets the async API work with no optional dependency installed.
+        node: [22, 24, 26]
 
     steps:
       - name: Checkout repository

@@ -55,9 +55,24 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          # Pin to current Active LTS. Matches the engines.node floor
-          # (>=22.0.0); a publish job has no value running on multiple
-          # Node versions since the artifact is identical.
+          # Pinned to the `engines.node` FLOOR (>=22.0.0), which is what a
+          # publish job wants: if the package builds and tests on the oldest
+          # runtime it claims to support, it builds everywhere above it. Note
+          # 22 is Maintenance LTS (since 2025-10-21, EOL 2027-04-30), NOT
+          # Active LTS — that is 24. A publish job has no value running on
+          # multiple Node versions since the artifact is identical.
+          #
+          # One consequence worth stating, because v1.7.0 made it matter:
+          # Node 22 has no built-in `crypto.argon2`, so this job never
+          # exercises that provider's REAL primitive. Be precise about the
+          # word "real": the adapter around it IS still covered here, through
+          # the stubbed `crypto.argon2` in `argon2-lazy-load.test.ts`, which
+          # is what keeps the coverage ratchet satisfiable on Node 22 — do not
+          # read this note as licence to delete that stub. Only the genuine
+          # runtime primitive goes unexercised, and that is deliberate: it
+          # mirrors the browser-suite carve-out below, being gated BEFORE the
+          # tag exists by ci.yml's Node 24 and 26 legs, and releases are cut
+          # from green default-branch commits.
           node-version: 22
           # Must be set explicitly so the npm auth handshake targets the
           # public npm registry rather than any internal/proxy registry

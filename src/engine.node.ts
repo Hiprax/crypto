@@ -413,11 +413,31 @@ async function importHashWasmArgon2(): Promise<Argon2Hasher> {
  * timeCost, parallelism, hashLength)` tuple — verified across nine parameter
  * sets, including the `memoryCost === 8 * parallelism` floor and values that
  * are not multiples of `4 * parallelism` (all three apply the same rounding).
- * Of those nine, FOUR are pinned as standing regression tests in
- * `argon2-provider-parity.test.ts` (the KAT tuple against all three providers,
- * plus `m=8/p=1`, `m=9/p=1` and `m=100/p=7` between the built-in and
- * `hash-wasm`); the rest were one-off development probes. Do not read the test
- * file as the full record of the nine.
+ * SIX `(memoryCost, timeCost, parallelism)` tuples are pinned as standing
+ * regression tests in `argon2-provider-parity.test.ts`: the KAT `(4096, 2, 1)`,
+ * plus `(8, 2, 1)`, `(9, 2, 1)`, `(100, 2, 7)`, `(8, 1, 1)` and `(4096, 1, 1)`.
+ * A seventh case re-runs the KAT tuple with a multi-byte, non-ASCII password in
+ * both NFC and NFD, which is what pins that the providers agree on how a
+ * JavaScript string becomes bytes — an ASCII vector cannot, since ASCII is
+ * byte-identical under every plausible encoding.
+ *
+ * **Each tuple is checked against every provider the HOST has**, which is all
+ * three on a machine with the native addon and Node >= 24.7, and never fewer
+ * than two: with one implementation there is nothing to compare, so the case
+ * logs a skip rather than assert a parity claim it cannot make. That is why it
+ * still says something on Node 22, where there is no built-in.
+ *
+ * **Be precise about the overlap with the nine: exactly TWO of the six, the
+ * KAT and `(8, 1, 1)`, are literally among them.** The other four are
+ * neighbours chosen to reach the same corners — the `8 * parallelism` floor,
+ * the `4 * parallelism` rounding, and a `timeCost` of 1, which `@types/node`
+ * declares out of range while this library, and `bench/codec.mjs`, both permit
+ * it. (`parallelism` carries the identical "must be greater than 1" wording and
+ * is the MORE consequential instance, since `p = 1` is this library's default
+ * and therefore sits in essentially every ciphertext it has produced; the KAT
+ * and four of the five tuples pin it.) So "six of the nine" would overstate it.
+ * The remaining seven probes are recorded in no committed test; do not read
+ * the test file as their full record.
  * The fallback chain therefore does NOT change ciphertext compatibility: a v1
  * ciphertext produced under any one provider round-trips under any other.
  *

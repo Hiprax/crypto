@@ -121,10 +121,12 @@ async function withNodeBuiltinArgon2Hidden<T>(
  * covered everywhere. `importNodeBuiltinArgon2` throws before it constructs its
  * returned object literal when `crypto.argon2` is absent, so on Node 22 the
  * three functions inside that literal — the `hash` method, the `Promise`
- * executor and the callback — are structurally unreachable. Measured: with only
- * the real-built-in case, `npm run test:coverage` on Node v22.23.2 passes all
- * tests but reports functions at 96.07% against a 97% threshold and EXITS 1,
- * while the same run on Node v24.19.0 reports 98.04% and passes. CI measures
+ * executor and the callback — are structurally unreachable. Measured at the
+ * time, when the functions threshold was 97 (it has since ratcheted to 98, so
+ * read the numbers below as history rather than as the current gate): with
+ * only the real-built-in case, `npm run test:coverage` on Node v22.23.2 passed
+ * all tests but reported functions at 96.07% and EXITED 1, while the same run
+ * on Node v24.19.0 reported 98.04% and passed. CI measures
  * coverage on its ubuntu / Node 22 leg, so that gap is a red build on a machine
  * nobody develops on. Substituting the runtime's own KDF primitive is the same
  * "genuinely external boundary" the `unstable_mockModule` fixed-output cases in
@@ -797,9 +799,10 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
       // and is NOT itself evidence of RFC 9106 parity.
       //
       // The REAL cross-provider parity evidence (unmocked known-answer
-      // vectors from the genuine argon2 + hash-wasm installs, and a golden
-      // native-produced ciphertext decrypted through the real WASM fallback)
-      // lives in `argon2-provider-parity.test.ts` and
+      // vectors across all THREE genuine providers, and a golden
+      // native-produced ciphertext decrypted through the real WASM fallback
+      // AND through the runtime's own built-in) lives in
+      // `argon2-provider-parity.test.ts` and
       // `argon2-golden-ciphertext.test.ts`.
       //
       // We mock both providers with a fixed output to keep this wiring check
@@ -866,9 +869,11 @@ describe('argon2 fallback: hash-wasm (Task 17)', () => {
       // WASM-mocked, both producing the same FIXED key — this checks that the
       // parameter mapping and output handling line up across the adapters, not
       // that a real Argon2id computation agrees across providers. The genuine
-      // cross-provider decrypt evidence (native-produced ciphertext through the
-      // real WASM fallback) lives in `argon2-golden-ciphertext.test.ts`; the
-      // real known-answer vectors live in `argon2-provider-parity.test.ts`.
+      // cross-provider decrypt evidence (a native-produced ciphertext recovered
+      // through the real WASM fallback in one case and through the runtime's
+      // own built-in in the other) lives in
+      // `argon2-golden-ciphertext.test.ts`; the real known-answer vectors, now
+      // across all three providers, live in `argon2-provider-parity.test.ts`.
       // If the parameter mapping or output handling drifts, this test fails.
       const FIXED_KEY = Buffer.alloc(32, 0xa5);
       const nativeHash = jest.fn(async () => Buffer.from(FIXED_KEY));

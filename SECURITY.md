@@ -310,12 +310,17 @@ please call that out explicitly in the report.
   the RFC 9106 Argon2id reference and derive **bit-identical** keys for the
   same `(password, salt, memoryCost, timeCost, parallelism, hashLength)`
   tuple — verified across nine parameter sets at development time, including
-  the `memoryCost === 8 * parallelism` floor, four of which are pinned as
-  standing regression tests — so which one answers is a
-  performance and packaging question and has **no effect on the strength or
-  the portability of a ciphertext**. There is deliberately no way to select
-  one: interchangeable providers make a switch a way to choose a slower one
-  and nothing else. Two consequences are worth stating for a threat model.
+  the `memoryCost === 8 * parallelism` floor. Six tuples are pinned as
+  standing regression tests, alongside a multi-byte non-ASCII password in two
+  normalisation forms, each checked against every provider the host has (all
+  three here, and never fewer than two); two of the six are literally among the
+  nine and the rest are neighbours chosen to reach the same corners, including
+  the `timeCost` and `parallelism` values `@types/node` documents as out of
+  range while this library permits them. Either way, which one answers is a performance and
+  packaging question and has **no effect on the strength or the portability
+  of a ciphertext**. There is deliberately no way to select one:
+  interchangeable providers make a switch a way to choose a slower one and
+  nothing else. Two consequences are worth stating for a threat model.
   First, the **supply-chain surface is now optional**: on Node >= 24.7.0,
   `npm i @hiprax/crypto --omit=optional` gives a fully working async API with
   **no third-party Argon2id code in the dependency tree at all**, which is the

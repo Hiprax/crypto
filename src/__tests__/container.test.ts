@@ -675,8 +675,7 @@ describe('parseV2Container fuzzing harness', () => {
 
   function checkOutcome(
     outcome:
-      | { ok: true; value: ParsedV2Container }
-      | { ok: false; error: unknown }
+      { ok: true; value: ParsedV2Container } | { ok: false; error: unknown }
   ): void {
     if (outcome.ok) {
       assertWellFormed(outcome.value);

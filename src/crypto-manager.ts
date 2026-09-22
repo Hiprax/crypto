@@ -46,6 +46,13 @@ import type { Argon2Hasher, Argon2Provider } from './engine.node.js';
 export {
   __resetArgon2ModuleCacheForTesting,
   __peekArgon2ProviderForTesting,
+  // Public, unlike the two hooks above: which provider resolved is an
+  // availability property a service may need to assert at start-up, because one
+  // of the three blocks the event loop. See its JSDoc in `engine.node.ts`.
+  // It lives on this subpath rather than the package root deliberately —
+  // `esm-smoke.test.ts` pins that the Node entry's surface exceeds the browser
+  // entry's by exactly `utils.js`, and this symbol is neither.
+  getArgon2Provider,
 } from './engine.node.js';
 export type { Argon2Hasher, Argon2Provider };
 
@@ -265,11 +272,42 @@ export class CryptoManager extends CryptoCore {
 
   /**
    * Derive encryption key from password using Argon2id
+   *
+   * @security **`overrides` is NOT bounded by `decryptKdfLimits`, and feeding
+   * it header-derived parameters re-creates the vulnerability that option was
+   * added to close.** This is a low-level primitive: its cost parameters are
+   * the CALLER's, not a ciphertext's, so it sits outside the decrypt-side
+   * budget by the same caller-obligation boundary that governs `(key, iv)`
+   * reuse on {@link encryptData}. The high-level decrypt paths police the
+   * header before they call this; a caller who hand-rolls that sequence does
+   * not:
+   *
+   * ```ts
+   * // UNSAFE on untrusted input: unbounded attacker-chosen work.
+   * const h = cm.inspectHeader(blob);
+   * await cm.deriveKey(password, salt, h.params);
+   * ```
+   *
+   * The wire-format caps in `parseHeader` still apply (they bound what a header
+   * can express), but they are inclusive and on their own still admit 4 GiB.
+   * If you must pre-screen and derive by hand, apply the budget yourself first
+   * — both symbols are exported from the package root:
+   *
+   * ```ts
+   * import { assertKdfWithinDecryptLimits } from '@hiprax/crypto';
+   *
+   * const h = cm.inspectHeader(blob);
+   * if (h) {
+   *   assertKdfWithinDecryptLimits(h.params, cm.getDecryptKdfLimits());
+   *   await cm.deriveKey(password, salt, h.params);
+   * }
+   * ```
+   *
    * @param password - User password
    * @param salt - Random salt
    * @param overrides - Optional overrides for Argon2 parameters (used when
    *   decrypting v1 ciphertexts that embed parameters that differ from this
-   *   CryptoManager's configured defaults).
+   *   CryptoManager's configured defaults). Unpoliced; see the security note.
    * @returns Derived key
    * @throws CryptoError if derivation fails
    */
@@ -351,10 +389,23 @@ export class CryptoManager extends CryptoCore {
 
   /**
    * Derive encryption key from password using PBKDF2 (synchronous alternative to Argon2id)
+   *
+   * @security **`iterations` is NOT bounded by `decryptKdfLimits`** — the same
+   * caller-obligation boundary as {@link deriveKey}, and the same hazard if a
+   * caller passes a count read out of an untrusted header. It is sharper here
+   * for two reasons: `crypto.pbkdf2Sync` runs on the CALLING thread, so an
+   * oversized count blocks the Node event loop outright (measured 1 001 ms at
+   * 2 000 000 iterations, 5 094 ms at the 10 000 000 wire cap), and nothing
+   * downstream will refuse it. Apply
+   * `assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits())`
+   * yourself before passing a header-derived count, or use the high-level
+   * `decryptTextSync` / `decryptFileSync`, which do it for you.
+   *
    * @param password - User password
    * @param salt - Random salt
    * @param iterations - Optional iteration count (used when decrypting v1
    *   ciphertexts that embed an iteration count that differs from the default).
+   *   Unpoliced; see the security note.
    * @returns Derived key
    * @throws CryptoError if derivation fails
    */
@@ -426,6 +477,11 @@ export class CryptoManager extends CryptoCore {
    *      forge arbitrary authenticated ciphertexts under that key. This is
    *      *much worse* than a confidentiality break — the auth tag is no
    *      longer trustworthy on any subsequent message.
+   *
+   * This is a raw AEAD primitive and, like {@link deriveKey}, it sits outside
+   * the `decryptKdfLimits` decrypt-side budget entirely: it accepts a key the
+   * caller already derived, so there is no KDF cost for the policy to bound.
+   * The budget protects the high-level paths; it protects nothing here.
    *
    * Callers of this low-level API are therefore responsible for ensuring:
    *
@@ -549,6 +605,10 @@ export class CryptoManager extends CryptoCore {
    * 'DECRYPTION_FAILED')` with a deliberately generic message to avoid
    * leaking which of those conditions failed (an oracle would aid attackers
    * mounting a chosen-ciphertext attack).
+   *
+   * Like {@link encryptData} and {@link deriveKey}, this primitive is outside
+   * the `decryptKdfLimits` decrypt-side budget: it takes an already-derived
+   * key, so there is no attacker-controlled KDF cost for the policy to bound.
    *
    * @param encryptedData - Encrypted data
    * @param key - Decryption key (32 bytes — must match the key used to
@@ -1007,14 +1067,26 @@ export class CryptoManager extends CryptoCore {
       }
 
       // Refuse a header demanding more KDF work than this manager accepts,
-      // before deriving a key and before any temp file exists. Placed OUTSIDE
+      // before deriving a key. Nothing has been allocated beyond the decoded
+      // input on this path: it is in-memory, so there is no handle, no output
+      // directory and no temp file (unlike the two file paths, where both the
+      // handle and the output directory precede this check). Placed OUTSIDE
       // the header-parse try/catch above: in `legacyMode: 'auto'` that catch
       // swallows a parse failure and retries the blob as v0, and a policy
       // rejection must never be swallowed that way. Being out here there is no
-      // allowlist to remember. Guarded on `headerKdfParams` so the v0 fallback,
-      // whose parameters are this instance's own, stays unpoliced.
+      // allowlist to remember. The `headerKdfParams` split is what decides
+      // WHICH question is asked, not whether one is: header-derived
+      // parameters are checked against the ceilings, and the headerless
+      // fallback against the floors, because its cost is this instance's
+      // own rather than attacker-supplied.
       if (headerKdfParams !== null) {
         this.assertDecryptKdfPolicy(headerKdfParams);
+      } else {
+        // No header, so the derivation about to happen would use this instance's
+        // own fallback cost. A configured floor must bind there too, or an
+        // attacker sidesteps it by simply stripping the header. Same position,
+        // outside the header-parse try/catch, for the same reason.
+        this.assertFallbackKdfMeetsFloor(KDF_ID_PBKDF2_SHA256);
       }
 
       // Validate minimum size
@@ -1690,14 +1762,27 @@ export class CryptoManager extends CryptoCore {
         }
 
         // Refuse a header demanding more KDF work than this manager accepts,
-        // before deriving a key and before any temp file exists. Placed OUTSIDE
-        // the header-parse try/catch above: in `legacyMode: 'auto'` that catch
+        // before deriving a key and before any temp file exists. Note what does
+        // NOT precede it on the two file paths: the input handle is already open
+        // and the output DIRECTORY may already have been created, because both
+        // happen before the header is read. Neither is moved, because the
+        // open-once discipline and the existing failure ordering depend on it.
+        // Placed OUTSIDE the header-parse try/catch above: in `legacyMode: 'auto'` that catch
         // swallows a parse failure and retries the blob as v0, and a policy
         // rejection must never be swallowed that way. Being out here there is no
-        // allowlist to remember. Guarded on `headerKdfParams` so the v0 fallback,
-        // whose parameters are this instance's own, stays unpoliced.
+        // allowlist to remember. The `headerKdfParams` split is what decides
+        // WHICH question is asked, not whether one is: header-derived
+        // parameters are checked against the ceilings, and the headerless
+        // fallback against the floors, because its cost is this instance's
+        // own rather than attacker-supplied.
         if (headerKdfParams !== null) {
           this.assertDecryptKdfPolicy(headerKdfParams);
+        } else {
+          // No header, so the derivation about to happen would use this instance's
+          // own fallback cost. A configured floor must bind there too, or an
+          // attacker sidesteps it by simply stripping the header. Same position,
+          // outside the header-parse try/catch, for the same reason.
+          this.assertFallbackKdfMeetsFloor(KDF_ID_ARGON2ID);
         }
 
         // Validate the file is at least large enough for the salt+iv+tag
@@ -2450,14 +2535,27 @@ export class CryptoManager extends CryptoCore {
       }
 
       // Refuse a header demanding more KDF work than this manager accepts,
-      // before deriving a key and before any temp file exists. Placed OUTSIDE
-      // the header-parse try/catch above: in `legacyMode: 'auto'` that catch
+      // before deriving a key and before any temp file exists. Note what does
+      // NOT precede it on the two file paths: the input handle is already open
+      // and the output DIRECTORY may already have been created, because both
+      // happen before the header is read. Neither is moved, because the
+      // open-once discipline and the existing failure ordering depend on it.
+      // Placed OUTSIDE the header-parse try/catch above: in `legacyMode: 'auto'` that catch
       // swallows a parse failure and retries the blob as v0, and a policy
       // rejection must never be swallowed that way. Being out here there is no
-      // allowlist to remember. Guarded on `headerKdfParams` so the v0 fallback,
-      // whose parameters are this instance's own, stays unpoliced.
+      // allowlist to remember. The `headerKdfParams` split is what decides
+      // WHICH question is asked, not whether one is: header-derived
+      // parameters are checked against the ceilings, and the headerless
+      // fallback against the floors, because its cost is this instance's
+      // own rather than attacker-supplied.
       if (headerKdfParams !== null) {
         this.assertDecryptKdfPolicy(headerKdfParams);
+      } else {
+        // No header, so the derivation about to happen would use this instance's
+        // own fallback cost. A configured floor must bind there too, or an
+        // attacker sidesteps it by simply stripping the header. Same position,
+        // outside the header-parse try/catch, for the same reason.
+        this.assertFallbackKdfMeetsFloor(KDF_ID_PBKDF2_SHA256);
       }
 
       // Validate file size.

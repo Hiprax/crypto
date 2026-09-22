@@ -137,11 +137,19 @@ just through the normal channel:
   **This exclusion is about cost proportional to input size only.** Resource
   _amplification_ — a small attacker-controlled ciphertext causing
   disproportionate work before authentication — is explicitly **in scope**; see
-  the Scope section above. Two things that remain caller responsibilities even
+  the Scope section above. Three things that remain caller responsibilities even
   so, and are documented rather than treated as defects: the synchronous
   PBKDF2 paths run on the calling thread, so they are unsuitable for untrusted
-  input at any iteration count; and the async Argon2id paths share the libuv
-  threadpool, so concurrency control and rate limiting are yours.
+  input at any iteration count; the async Argon2id paths share the libuv
+  threadpool when the resolved provider is the native addon or the runtime's
+  built-in, so concurrency control and rate limiting are yours; and when the
+  resolved provider is `hash-wasm` the async paths do not use that pool at all
+  but derive on the calling thread, blocking the event loop for the duration
+  (measured 694 ms at the 128 MiB default and 6,309 ms at the Node decrypt
+  budget's ceiling, with zero timer ticks in both). Since both Argon2id packages
+  are optional and a failed native build does not fail an install, a deployment
+  can be in that state silently; `getArgon2Provider()` reports which provider
+  answered so a service can refuse to start on the blocking one.
 - **Vulnerabilities in transitive dev dependencies.** Issues in `jest`,
   `eslint`, `rimraf`, `typescript` etc. that only affect the development
   toolchain and not the published package are tracked through GitHub Issues
@@ -355,9 +363,12 @@ please call that out explicitly in the report.
   this library will honour from a ciphertext's own header. Node defaults to
   `maxMemoryCost: 2 ** 19` (512 MiB), `maxTimeCost: 10`, `maxParallelism: 16`,
   `maxWork: 2 ** 22` KiB-passes and `maxPbkdf2Iterations: 2_000_000`; the
-  browser build is tighter, at `2 ** 18` and `2 ** 20`, because its only
+  browser build is tighter on exactly two of those, `maxMemoryCost: 2 ** 18` and
+  `maxWork: 2 ** 20`, while `maxTimeCost`, `maxParallelism` and
+  `maxPbkdf2Iterations` are identical to Node's. It is tighter because its only
   Argon2id provider blocks the calling thread and enforces no memory ceiling of
-  its own. Each omitted ceiling widens to the instance's own configured cost, so
+  its own. Note that the Node ceilings bound ONE invocation: with the four-slot
+  libuv threadpool the process worst case is four concurrent derivations. Each omitted ceiling widens to the instance's own configured cost, so
   a manager can always decrypt its own output. The optional `minWork` /
   `minPbkdf2Iterations` floors default to off.
 

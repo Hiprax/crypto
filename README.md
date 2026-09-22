@@ -64,9 +64,12 @@ The async key-derivation paths (`encryptText`, `decryptText`, `encryptFile`, `de
 
 1. **Native [`argon2`](https://www.npmjs.com/package/argon2)** — fastest, but requires a working C++ toolchain (Python + node-gyp) at install time on platforms without a prebuilt binary. Declared as an **optional dependency**.
 2. **Node's own `crypto.argon2`** — built into the runtime from **Node 24.7.0** onward. Nothing to install: no compiler, no WebAssembly package, no dependency of any kind. Like the native addon, it runs the derivation off the event loop.
-3. **WASM [`hash-wasm`](https://www.npmjs.com/package/hash-wasm)** — pure WebAssembly, zero native deps, works everywhere Node.js runs, including Node 22, where there is no built-in. Declared as an **optional dependency**. It is also the provider the [browser build](#browser-build) uses unconditionally, because Web Crypto has no Argon2id.
+3. **WASM [`hash-wasm`](https://www.npmjs.com/package/hash-wasm)** — pure WebAssembly, zero native deps, works everywhere Node.js runs, including Node 22, where there is no built-in. Declared as an **optional dependency**. It is also the provider the [browser build](#browser-build) uses unconditionally, because Web Crypto has no Argon2id. **Unlike the other two it computes synchronously on the calling thread, so in Node it blocks the event loop for the whole derivation** — see [Which provider answered, and why it matters](#which-provider-answered-and-why-it-matters) before using it to serve untrusted traffic.
 
-All three implement the same RFC 9106 Argon2id reference and derive **bit-identical** keys for the same `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple — verified across nine parameter sets at development time, including the `memoryCost === 8 * parallelism` floor and memory values that are not a multiple of `4 * parallelism` (all three apply the same rounding). Six `(memoryCost, timeCost, parallelism)` tuples are pinned as regression tests in `src/__tests__/argon2-provider-parity.test.ts`, each checked against every provider the host has — all three where the native addon built and the runtime is Node >= 24.7, and never fewer than two, since one implementation cannot evidence a parity claim: the known-answer vector `(4096, 2, 1)`, plus `(8, 2, 1)`, `(9, 2, 1)`, `(100, 2, 7)`, `(8, 1, 1)` and `(4096, 1, 1)`. Exactly two of the six — the known-answer vector and `(8, 1, 1)` — are literally among the nine; the other four are neighbours chosen to reach the same corners, including a `timeCost` of 1, which `@types/node` declares out of range and which this library nonetheless permits and produces. (`parallelism` carries the identical wording and matters more, since `p = 1` is the default in essentially every ciphertext this library has produced; the known-answer vector and four of the five other tuples pin it.) A seventh case re-runs the known-answer tuple with a multi-byte, non-ASCII password in both NFC and NFD, which is what pins that the three providers agree on how a JavaScript string becomes bytes; an ASCII vector cannot say that, because ASCII is byte-identical under every plausible encoding. The remaining seven development probes are one-off checks recorded in no committed test. A v1 ciphertext produced under any one provider therefore round-trips under any other, and which provider answers is a performance and packaging question rather than a compatibility one. There is deliberately **no way to select one**: providers that are interchangeable by construction make a switch a way to pick a slower one and nothing else.
+> [!WARNING]
+> **The async API is non-blocking on two of the three providers, not all three.** Measured on Node v24.19.0 at the default 128 MiB profile, with a 5 ms timer probing event-loop liveness: the native addon fired **76 of ~78** expected ticks and the built-in **85 of ~86**, while `hash-wasm` fired **0 of ~138** during a 694 ms derivation. At this library's own Node decrypt-budget ceiling a single `hash-wasm` derivation blocked for **6,309 ms**. Confirmed on Node v22.23.2 too (609 ms, 0 of ~121 ticks). Because both native packages are *optional* and a failed native build does not fail an `npm install`, a deployment can land on the blocking provider silently. Check with [`getArgon2Provider()`](#which-provider-answered-and-why-it-matters).
+
+All three implement the same RFC 9106 Argon2id reference and derive **bit-identical** keys for the same `(password, salt, memoryCost, timeCost, parallelism, hashLength)` tuple — verified across nine parameter sets at development time, including the `memoryCost === 8 * parallelism` floor and memory values that are not a multiple of `4 * parallelism` (all three apply the same rounding). Six `(memoryCost, timeCost, parallelism)` tuples are pinned as regression tests in `src/__tests__/argon2-provider-parity.test.ts`, each checked against every provider the host has — all three where the native addon built and the runtime is Node >= 24.7, and never fewer than two, since one implementation cannot evidence a parity claim: the known-answer vector `(4096, 2, 1)`, plus `(8, 2, 1)`, `(9, 2, 1)`, `(100, 2, 7)`, `(8, 1, 1)` and `(4096, 1, 1)`. Exactly two of the six — the known-answer vector and `(8, 1, 1)` — are literally among the nine; the other four are neighbours chosen to reach the same corners, including a `timeCost` of 1, which `@types/node` declares out of range and which this library nonetheless permits and produces. (`parallelism` carries the identical wording and matters more, since `p = 1` is the default in essentially every ciphertext this library has produced; the known-answer vector and four of the five other tuples pin it.) A seventh case re-runs the known-answer tuple with a multi-byte, non-ASCII password in both NFC and NFD, which is what pins that the three providers agree on how a JavaScript string becomes bytes; an ASCII vector cannot say that, because ASCII is byte-identical under every plausible encoding. The remaining seven development probes are one-off checks recorded in no committed test. A v1 ciphertext produced under any one provider therefore round-trips under any other, and which provider answers is a performance and packaging question rather than a compatibility one. There is deliberately **no way to select one**, because all three derive the same key and a switch would only pick a slower one. That framing was incomplete before v1.9.0 and is worth stating precisely: the providers are interchangeable for *correctness*, but not for *threading*. Two derive off the event loop and one does not, which is a behavioural difference rather than a performance one. The answer is not a selection flag, which would let a caller pick a provider their host does not actually have; it is `getArgon2Provider()`, which reports the one that answered so a service can refuse to start on it.
 
 Measured cost per derivation at the library's default 128 MiB / `t=3` / `p=1` profile, five runs each on the maintainer's Linux machine (Node v24.19.0) on **2026-09-21**: native **343 ms**, Node built-in **403 ms**, `hash-wasm` **597 ms**. Treat those as an order of magnitude rather than a budget. A single Argon2id derivation is not a stable constant, and this repository records more than one figure for the same operation — an earlier session on the same machine measured ~357 ms native against ~631 ms WASM on 2026-09-10, and [`bench/README.md`](bench/README.md) cites 395 ms — so budget for a wider spread on weaker hardware and run `npm run bench` for a number from your own host. To check the bit-identical claim yourself, hash the same tuple through each provider and compare the bytes — that is what `src/__tests__/argon2-provider-parity.test.ts` does. (`bench/kdf.mjs` will not tell you: it times whichever provider the chain resolves, it does not compare them.)
 
@@ -79,6 +82,31 @@ argon2 native module unavailable. Install build tools (Python + node-gyp), or ru
 ```
 
 (the trailing `Native error: … Node built-in error: … WASM error: …` carries the concrete failure reason from each link of the chain, so "not installed" stays distinguishable from "installed but broken" for every one of them.)
+
+#### Which provider answered, and why it matters
+
+```typescript
+import { getArgon2Provider } from '@hiprax/crypto/crypto-manager';
+
+// 'native' | 'node' | 'wasm'. Forces the lazy load, so it is meaningful at boot.
+if ((await getArgon2Provider()) === 'wasm') {
+  throw new Error(
+    'Argon2id resolved to the WASM provider, which blocks the event loop.'
+  );
+}
+```
+
+The three providers derive bit-identical keys, so this never affects whether a ciphertext round-trips. It affects **availability**: `hash-wasm` blocks the calling thread, so an endpoint that decrypts untrusted input on it can be stalled for seconds by a single small ciphertext, which is exactly what the async paths are supposed to prevent.
+
+You will land on `hash-wasm` when the native addon is absent or unloadable and `hash-wasm` is not. Prebuilt binaries cover `linux-x64`/`arm64`/`arm` (glibc **and** musl, so Alpine is fine), `darwin-arm64`, `freebsd-x64`/`arm64` and `win32-x64`. The gaps worth knowing: **Intel macOS (`darwin-x64`)** and `win32-arm64` have no prebuild and need a working C++ toolchain; so do `s390x`/`ppc64le`. A glibc older than the prebuild's build host fails to load. Bundlers and serverless packagers that cannot ship a `.node` binary will also fall through. None of these fails your install, because the dependency is optional.
+
+Three remedies, in the order worth trying:
+
+1. **Install a C++ toolchain** (Python + node-gyp) so the native addon builds.
+2. **Run on Node >= 24.7.0**, whose built-in `crypto.argon2` needs no install at all and derives off the event loop.
+3. **Move decryption into a `worker_thread`**, which keeps the main loop free whichever provider answers. This is the same recipe the [synchronous paths](#decrypting-untrusted-ciphertext) need, and it is the only one that works when you cannot change the install.
+
+`getArgon2Provider` is exported from the `@hiprax/crypto/crypto-manager` subpath rather than the package root, because the root entry's surface is held to a deliberate shape (it exceeds the browser entry by exactly the Node-only file helpers) and this symbol is Node-only for a different reason.
 
 To recover from an "all three unavailable" error, do any of the following — they are listed in the chain's own order, which is also fastest-first:
 
@@ -543,6 +571,9 @@ const random = crypto.generateSecureRandom(32);
 
 Derives an encryption key from a password using Argon2id. The salt must be a 32-byte `Buffer` (`INVALID_SALT` otherwise). `overrides` replaces this instance's Argon2id parameters for a single call — it is how the decrypt paths honour the parameters embedded in a v1 header rather than the constructor's defaults; omit it for normal use.
 
+> [!WARNING]
+> **`overrides` is not bounded by `decryptKdfLimits`.** This is a low-level primitive, so its cost parameters are yours rather than a ciphertext's and are deliberately unpoliced. Passing header-derived parameters straight through, as the second example below does, re-creates the pre-1.8.0 amplification in your own code. That example is safe only because the ciphertext is your own; on untrusted input call `assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits())` first, or use the high-level decrypt methods, which do it for you. See [The low-level primitives are outside this policy](#the-low-level-primitives-are-outside-this-policy).
+
 ```typescript
 const salt = crypto.generateSecureRandom(32);
 const key = await crypto.deriveKey('MySecureP@ssw0rd123!', salt);
@@ -564,6 +595,9 @@ if (header !== null && header.params.kind === 'argon2id') {
 ##### `deriveKeySync(password: string, salt: Buffer, iterations?: number): Buffer`
 
 Synchronous version of key derivation using PBKDF2 (default: **600,000 iterations**, SHA-256) instead of Argon2id. Pass an explicit `iterations` argument to override the per-instance default (used internally to apply the iteration count embedded in v1 ciphertext headers, but you can also pass it directly when calling `deriveKeySync` yourself).
+
+> [!WARNING]
+> **`iterations` is not bounded by `decryptKdfLimits`, and this call blocks the event loop.** The same caller-obligation boundary as `deriveKey`, but sharper: `crypto.pbkdf2Sync` runs on the calling thread, so an attacker-chosen count stalls the whole process (measured 1.00 s at 2,000,000 iterations, 5,094 ms at the 10,000,000 wire cap) and nothing downstream will refuse it. Apply `assertKdfWithinDecryptLimits` yourself before passing a header-derived count.
 
 ```typescript
 const salt = crypto.generateSecureRandom(32);
@@ -1111,7 +1145,7 @@ The library provides both asynchronous and synchronous versions of encryption/de
 
 - Use **Argon2id** for key derivation (more secure)
 - Better for performance and scalability
-- Non-blocking operations
+- Non-blocking operations **on the native and built-in Argon2id providers**; on the WASM provider the derivation runs on the calling thread and blocks the event loop, so check [which provider answered](#which-provider-answered-and-why-it-matters) before serving untrusted traffic
 - Methods: `encryptText()`, `decryptText()`, `encryptFile()`, `decryptFile()`
 
 #### When to use the synchronous methods
@@ -1379,8 +1413,8 @@ console.log(header); // { version: 1, kdfId: 0, params: { kind: 'argon2id', ... 
 |                                                | Behaviour                                                                                                                                                                                                                                                                      |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Masked in `auto`, visible in `strict`/`reject` | `UNSUPPORTED_VERSION`, `UNSUPPORTED_KDF`, `KDF_MISMATCH`, `INVALID_HEADER_PARAM`, `TRUNCATED_HEADER`                                                                                                                                                                           |
-| Never masked, in any mode                      | `KDF_PARAMS_OUT_OF_BOUNDS`, `KDF_COST_EXCEEDS_DECRYPT_LIMITS`, `KDF_COST_BELOW_DECRYPT_MINIMUM` — DoS rejection is never traded away for legacy recovery. The cost-policy check is enforced _outside_ the header-parse `try`/`catch`, so `auto` structurally cannot swallow it |
-| What `auto` reports instead                    | `INVALID_ENCRYPTED_DATA_SIZE` if the blob is under 60 bytes, otherwise the generic `DECRYPTION_FAILED`                                                                                                                                                                         |
+| Never masked, in any mode                      | `KDF_PARAMS_OUT_OF_BOUNDS`, `KDF_COST_EXCEEDS_DECRYPT_LIMITS`, `KDF_COST_BELOW_DECRYPT_MINIMUM`, and (since v1.9.0, only when a floor is configured) `FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM` — DoS rejection is never traded away for legacy recovery. All four are enforced _outside_ the header-parse `try`/`catch`, so `auto` structurally cannot swallow them |
+| What `auto` reports instead                    | `INVALID_ENCRYPTED_DATA_SIZE` if the blob is under 60 bytes, otherwise the generic `DECRYPTION_FAILED` — unless a `minWork`/`minPbkdf2Iterations` floor is configured and this manager's fallback cost does not meet it, in which case `FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM` is reported ahead of both, because that check precedes the minimum-size check |
 
 That 60 is `salt + iv + tag` (32 + 12 + 16): the v0 retry treats the whole blob as a body with no header, so anything shorter fails the minimum-size check before any key derivation, and anything longer reaches GCM and fails authentication. Measured on this build: `decryptText` of an `encryptTextSync` ciphertext reports `DECRYPTION_FAILED` under `auto` and `KDF_MISMATCH` under `strict`; a 10-byte blob beginning `HPCR` reports `INVALID_ENCRYPTED_DATA_SIZE` under `auto` and `TRUNCATED_HEADER` under `strict`. **If you are debugging a format problem, construct a `strict` manager to see the real reason.**
 
@@ -1498,15 +1532,56 @@ product budget — yet asks for roughly 25,600 OS thread create/joins.
 
 - **The synchronous paths are still unsuitable for untrusted input.**
   `decryptTextSync` and `decryptFileSync` call `crypto.pbkdf2Sync`, which runs on
-  the calling thread. Even at the default ceiling of 2,000,000 iterations a
-  single request blocks the Node event loop for roughly 0.9 s, so on the order of
-  one request per second saturates a process. Use the async paths for anything an
-  untrusted party can reach.
-- **The async paths share a small pool.** The native Argon2id addon runs on the
-  libuv threadpool, which defaults to **four** slots, so four concurrent
-  derivations starve every other async `fs`, `dns`, `zlib` and `crypto` operation
-  in the process. Bounding per-request cost is necessary but not sufficient:
-  rate limiting and concurrency control remain yours.
+  the calling thread. At the default ceiling of 2,000,000 iterations a single
+  request blocks the Node event loop for **1.00 s** measured (299 ms at this
+  library's own 600,000 default; 5,094 ms at the 10,000,000 wire cap), so on the
+  order of one request per second saturates a process.
+  **There is no in-library non-blocking path for PBKDF2-format ciphertext.** The
+  async methods are Argon2id-only: internally `assertKdfMatches` refuses a PBKDF2
+  header, though in the default `legacyMode: 'auto'` you observe the generic
+  `DECRYPTION_FAILED` rather than `KDF_MISMATCH`, because the blob is retried as
+  v0 first (see the `legacyMode` table under [Ciphertext Format (v1)](#ciphertext-format-v1)).
+  Either way "use the async paths" is not actionable advice if what you hold is
+  sync-format data. The supported workaround is a `worker_thread`, measured below;
+  the long-term answer is to re-encrypt with the async API.
+- **The async paths block the event loop on the WASM provider.** Only the native
+  addon and Node's built-in `crypto.argon2` derive off the loop. `hash-wasm`
+  computes on the calling thread: **0 of ~138 expected timer ticks during a
+  694 ms derivation** at the 128 MiB default, and **6,309 ms** at this budget's
+  own Node ceiling. Both Argon2id packages are optional and a failed native build
+  does not fail an install, so this can be true of your deployment without
+  anything saying so. Assert it at boot with
+  [`getArgon2Provider()`](#which-provider-answered-and-why-it-matters).
+- **On the other two providers, the async paths share a small pool.** The native
+  addon and the built-in both run on the libuv threadpool, which defaults to
+  **four** slots, so four concurrent derivations starve every other async `fs`,
+  `dns`, `zlib` and `crypto` operation in the process. Measured: an unrelated
+  `fs.readFile` completed in 3.5 ms at concurrency 2 and **527 ms at concurrency
+  4**. Bounding per-request cost is necessary but not sufficient; rate limiting
+  and concurrency control remain yours.
+  **Raising `UV_THREADPOOL_SIZE` is a trade, not a fix.** It does restore
+  responsiveness (7.9 ms at concurrency 4 with a pool of 8), but it raises peak
+  memory and per-request latency in the same breath: at concurrency 8 the
+  derivations took 873 ms wall at pool 4 against 2,038 ms at pool 16, and the
+  process worst case at this budget's `maxMemoryCost` goes from **2 GiB** at pool
+  4 to **8 GiB** at pool 16. Under attack a wider pool amplifies memory rather
+  than protecting you. Bound concurrency in the application instead:
+
+  ```typescript
+  // Cap in-flight decrypts so an attacker cannot occupy the whole pool.
+  let inFlight = 0;
+  const waiting: Array<() => void> = [];
+  async function boundedDecrypt(blob: Uint8Array, limit = 2) {
+    if (inFlight >= limit) await new Promise<void>(r => waiting.push(r));
+    inFlight += 1;
+    try {
+      return await cm.decryptBytes(blob);
+    } finally {
+      inFlight -= 1;
+      waiting.shift()?.();
+    }
+  }
+  ```
 - **In the browser, Argon2id blocks the UI thread.** `hash-wasm` computes
   synchronously and enforces no memory ceiling of its own, which is why the
   browser default budget is tighter. Consider tightening it further and running
@@ -1516,30 +1591,115 @@ product budget — yet asks for roughly 25,600 OS thread create/joins.
   honour.
 - **Do not echo `CryptoError.message` to untrusted callers.** It names the
   configured budget and the offending value, which is for your logs.
-- **The budget is probeable.** Because an omitted ceiling widens to this
-  instance's own cost, an attacker who can submit ciphertexts and observe
-  accept-versus-reject can binary-search each boundary and learn your configured
-  `memoryCost`/`timeCost`/`parallelism`/`pbkdf2Iterations` where they exceed the
-  defaults. Low value — any ciphertext you _produce_ already publishes its
-  Argon2 parameters in cleartext in the header — but it is new information for a
-  service that only ever decrypts.
+- **The budget is probeable, but only if you configured it above the defaults.**
+  Because an omitted ceiling widens to this instance's own cost, an attacker who
+  can submit ciphertexts and observe accept-versus-reject can binary-search each
+  boundary and learn your configured
+  `memoryCost`/`timeCost`/`parallelism`/`pbkdf2Iterations`, and the derived
+  `maxWork`, wherever they exceed the defaults. **A manager left at the defaults
+  leaks nothing at all**: every ceiling resolves to the shipped default table, so
+  every such instance answers identically. Low value even then, since any
+  ciphertext you _produce_ already publishes its Argon2 parameters in cleartext
+  in the header, though it is new information for a service that only ever
+  decrypts. Note that the channel is the accept/reject *decision*, not the error
+  text: a refusal is also distinguishable by its timing (microseconds, because it
+  precedes the derivation) and by its error code, so redacting the message would
+  close none of the three.
 
 #### Pre-screening without decrypting
 
 `inspectHeader` is deliberately **not** subject to this policy, so it can
 classify any ciphertext. That makes it the right tool for a gateway that wants to
 triage before committing to a decrypt, and the assertion helper is exported from
-both entry points:
+both entry points.
+
+**A successful inspection does not mean the ciphertext is safe to decrypt.** It
+applies the wire-format caps only, and those are inclusive: on their own they
+still admit `memoryCost = 2 ** 22` (4 GiB). Apply the budget yourself.
+
+**Classify the format before calling it.** `inspectHeader` is a v1 inspector, not
+a format sniffer: a v2 container shares the `HPCR` magic and makes it **throw**
+`UNSUPPORTED_VERSION`, so a gateway that handles both formats must branch on the
+version byte first.
 
 ```typescript
-import { assertKdfWithinDecryptLimits } from '@hiprax/crypto';
+import {
+  MAGIC_BYTES,
+  MAGIC_LENGTH,
+  FORMAT_VERSION,
+  CONTAINER_VERSION,
+  assertKdfWithinDecryptLimits,
+} from '@hiprax/crypto';
 
-const header = cm.inspectHeader(blob); // null for a legacy v0 ciphertext
-if (header) {
+const isHpcr =
+  blob.length > MAGIC_LENGTH && MAGIC_BYTES.every((b, i) => blob[i] === b);
+
+if (isHpcr && blob[MAGIC_LENGTH] === FORMAT_VERSION) {
+  const header = cm.inspectHeader(blob); // never null on this branch
   // Throws before you spend anything.
-  assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits());
+  assertKdfWithinDecryptLimits(header!.params, cm.getDecryptKdfLimits());
+} else if (isHpcr && blob[MAGIC_LENGTH] === CONTAINER_VERSION) {
+  // v2 container: decryptContainer applies the budget itself.
+} else {
+  // Legacy v0, or not ours at all.
 }
 ```
+
+If you do not need to triage, just call the decrypt method: it applies the budget
+itself, before deriving anything.
+
+#### The low-level primitives are outside this policy
+
+`deriveKey`, `deriveKeySync`, `encryptData` and `decryptData` take **your**
+parameters rather than a ciphertext's, so they are deliberately unpoliced, the
+same caller-obligation boundary that governs `(key, iv)` reuse. The consequence
+is worth stating plainly, because the dangerous shape looks reasonable:
+
+```typescript
+// UNSAFE on untrusted input. This is the pre-1.8.0 vulnerability, rebuilt by hand:
+const header = cm.inspectHeader(blob);
+const key = await cm.deriveKey(password, salt, header!.params);
+```
+
+Nothing between those two lines bounds the work the header asked for. If you must
+derive by hand, apply the budget first:
+
+```typescript
+const header = cm.inspectHeader(blob);
+if (header) {
+  assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits());
+  const key = await cm.deriveKey(password, salt, header.params);
+}
+```
+
+#### Decrypting PBKDF2-format ciphertext without blocking
+
+There is no in-library way to do this: the async paths are Argon2id-only. Run the
+synchronous call in a worker instead, which keeps the main loop free (measured:
+106 of ~108 expected timer ticks, against 0 of ~99 on the main thread).
+
+```typescript
+// worker.mjs
+import { parentPort, workerData } from 'node:worker_threads';
+import { CryptoManager } from '@hiprax/crypto';
+const cm = new CryptoManager();
+parentPort.postMessage(cm.decryptTextSync(workerData.blob, workerData.password));
+```
+
+```typescript
+// caller
+import { Worker } from 'node:worker_threads';
+const plaintext = await new Promise((resolve, reject) => {
+  const w = new Worker(new URL('./worker.mjs', import.meta.url), {
+    workerData: { blob, password },
+  });
+  w.on('message', resolve);
+  w.on('error', reject);
+});
+```
+
+The same pattern is the fallback for Argon2id when you cannot avoid the WASM
+provider.
 
 #### The opposite direction: floors
 
@@ -1549,12 +1709,26 @@ observable, a header asking for minimal work removes the KDF cost that was
 supposed to rate-limit guessing, turning the service into a cheap oracle for
 candidates computed offline. `minWork` and `minPbkdf2Iterations` set a floor.
 
-**A floor does not reach legacy v0 input, and that matters if you set one.** A
-v0 ciphertext carries no header, so there are no attacker-supplied parameters to
-police: the count comes from `legacyPbkdf2Iterations` (default 100,000), which is
-your own configuration. The consequence is that an attacker can sidestep a floor
-by stripping the header, so pair a floor with `legacyMode: 'strict'` (or
-`'reject'`), or raise `legacyPbkdf2Iterations` to the same level.
+**Since v1.9.0 a floor binds headerless input too.** A v0 ciphertext carries no
+header, so there are no attacker-supplied parameters to police: the derivation
+runs at your own fallback cost instead, which for the synchronous paths is
+`legacyPbkdf2Iterations` (default 100,000). Until v1.9.0 the floor was simply
+skipped there, which made it bypassable by stripping the header and being
+answered six times cheaper than a typical 600,000 floor.
+
+The check now asks whether the derivation **about to happen** meets the floor. If
+it does not, the input is refused with
+`CryptoError(INVALID_INPUT, 'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM')` before any
+key is derived. If it does, the input is accepted exactly as before, so **raising
+`legacyPbkdf2Iterations` (or your own `memoryCost`/`timeCost`) to meet the floor
+remains a working remedy**, as does `legacyMode: 'strict'`/`'reject'`. Together
+with the ceilings this gives the complete invariant the option is supposed to
+mean: every derivation this manager performs costs at least the floor.
+
+Note the check is reached for anything the default `legacyMode: 'auto'` routes to
+the headerless path, which includes a ciphertext handed to the wrong sync/async
+method. That is deliberate rather than incidental: those inputs are about to be
+derived at exactly the same fallback cost, so it is the same question.
 
 They default to **off**, for two reasons. A floor would refuse legitimate
 low-cost ciphertext — this library's own browser default is 32 MiB, and the

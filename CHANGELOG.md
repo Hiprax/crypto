@@ -2,6 +2,176 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-22
+
+Residual hardening left over from the v1.8.0 security fix, plus one finding that fix did not cover:
+**on the WASM Argon2id provider the async paths block the Node event loop, while the documentation
+promised they do not.**
+
+**No wire byte moved.** No primitive, no key / salt / IV / tag size, no KDF default and no header byte
+changed. All 25 checked-in byte-layout snapshots and the committed cross-runtime interop vectors are
+byte-identical. No stored ciphertext needs re-encrypting, and one narrow band of *input* is newly
+refused; see "Worth knowing before upgrading".
+
+**What was wrong, and it is the same shape as #2.** `README.md` stated flatly that the async methods are
+"Non-blocking operations" and directed untrusted traffic to them, while scoping its only threading
+caveat to "the native Argon2id addon" and the libuv threadpool. The library has three Argon2id
+providers. The native addon and Node's built-in `crypto.argon2` do derive off the event loop; the third,
+`hash-wasm`, computes synchronously on the calling thread and blocks it outright. The library already
+knew this and recorded it **only about the browser**. Measured on Node v24.19.0 at the 128 MiB default,
+with a 5 ms timer probing event-loop liveness: `hash-wasm` fired **0 of ~138** expected ticks during a
+694 ms derivation, against 76 of ~78 for the native addon and 85 of ~86 for the built-in. At this
+library's own Node decrypt-budget ceiling (`memoryCost 2 ** 19`, `timeCost 8`, i.e. exactly `maxWork`),
+one `hash-wasm` derivation blocked for **6,309 ms**. Re-confirmed on the declared `engines.node` floor:
+Node v22.23.2 has no built-in `crypto.argon2` at all, so the chain there is native then WASM, and
+`hash-wasm` measured 609 ms with 0 of ~121 ticks.
+
+**How reachable, stated carefully rather than dramatically.** Both Argon2id packages are
+`optionalDependencies` and a failed native build does not fail an npm install, so this resolves
+silently and nothing reports it. But `argon2` 0.45.1 ships prebuilds for `linux-x64`/`arm64`/`arm`
+including **musl**, so Alpine is covered, and production servers overwhelmingly are not affected. The
+real gaps are **Intel macOS (`darwin-x64`)** and `win32-arm64`, which have no prebuild at all,
+`s390x`/`ppc64le`, hosts whose glibc predates the prebuild's, bundlers and serverless packagers that
+cannot ship a `.node`, and anyone who deliberately installs only `hash-wasm`. That is a developer and
+CI population more than a production one, and unlike #2 the magnitude is already bounded by the v1.8.0
+budget rather than unbounded, which is why this ships as a correction rather than an advisory. The
+severity comparison is still worth making honestly: 6,309 ms exceeds the 4,651 ms #2 was published over.
+
+### Security
+
+- **The optional `minWork` / `minPbkdf2Iterations` floors now bind headerless input, closing a bypass
+  that made them defeatable by deleting 22 bytes** (`src/core.ts`, `src/crypto-manager.ts`). The floors
+  were enforced only when the KDF parameters came from a header, guarded by `headerKdfParams !== null`.
+  A headerless blob took the `else` path, which was silently permissive: the derivation ran at this
+  instance's own fallback cost, and on the synchronous paths that is `legacyPbkdf2Iterations`, **100,000
+  by default and six times below a typical 600,000 floor**. So an attacker sidestepped the floor by
+  stripping the header. The new `assertFallbackKdfMeetsFloor` sits in that `else`, in the same position
+  as its ceiling counterpart, and refuses with
+  `CryptoError(INVALID_INPUT, 'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM')` before any derivation,
+  measured at **0.338 ms** against the built `dist/` for a blob that previously cost a full PBKDF2
+  derivation.
+  **The predicate is "would the derivation about to happen meet the floor?", not "is this input
+  legacy?"**, which is what keeps it free of false positives: headerless input whose fallback cost
+  already satisfies the floor is still accepted, so the standing advice to raise
+  `legacyPbkdf2Iterations` instead of switching `legacyMode` remains a working remedy. Together with the
+  ceilings this finally delivers the invariant the option is supposed to mean: every derivation this
+  manager performs costs at least the floor. Two earlier designs were built and discarded first, and the
+  reasons are recorded because they are the interesting part: a construction-time coherence check broke
+  four existing tests and, worse, would have rejected a **container**-only configuration that is
+  structurally immune to the hole, since `decryptContainer` has no v0 fallback; and refusing all
+  headerless input under a floor would have refused input that genuinely satisfies it and silently
+  invalidated the documented `legacyPbkdf2Iterations` remedy. Verified red-before-green against the
+  unmodified v1.8.0 sources: the three refusal cases each reported `DECRYPTION_FAILED`, i.e. the KDF had
+  run, while the four acceptance and inertness cases passed on both old and new code, which is what says
+  the change is a narrowing of exactly one behaviour.
+- **`resolveDecryptKdfLimits` no longer fails OPEN** (`src/format-core.ts`). The function is exported
+  from both entry points, and its own JSDoc conceded that a malformed `defaults` or `own` yields `NaN`
+  ceilings, every comparison against `NaN` being false, "so the resulting policy would accept
+  everything". A documented precondition is an adequate contract for a private helper; on a public
+  export whose job is to bound attacker-controlled work it is not. Every resolved field is now asserted
+  to be a finite non-negative integer, checked on the resolved object so a `NaN` arriving through
+  `Math.max` is caught too, and an incoherent one throws `INVALID_DECRYPT_KDF_LIMITS`. Deliberately
+  minimal: it does not re-validate `limits` or re-derive satisfiability, both of which already happen.
+- **Three deliberate policy exemptions are now pinned by tests, having previously been documented but
+  unpinned** (`src/__tests__/decrypt-kdf-limits.test.ts`). `inspectHeader` must stay policy-free to be
+  usable as the pre-screen the mitigation itself recommends, and `deriveKey` / `deriveKeySync` must keep
+  honouring caller-supplied cost parameters, the same caller-obligation boundary that governs
+  `(key, iv)` reuse. Nothing stopped a future contributor "helpfully" closing either with a green suite.
+  Each case pairs the exemption with proof that the policy **does** fire on the same parameters through
+  the high-level path, so it cannot pass by the policy simply being broken. Both mutations were run:
+  adding the policy to `inspectHeader` and to `deriveKey` each turned its case red.
+
+### Added
+
+- **`getArgon2Provider(): Promise<'native' | 'node' | 'wasm'>`** on the `@hiprax/crypto/crypto-manager`
+  subpath (`src/engine.node.ts`, re-exported from `src/crypto-manager.ts`). Reports which provider
+  actually answered, so a service that decrypts untrusted input can refuse to start on the blocking one.
+  Unlike the `@internal` `__peekArgon2ProviderForTesting` it **forces** resolution rather than returning
+  `null` for an untouched cache, which is what makes it meaningful as a boot assertion. It lives on the
+  subpath rather than the package root deliberately: `src/__tests__/esm-smoke.test.ts` pins that the Node
+  entry exceeds the browser entry by exactly `utils.js`'s exports, and this symbol is neither, so
+  exporting it from the root would have failed that gate. Shipped together with the three remedies
+  (install a toolchain, move to Node >= 24.7, or run decryption in a `worker_thread`), because detection
+  without an action is half a fix.
+- **One new `CryptoError` code**, taking the catalogue from 84 to 85:
+  `FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM`, typed `INVALID_INPUT`, not added to the `CryptoErrorType`
+  enum.
+- **19 new test cases and one rewritten away**, a net +18: suite count unchanged at 28, tests 1,224 to
+  1,242. Eleven cover the fallback floor across both KDFs and all four call sites, three pin the
+  deliberate exemptions, three the fail-closed resolution, and two the provider accessor. The one
+  removed is the case that documented the v0 floor bypass as a limitation; it is replaced by cases
+  asserting the refusal, the acceptance when the floor is genuinely met, inertness with no floor
+  configured, and the `legacyMode: 'auto'` fallback taken by a KDF-mismatched ciphertext. Coverage of
+  that behaviour went up, not down.
+  **Four of the eleven exist because a review caught a real hole**: the first draft covered only the
+  two in-memory call sites, so neutering the guard in `decryptFile` **and** `decryptFileSync` left the
+  whole suite green at 1,238 passing. That is a 50% mutation hole in the code this release adds, and
+  line coverage could not have caught it, since with floors at `0` the branch is executed by every
+  existing v0 file test while the refusal never fires. The two file paths now have their own negatives
+  with the correct per-path spy target (`cm.deriveKey` for `decryptFile`, which derives through the
+  public method rather than the engine primitive, so an engine spy there would be vacuous), each with a
+  positive control, and re-running the same mutation now turns exactly those two red.
+
+### Changed
+
+- **The `README.md` claims that were wrong or unactionable are corrected.** "Non-blocking operations" is
+  now qualified per provider; the caveats section gains the WASM blocking bullet with its measured
+  numbers; the provider list names the one that blocks; and the "deliberately no way to select one"
+  rationale, which rested on the providers differing only in speed, is corrected, because one of them
+  differs in threading. The synchronous-path figure is corrected from "roughly 0.9 s" to **1.00 s**
+  measured, and the advice "use the async paths for anything an untrusted party can reach" is no longer
+  left unactionable for a caller holding PBKDF2-format ciphertext: there is no in-library non-blocking
+  path for it, said plainly, with a `worker_thread` recipe that measured 106 of ~108 expected ticks
+  against 0 of ~99 on the main thread.
+- **The libuv threadpool caveat now covers all three providers and states the trade.** Measured: an
+  unrelated `fs.readFile` took 3.5 ms at concurrency 2 and **527 ms at concurrency 4**, the pool size.
+  Raising `UV_THREADPOOL_SIZE` does restore responsiveness (7.9 ms at concurrency 4 with a pool of 8) but
+  buys it with peak memory and per-request latency: at concurrency 8 the derivations took 873 ms wall at
+  pool 4 against 2,038 ms at pool 16, and the process worst case at `maxMemoryCost` rises from **2 GiB**
+  to **8 GiB**. Under attack a wider pool amplifies memory rather than protecting, so the documented
+  advice is to bound concurrency in the application, with a recipe. No scheduler was added to the
+  library: it cannot schedule correctly for an application whose other pool consumers it cannot see.
+- **`DEFAULT_DECRYPT_KDF_LIMITS`' JSDoc no longer implies the Node budget is safe unconditionally**
+  (`src/format-core.ts`). Two corrections in the same block: its "the worst case falls from 4 GiB to
+  512 MiB" is a bound on **one invocation**, not on the process, which with the four-slot pool is 2 GiB;
+  and the synchronous execution it cites as the reason the browser budget is tighter travels with the
+  `hash-wasm` provider, not with the browser runtime, so it applies to Node too.
+- **The probing caveat is narrowed to what is true.** An attacker can binary-search the budget only
+  where it was configured **above** the defaults; a manager left at the defaults leaks nothing, because
+  every ceiling resolves to the shipped table and every such instance answers identically. `maxWork` is
+  added to the list of leakable values. Also recorded: the channel is the accept/reject decision, and a
+  refusal is distinguishable by timing and by error code as well as by message, so redacting the message
+  would close none of the three. That is why no change was made.
+- **All four low-level primitives now document that they are outside the budget**, not just in
+  `src/types.ts` where only the library's own maintainers would find it. The `README.md` example for
+  `deriveKey` demonstrated `inspectHeader` then `deriveKey(..., header.params)`, which is the pre-1.8.0
+  vulnerability rebuilt by hand; it now carries the warning and the safe form beside it.
+- **`SECURITY.md`** gains the WASM carve-out on its threadpool sentence, and names which browser budget
+  fields actually differ from Node's rather than eliding that three of the five are identical.
+- **The coverage ratchet holds at 96 / 88 / 98 / 96** (`jest.config.js`, `src/__tests__/gate-surface.test.ts`).
+  Measured `All files` 96.22 / 88.18 / 98.13 / 96.23, up on all four axes from v1.8.0's
+  96.17 / 88.03 / 98.11 / 96.18 but with none crossing the next integer, so the thresholds are unchanged
+  rather than stale and the comments now say which. Re-verified byte-identically on Node v22.23.2, the
+  version CI collects coverage on, which matters here because the new provider accessor touches a chain
+  whose middle link exists only on Node >= 24.7.
+
+### Worth knowing before upgrading
+
+**One band of input is newly refused, and it is input rather than configuration.** If you set
+`minWork` or `minPbkdf2Iterations` **and** rely on `legacyMode: 'auto'` to accept headerless legacy v0
+ciphertext **and** your fallback cost is below that floor, those blobs now fail with
+`FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM` instead of being decrypted. That combination shipped one day
+ago in v1.8.0 and never delivered the guarantee the floor promised, which is why it is being closed
+now rather than kept. Both floors default to `0`, so a manager that does not set one is entirely
+unaffected, and no v1 or v2 ciphertext is affected in any configuration. The remedy is one line: raise
+`legacyPbkdf2Iterations` (or this manager's own `memoryCost`/`timeCost`) to meet the floor, which is
+also what makes the blobs genuinely satisfy it.
+
+**`resolveDecryptKdfLimits` now throws where it previously returned a permissive policy**, for calls
+that violate its documented precondition by passing a malformed defaults table or instance cost. The
+library's own call site cannot do this, so this affects only a consumer calling the exported function
+directly with hand-built arguments.
+
 ## [1.8.0] - 2026-09-22
 
 A decrypt-side KDF cost budget, closing pre-authentication resource amplification via the ciphertext

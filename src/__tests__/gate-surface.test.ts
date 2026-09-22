@@ -53,10 +53,12 @@ const VERIFY_GATES = [
 
 /**
  * The ratchet floor. These are the measured `All files` coverage values floored
- * to integers (2026-09-22: statements 96.17, branches 88.03, functions 98.11,
- * lines 96.18 over 28 suites / 1224 tests). The configured thresholds may be
- * RAISED above these when a run measures higher; they may never fall below
- * them.
+ * to integers (2026-09-22, v1.9.0: statements 96.22, branches 88.18, functions
+ * 98.13, lines 96.23 over 28 suites / 1242 tests; v1.8.0 measured
+ * 96.17 / 88.03 / 98.11 / 96.18, so all four rose and none crossed the next
+ * integer, which is why the floor below is unchanged rather than stale). The
+ * configured thresholds may be RAISED above these when a run measures higher;
+ * they may never fall below them.
  *
  * The same measurement on Node v22.23.2 returned byte-identical figures, which
  * is the fact that makes this floor safe to hold: CI collects coverage on its

@@ -42,8 +42,11 @@ export default {
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
   // One-way ratchet. These are the measured `All files` values floored to
-  // integers (2026-09-22: statements 96.17, branches 88.03, functions 98.11,
-  // lines 96.18 over 28 suites / 1224 tests). The same run on Node v22.23.2
+  // integers (2026-09-22, v1.9.0: statements 96.22, branches 88.18, functions
+  // 98.13, lines 96.23 over 28 suites / 1242 tests; all four rose from the
+  // v1.8.0 measurement of 96.17 / 88.03 / 98.11 / 96.18 but none crossed the
+  // next integer, so the thresholds below are unchanged rather than stale).
+  // The same run on Node v22.23.2
   // produced byte-identical numbers, which matters because CI measures
   // coverage on its ubuntu / Node 22 leg: the Argon2id provider that only
   // Node >= 24.7 has is covered through a stubbed `crypto.argon2` as well as

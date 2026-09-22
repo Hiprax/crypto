@@ -157,17 +157,40 @@ export const MAX_GCM_PLAINTEXT_BYTES = 2 ** 36 - 32;
  * exported for introspection and documentation, not as an answer to "what will
  * my manager accept?".
  *
- * **Why the two runtimes differ.** `node` accepts `memoryCost` up to `2 ** 19`
- * — exactly the `ULTRA` tier — so every profile this library has ever
- * recommended still decrypts, while the worst case falls from 4 GiB to 512 MiB
- * (and from ~531 CPU-seconds to ~5 s). `browser` is tighter because it is the
- * least-defended runtime: `hash-wasm` is its only Argon2id provider, it
+ * **Why the two runtimes differ.** `node` accepts `memoryCost` up to `2 ** 19`,
+ * exactly the `ULTRA` tier, so every profile this library has ever recommended
+ * still decrypts, while the worst case per invocation falls from 4 GiB to
+ * 512 MiB (and from ~531 CPU-seconds to ~5 s). `browser` is tighter because it
+ * is the least-defended runtime: `hash-wasm` is its only Argon2id provider, it
  * enforces no memory ceiling of its own, and it computes synchronously on the
- * calling thread — so a large allocation there actually succeeds and freezes
- * the UI. Node's `HIGH` profile (128 MiB), by far the most common cross-runtime
+ * calling thread, so a large allocation there actually succeeds and freezes the
+ * UI. Node's `HIGH` profile (128 MiB), by far the most common cross-runtime
  * case, is still accepted in the browser; `ULTRA` is not, which is honest
  * rather than restrictive, since even 128 MiB can exhaust a constrained mobile
  * tab.
+ *
+ * **Two things that sentence does NOT say, both of which bit in v1.9.0.**
+ *
+ * First, `512 MiB` is a bound on ONE invocation, not on the process. The native
+ * addon and the runtime's built-in both derive on the libuv threadpool, which
+ * defaults to four slots, so the process worst case is four concurrent
+ * derivations: **2 GiB** at the default pool size, and proportionally more if
+ * `UV_THREADPOOL_SIZE` is raised (8 GiB at 16). Widening the pool buys
+ * event-loop responsiveness at the cost of peak memory, so under attack it
+ * makes the amplification worse rather than better. Bounding concurrency
+ * belongs to the application.
+ *
+ * Second, the reason the browser is singled out above is `hash-wasm`'s
+ * synchronous execution, and **that property travels with the provider, not
+ * with the runtime**. `hash-wasm` is also the last link of the Node chain, and
+ * it blocks the Node event loop exactly as it blocks the browser's UI thread:
+ * measured on Node v24.19.0 at the 128 MiB default, 0 of ~138 expected timer
+ * ticks fired during a 694 ms derivation (the native addon fired 76 of ~78 and
+ * the built-in 85 of ~86), and at this table's own Node ceiling a single
+ * derivation blocked for 6 309 ms. So the generosity of the `node` row is
+ * conditional on the provider that answers, which `getArgon2Provider()` reports
+ * and no configuration here can know. A Node deployment that may land on the
+ * WASM provider should tighten these values itself.
  *
  * Frozen recursively, and `as const`, for the same reason `SECURITY_THRESHOLDS`
  * is: a consumer may introspect the table but must not be able to widen it at
@@ -242,13 +265,22 @@ const FLOOR_FIELDS = ['minWork', 'minPbkdf2Iterations'] as const;
  * as given — an explicit limit is a deliberate policy statement and is never
  * silently widened.
  *
- * Only `limits` is validated, because it is the only untrusted parameter. The
- * other two are PRECONDITIONS of the caller: `defaults` must be one of the
- * frozen tables in {@link DEFAULT_DECRYPT_KDF_LIMITS} and `own` must hold
- * resolved, already-constructor-validated costs. Passing a malformed value for
- * either from untyped JavaScript yields `NaN` ceilings, and every comparison
- * against `NaN` is false, so the resulting policy would accept everything. The
- * library's own call site always passes a frozen table.
+ * `defaults` and `own` remain PRECONDITIONS of the caller: `defaults` should be
+ * one of the frozen tables in {@link DEFAULT_DECRYPT_KDF_LIMITS} and `own`
+ * should hold resolved, already-constructor-validated costs. The library's own
+ * call site always passes a frozen table.
+ *
+ * **They are nonetheless checked, because this function is public and a
+ * security control must not fail OPEN.** Until v1.9.0 a malformed `defaults` or
+ * `own` passed from untyped JavaScript produced `NaN` ceilings, and since every
+ * comparison against `NaN` is false the resulting policy accepted everything —
+ * a documented precondition is an adequate contract for a private helper, but
+ * not for an exported one whose job is to bound attacker-controlled work. Every
+ * RESOLVED field is therefore asserted to be a finite non-negative integer, and
+ * an incoherent one throws rather than silently disabling the policy. The check
+ * is on the resolved object, so a `NaN` introduced through `Math.max` is caught
+ * too; it deliberately does not re-validate `limits` (done above) or re-derive
+ * satisfiability (done below).
  *
  * @param limits - the caller's option value, or `undefined`; the only validated
  *   parameter
@@ -324,6 +356,28 @@ export function resolveDecryptKdfLimits(
     minPbkdf2Iterations:
       limits?.minPbkdf2Iterations ?? defaults.minPbkdf2Iterations,
   };
+
+  // Fail CLOSED on an incoherent resolution. Reachable only by passing a
+  // malformed `defaults`/`own` from untyped JavaScript — the library's own call
+  // site cannot — but the failure mode if it were reachable is the worst
+  // possible one for a security control: `NaN` ceilings compare false against
+  // everything, so the policy would accept every ciphertext while appearing to
+  // be in force. Checked on the RESOLVED values so a `NaN` arriving through
+  // `Math.max` is caught as well.
+  for (const field of [...CEILING_FIELDS, ...FLOOR_FIELDS]) {
+    const value = resolved[field];
+    if (!Number.isInteger(value) || value < 0) {
+      throw new CryptoError(
+        `decryptKdfLimits resolved to an unusable ${field} (${String(value)}). ` +
+          'Every resolved limit must be a finite non-negative integer; a ' +
+          'non-numeric value would make the policy accept every ciphertext. ' +
+          'This means a malformed defaults table or instance cost was supplied ' +
+          'to resolveDecryptKdfLimits.',
+        CryptoErrorType.INVALID_INPUT,
+        'INVALID_DECRYPT_KDF_LIMITS'
+      );
+    }
+  }
 
   // An unsatisfiable policy refuses every ciphertext; say so now rather than
   // on first decrypt. Checked on the RESOLVED values, because a floor can be

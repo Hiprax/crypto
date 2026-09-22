@@ -49,7 +49,11 @@ export type LegacyMode = 'auto' | 'strict' | 'reject';
  * Only the high-level decrypt paths consult this. The low-level primitives
  * (`deriveKey`, `deriveKeySync`, `encryptData`, `decryptData`) take the
  * caller's own parameters rather than a ciphertext's and are deliberately
- * unpoliced.
+ * unpoliced, as is `inspectHeader`, which must be able to classify any
+ * ciphertext to be usable as a pre-screen. Each of those five carries the
+ * warning on its own JSDoc, and a caller who pairs `inspectHeader` with
+ * `deriveKey` by hand re-creates the very amplification this option closes;
+ * apply `assertKdfWithinDecryptLimits` yourself in that case.
  */
 export interface DecryptKdfLimits {
   /**
@@ -105,9 +109,16 @@ export interface DecryptKdfLimits {
    *
    * **This ceiling bounds the damage; it does not remove it.** `pbkdf2Sync`
    * runs on the calling thread, so even at the default a single request blocks
-   * the Node event loop for roughly 0.9 s. A service decrypting untrusted
-   * ciphertext should not use the synchronous paths at all. Must be a positive
-   * integer no greater than `MAX_PBKDF2_ITERATIONS`.
+   * the Node event loop for **1.00 s** (measured on Node v24.19.0; 299 ms at
+   * this library's own 600 000 default, 5 094 ms at the 10 000 000 wire cap).
+   * A service decrypting untrusted ciphertext should not use the synchronous
+   * paths at all, and there is no in-library non-blocking alternative for
+   * PBKDF2-format ciphertext today: the async paths are Argon2id-only and
+   * `assertKdfMatches` refuses a PBKDF2 header on them. The supported workaround
+   * is to run the synchronous call inside a `worker_thread`, which leaves the
+   * main loop free (measured: 106 of ~108 expected timer ticks, against 0 of
+   * ~99 on the main thread). Must be a positive integer no greater than
+   * `MAX_PBKDF2_ITERATIONS`.
    */
   maxPbkdf2Iterations?: number;
   /**
@@ -126,12 +137,18 @@ export interface DecryptKdfLimits {
    * attacker sends. Application-level rate limiting remains the primary
    * defence for that scenario.
    *
-   * **A floor does not reach legacy v0 input.** A v0 ciphertext carries no
-   * header, so there are no attacker-supplied parameters to police and the
-   * count comes from `legacyPbkdf2Iterations` instead. An attacker can
-   * therefore sidestep a floor by stripping the header: pair one with
-   * `legacyMode: 'strict'`/`'reject'`, or raise `legacyPbkdf2Iterations` to
-   * match.
+   * **A floor binds headerless input too, since v1.9.0.** A v0 ciphertext
+   * carries no header, so there are no attacker-supplied parameters to police
+   * and the derivation runs at this instance's own fallback cost instead. Until
+   * v1.9.0 the floor was simply skipped there, which made it bypassable by
+   * stripping the header: the synchronous fallback is `legacyPbkdf2Iterations`,
+   * 100 000 by default and six times below a typical 600 000 floor. The check
+   * now asks whether the derivation *about to happen* meets the floor, and
+   * refuses with `FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM` only when it does
+   * not. Headerless input whose fallback cost already satisfies the floor is
+   * still accepted, so raising `legacyPbkdf2Iterations` (or this instance's own
+   * `memoryCost`/`timeCost`) to match remains a working remedy, as does
+   * `legacyMode: 'strict'`/`'reject'`.
    *
    * No separate minimum-memory field is needed: since
    * `timeCost <= maxTimeCost`, requiring `m * t >= minWork` implies

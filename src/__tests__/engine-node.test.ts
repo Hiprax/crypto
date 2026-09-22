@@ -35,7 +35,12 @@
  * lazy-load suite.
  */
 import { describe, it, expect } from '@jest/globals';
-import { nodeEngine } from '../engine.node';
+import {
+  nodeEngine,
+  getArgon2Provider,
+  __peekArgon2ProviderForTesting,
+  __resetArgon2ModuleCacheForTesting,
+} from '../engine.node';
 import { CryptoError, CryptoErrorType } from '../types';
 import { bytesToHex, utf8Encode } from '../codec';
 
@@ -243,4 +248,43 @@ describe('nodeEngine.sha256', () => {
       'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
     );
   });
+});
+
+describe('getArgon2Provider (public availability accessor)', () => {
+  // The reason this exists rather than exporting the `@internal` peek hook:
+  // two of the three providers derive off the event loop and one — `hash-wasm`
+  // — blocks it for the whole derivation, so which one resolved is an
+  // availability property a service may need to assert at start-up. That is
+  // only usable if it FORCES resolution; the peek hook reports `null` for an
+  // untouched cache, which a boot check would read as "no problem".
+  const PROVIDERS = ['native', 'node', 'wasm'];
+
+  it('forces resolution, unlike the peek hook, and reports the tag actually in use', async () => {
+    __resetArgon2ModuleCacheForTesting();
+    try {
+      // Precondition: nothing cached. This is what makes the assertion below a
+      // statement about forcing rather than about reading a warm cache.
+      await expect(__peekArgon2ProviderForTesting()).resolves.toBeNull();
+
+      const provider = await getArgon2Provider();
+
+      expect(PROVIDERS).toContain(provider);
+      // And it agrees with the cache it just populated, so the two views of
+      // "which provider" cannot drift.
+      await expect(__peekArgon2ProviderForTesting()).resolves.toBe(provider);
+    } finally {
+      __resetArgon2ModuleCacheForTesting();
+    }
+  }, 30_000);
+
+  it('returns the same tag on repeated calls', async () => {
+    __resetArgon2ModuleCacheForTesting();
+    try {
+      const first = await getArgon2Provider();
+      const second = await getArgon2Provider();
+      expect(second).toBe(first);
+    } finally {
+      __resetArgon2ModuleCacheForTesting();
+    }
+  }, 30_000);
 });

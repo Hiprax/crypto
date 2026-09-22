@@ -1066,6 +1066,13 @@ export abstract class CryptoCore {
     // `argon2Options` and the PBKDF2 counts above have been defaulted. This is
     // what guarantees a manager can always decrypt its own output, whatever it
     // was configured with, so upgrading cannot render stored data unreadable.
+    //
+    // Precisely: that guarantee is about the CEILINGS, which widen. It does not
+    // extend to an explicit ceiling set below this instance's own cost, nor to
+    // a `minWork` set above this instance's own `memoryCost * timeCost` — both
+    // are deliberate policy statements the resolver honours verbatim, and
+    // neither is caught by the satisfiability check below, which compares the
+    // floors only against the resolved ceilings.
     this.decryptKdfLimits = resolveDecryptKdfLimits(
       options.decryptKdfLimits,
       defaultProfile.decryptKdfLimits,
@@ -1092,9 +1099,11 @@ export abstract class CryptoCore {
    * `KDF_PARAMS_OUT_OF_BOUNDS` carve-outs that a check inside the parser would
    * have needed in four separate places.
    *
-   * Only ever called with parameters that came FROM a header. The legacy v0
-   * fallback derives from this instance's own configuration, which is trusted
-   * and deliberately unpoliced.
+   * Only ever called with parameters that came FROM a header. The headerless
+   * fallback derives from this instance's own configuration, which is trusted,
+   * so the CEILINGS do not apply to it; since v1.9.0 the FLOORS do, through
+   * {@link assertFallbackKdfMeetsFloor} in the sibling branch, because a floor
+   * an attacker can escape by deleting the header is not a floor.
    *
    * @param params - KDF parameters decoded from the untrusted header
    * @param exceedsCode - code for an over-budget header; the v2 container paths
@@ -1112,6 +1121,101 @@ export abstract class CryptoCore {
       exceedsCode,
       belowCode
     );
+  }
+
+  /**
+   * Refuse a HEADERLESS input whose fallback key-derivation cost falls below a
+   * configured floor, before any key derivation happens.
+   *
+   * The counterpart to {@link assertDecryptKdfPolicy}, and the reason the
+   * `headerKdfParams === null` branch is not silently permissive. `minWork` and
+   * `minPbkdf2Iterations` exist to stop an attacker supplying a deliberately
+   * CHEAP ciphertext, which removes the KDF cost that rate-limits guessing
+   * against a held `defaultPassphrase`. Enforcing that only on header-bearing
+   * input left the floor trivially bypassable: strip the header and the blob is
+   * answered at this instance's own fallback cost instead, which for the
+   * synchronous paths is `legacyPbkdf2Iterations` — 100 000 by default, six
+   * times below a typical 600 000 floor.
+   *
+   * **The question asked here is "would the derivation that is about to happen
+   * meet the floor?", not "is this input legacy?"** That distinction is what
+   * keeps the check free of false positives: a v0 ciphertext produced at a
+   * `legacyPbkdf2Iterations` that already satisfies the floor is still accepted,
+   * so `README.md`'s standing advice to raise that value instead of switching
+   * `legacyMode` remains a working remedy. It also makes the check correct for
+   * the other inputs that reach this branch — a v2 container or a
+   * KDF-mismatched v1 ciphertext under `legacyMode: 'auto'` — because those are
+   * about to be derived at exactly the same fallback cost. The message says
+   * "no v1 header **this path can use**" rather than "carries no header" for
+   * exactly that reason: those inputs do carry a header, it is simply not one
+   * this path will honour, and a message claiming otherwise would misdiagnose
+   * the most common case (a ciphertext handed to the wrong sync/async method).
+   *
+   * Together with {@link assertDecryptKdfPolicy} this delivers the complete
+   * invariant the option promises: **every** derivation this manager performs
+   * costs at least the floor.
+   *
+   * Called from the same position as its counterpart, OUTSIDE the `legacyMode`
+   * header-parse `try`/`catch`, so `'auto'` cannot swallow it. It needs no
+   * `legacyMode` parameter because this branch is reachable only under `'auto'`:
+   * `enforceLegacyMode` throws first in `'strict'`/`'reject'`, and a
+   * non-`'auto'` header-parse failure is re-thrown before the guard.
+   *
+   * Inert unless a floor is configured; both default to `0`.
+   *
+   * @param kdfId - the KDF the fallback will use: Argon2id on the async paths
+   *   (whose fallback cost is this instance's own `memoryCost x timeCost`), or
+   *   PBKDF2-SHA256 on the synchronous ones (whose fallback count is
+   *   `legacyPbkdf2Iterations`)
+   * @throws CryptoError `INVALID_INPUT` /
+   *   `'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM'` when the fallback cost is
+   *   below the corresponding floor
+   */
+  protected assertFallbackKdfMeetsFloor(kdfId: KdfId): void {
+    if (kdfId === KDF_ID_ARGON2ID) {
+      const { minWork } = this.decryptKdfLimits;
+      if (minWork <= 0) {
+        return;
+      }
+      const work = this.argon2Options.memoryCost * this.argon2Options.timeCost;
+      if (work < minWork) {
+        throw new CryptoError(
+          `This input has no v1 header this path can use, so it would be ` +
+            `decrypted at this manager's own Argon2id cost of ${work} ` +
+            `KiB-passes ` +
+            `(memoryCost ${this.argon2Options.memoryCost} x timeCost ` +
+            `${this.argon2Options.timeCost}), which is below the configured ` +
+            `decryptKdfLimits.minWork of ${minWork} KiB-passes. Accepting it ` +
+            'would let an attacker sidestep the floor by stripping the header. ' +
+            "Raise this manager's memoryCost/timeCost to meet the floor, lower " +
+            '`decryptKdfLimits.minWork`, or set `legacyMode` to ' +
+            "'strict'/'reject' to refuse headerless input outright.",
+          CryptoErrorType.INVALID_INPUT,
+          'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM'
+        );
+      }
+      return;
+    }
+
+    const { minPbkdf2Iterations } = this.decryptKdfLimits;
+    if (minPbkdf2Iterations <= 0) {
+      return;
+    }
+    if (this.legacyPbkdf2Iterations < minPbkdf2Iterations) {
+      throw new CryptoError(
+        `This input has no v1 header this path can use, so it would be ` +
+          `decrypted at this manager's legacyPbkdf2Iterations of ` +
+          `${this.legacyPbkdf2Iterations}, ` +
+          `which is below the configured decryptKdfLimits.minPbkdf2Iterations ` +
+          `of ${minPbkdf2Iterations}. Accepting it would let an attacker ` +
+          'sidestep the floor by stripping the header. Raise ' +
+          '`legacyPbkdf2Iterations` to meet the floor, lower ' +
+          '`decryptKdfLimits.minPbkdf2Iterations`, or set `legacyMode` to ' +
+          "'strict'/'reject' to refuse headerless input outright.",
+        CryptoErrorType.INVALID_INPUT,
+        'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM'
+      );
+    }
   }
 
   /**
@@ -1632,10 +1736,18 @@ export abstract class CryptoCore {
       // try/catch above: in `legacyMode: 'auto'` that catch swallows a parse
       // failure and retries the blob as v0, and a policy rejection must never
       // be swallowed that way. Being out here, there is no allowlist to
-      // remember. Guarded on `headerKdfParams` so the v0 fallback, whose
-      // parameters are this instance's own, stays unpoliced.
+      // remember. The `headerKdfParams` split is what decides WHICH question
+      // is asked, not whether one is: header-derived parameters are checked
+      // against the ceilings, and the headerless fallback against the floors,
+      // because its cost is this instance's own rather than attacker-supplied.
       if (headerKdfParams !== null) {
         this.assertDecryptKdfPolicy(headerKdfParams);
+      } else {
+        // No header, so the derivation about to happen would use this instance's
+        // own fallback cost. A configured floor must bind there too, or an
+        // attacker sidesteps it by simply stripping the header. Same position,
+        // outside the header-parse try/catch, for the same reason.
+        this.assertFallbackKdfMeetsFloor(KDF_ID_ARGON2ID);
       }
 
       // Validate minimum size (after the header, the body is salt + iv + tag).
@@ -1880,6 +1992,38 @@ export abstract class CryptoCore {
    * a malformed input look like a v0 ciphertext (returning `null`) rather
    * than surfacing the encoding error. Failing fast matches the documented
    * contract. `Uint8Array` inputs (including Node `Buffer`s) are read as-is.
+   *
+   * **It applies no `decryptKdfLimits` policy, deliberately, and a successful
+   * inspection therefore does NOT mean the ciphertext is safe to decrypt.**
+   * Making it instance-dependent would destroy the one thing it is for: a
+   * gateway pre-screening untrusted blobs needs to classify ANY ciphertext,
+   * including the over-budget ones it intends to reject. It enforces only the
+   * wire-format caps, via {@link parseHeader}, and those are inclusive — on
+   * their own they still admit `memoryCost = 2 ** 22` (4 GiB). To pre-screen
+   * against this manager's actual budget, apply the exported helper yourself,
+   * classifying the format first because this is a v1 inspector and a v2
+   * container throws `UNSUPPORTED_VERSION` here:
+   *
+   * ```ts
+   * import {
+   *   MAGIC_BYTES,
+   *   MAGIC_LENGTH,
+   *   FORMAT_VERSION,
+   *   assertKdfWithinDecryptLimits,
+   * } from '@hiprax/crypto';
+   *
+   * const isHpcr =
+   *   blob.length > MAGIC_LENGTH && MAGIC_BYTES.every((b, i) => blob[i] === b);
+   * if (isHpcr && blob[MAGIC_LENGTH] === FORMAT_VERSION) {
+   *   const header = cm.inspectHeader(blob); // never null on this branch
+   *   if (header) {
+   *     assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits());
+   *   }
+   * }
+   * ```
+   *
+   * Simply calling the decrypt method is always safe: it applies the budget
+   * itself, before deriving anything.
    *
    * Only the first {@link HEADER_B64URL_PREFIX_CHARS} characters of a string
    * are decoded, so inspecting a multi-megabyte ciphertext costs the same as

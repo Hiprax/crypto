@@ -215,6 +215,58 @@ export async function __peekArgon2ProviderForTesting(): Promise<Argon2Provider |
 }
 
 /**
+ * Report which Argon2id provider this process will actually use, resolving the
+ * lazy-load chain if it has not run yet.
+ *
+ * **Why this is public, and why it matters for availability rather than
+ * correctness.** All three providers implement RFC 9106 and derive
+ * bit-identical keys, so the choice never affects whether a ciphertext
+ * round-trips. It does affect one thing that is not a performance detail: the
+ * native addon and the runtime's built-in `crypto.argon2` both derive OFF the
+ * event loop, while `hash-wasm` computes synchronously on the calling thread
+ * and **blocks it for the whole derivation**. Measured on Node v24.19.0 at the
+ * 128 MiB default profile: 0 of ~138 expected timer ticks fired during a 694 ms
+ * `hash-wasm` derivation, against 76 of ~78 for the native addon and 85 of ~86
+ * for the built-in; at the Node decrypt budget's own ceiling a single
+ * `hash-wasm` derivation blocked for 6 309 ms.
+ *
+ * Because `argon2` and `hash-wasm` are optional dependencies and a failed
+ * native build does not fail an npm install, a deployment can land on the
+ * blocking provider silently. A service that decrypts untrusted input can now
+ * refuse to start on it:
+ *
+ * ```ts
+ * import { getArgon2Provider } from '@hiprax/crypto/crypto-manager';
+ *
+ * if ((await getArgon2Provider()) === 'wasm') {
+ *   throw new Error(
+ *     'Argon2id resolved to the WASM provider, which blocks the event loop.'
+ *   );
+ * }
+ * ```
+ *
+ * The three remedies, in the order they are worth trying: install a C++
+ * toolchain so the native addon builds; run on Node >= 24.7.0, whose built-in
+ * `crypto.argon2` needs no install at all; or move decryption into a
+ * `worker_thread`, which keeps the main loop free whichever provider answers.
+ *
+ * Unlike the `@internal` `__peekArgon2ProviderForTesting`, this **forces**
+ * resolution rather than reporting `null` for an untouched cache, which is what
+ * makes it usable as a start-up assertion. It shares the module-level cache, so
+ * calling it costs one lazy load for the process and nothing thereafter.
+ *
+ * @returns the resolved provider tag: `'native'` (the `argon2` addon),
+ *   `'node'` (the runtime's built-in `crypto.argon2`), or `'wasm'`
+ *   (`hash-wasm`)
+ * @throws CryptoError `MEMORY_ERROR` / `'ARGON2_NOT_AVAILABLE'` when none of
+ *   the three is usable — the same failure the async paths would report
+ */
+export async function getArgon2Provider(): Promise<Argon2Provider> {
+  const hasher = await loadArgon2();
+  return hasher.provider;
+}
+
+/**
  * Perform the actual dynamic import of the `argon2` native module and
  * normalise the CJS/ESM interop, then adapt the result to the unified
  * {@link Argon2Hasher} interface.

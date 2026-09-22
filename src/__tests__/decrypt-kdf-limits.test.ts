@@ -54,6 +54,9 @@ import {
   packHeader,
   KDF_ID_ARGON2ID,
   KDF_ID_PBKDF2_SHA256,
+  DEFAULT_DECRYPT_KDF_LIMITS,
+  resolveDecryptKdfLimits,
+  assertKdfWithinDecryptLimits,
 } from '../format-core';
 import { CryptoManager } from '../crypto-manager';
 import { nodeEngine } from '../engine.node';
@@ -424,45 +427,258 @@ describe('decrypt KDF cost policy — the v2 container path', () => {
   }, 30_000);
 });
 
-describe('decrypt KDF cost policy — floors do NOT reach legacy v0 input', () => {
-  it('skips a minPbkdf2Iterations floor for a headerless v0 blob, which is a documented limit', () => {
-    // A v0 blob carries no header, so there are no attacker-supplied parameters
-    // to police: the iteration count comes from `legacyPbkdf2Iterations`, which
-    // is this instance's own trusted configuration. The consequence worth
-    // knowing is that an attacker can sidestep a floor by STRIPPING the header,
-    // so a floor set to slow down guessing against a held passphrase should be
-    // paired with `legacyMode: 'strict'` (or a raised
-    // `legacyPbkdf2Iterations`). This test pins that behaviour so the docs and
-    // the code cannot drift apart.
+describe('decrypt KDF cost policy — floors bind the headerless fallback too', () => {
+  // A headerless blob carries no attacker-supplied parameters, so before v1.9.0
+  // the floor was skipped entirely and the blob was answered at this instance's
+  // own fallback cost. That made the floor trivially bypassable: strip the
+  // header and the sync paths derive at `legacyPbkdf2Iterations` (100 000 by
+  // default), six times below a typical 600 000 floor. The check now asks
+  // whether the derivation ABOUT TO HAPPEN meets the floor, which closes the
+  // bypass without refusing input that genuinely satisfies it.
+
+  /**
+   * A v0-shaped blob: no header at all. `body` bytes of payload follow the
+   * salt + iv + tag front matter, which is enough to clear every
+   * minimum-size check on both the in-memory and the file paths.
+   */
+  function v0Blob(body = 1): Buffer {
+    return Buffer.concat([
+      nodeCrypto.randomBytes(SALT_LENGTH),
+      nodeCrypto.randomBytes(IV_LENGTH),
+      nodeCrypto.randomBytes(TAG_LENGTH),
+      nodeCrypto.randomBytes(body),
+    ]);
+  }
+
+  it('refuses a headerless blob whose PBKDF2 fallback count is below the floor, without deriving', () => {
     const cm = new CryptoManager({
       ...LOW_COST,
       pbkdf2Iterations: LOW_ITERS,
       legacyPbkdf2Iterations: LOW_ITERS,
       decryptKdfLimits: { minPbkdf2Iterations: 600_000 },
     });
-    // A v0-shaped blob: no header at all, just salt + iv + tag + body.
-    const v0 = Buffer.concat([
-      nodeCrypto.randomBytes(SALT_LENGTH),
-      nodeCrypto.randomBytes(IV_LENGTH),
-      nodeCrypto.randomBytes(TAG_LENGTH),
-      nodeCrypto.randomBytes(1),
-    ]);
     const pbkdf2Spy = jest.spyOn(nodeCrypto, 'pbkdf2Sync');
 
     let thrown: unknown;
     try {
-      cm.decryptTextSync(v0.toString('base64url'), PASSWORD);
+      cm.decryptTextSync(v0Blob().toString('base64url'), PASSWORD);
     } catch (err) {
       thrown = err;
     }
 
-    // NOT the floor code: the KDF ran at the instance's own legacy count and the
-    // random body then failed GCM.
+    expect((thrown as CryptoError).code).toBe(
+      'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM'
+    );
+    expect((thrown as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+    expect((thrown as CryptoError).message).toMatch(/legacyPbkdf2Iterations/);
+    // The whole point: no derivation was paid for an input that cannot satisfy
+    // the floor.
+    expect(pbkdf2Spy).not.toHaveBeenCalled();
+  });
+
+  it('ACCEPTS a headerless blob whose PBKDF2 fallback count meets the floor', () => {
+    // The false-positive guard. An operator whose v0 data was produced at a
+    // count that already satisfies the floor keeps the documented remedy of
+    // raising `legacyPbkdf2Iterations` rather than switching `legacyMode`.
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      pbkdf2Iterations: LOW_ITERS,
+      legacyPbkdf2Iterations: 2000,
+      decryptKdfLimits: { minPbkdf2Iterations: 2000 },
+    });
+    const pbkdf2Spy = jest.spyOn(nodeCrypto, 'pbkdf2Sync');
+
+    let thrown: unknown;
+    try {
+      cm.decryptTextSync(v0Blob().toString('base64url'), PASSWORD);
+    } catch (err) {
+      thrown = err;
+    }
+
+    // Accepted by the policy, derived at the fallback count, and only THEN
+    // failed GCM on the random body — which is what proves the floor let it by.
     expect((thrown as CryptoError).code).toBe('DECRYPTION_FAILED');
     expect(pbkdf2Spy).toHaveBeenCalledTimes(1);
+    expect(pbkdf2Spy.mock.calls[0]?.[2]).toBe(2000);
+  });
 
-    // And the documented pairing closes it: in 'strict' the v0 blob is refused
-    // outright, so the floor cannot be sidestepped.
+  it('refuses a headerless blob whose Argon2id fallback work is below minWork, without deriving', async () => {
+    // LOW_COST work is 2 ** 14 * 1 = 16 384.
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      decryptKdfLimits: { minWork: 2 ** 15 },
+    });
+    const deriveSpy = jest.spyOn(nodeEngine, 'deriveArgon2id');
+
+    const err = await captureError(() => cm.decryptBytes(v0Blob(), PASSWORD));
+
+    expect(err.code).toBe('FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM');
+    expect(err.type).toBe(CryptoErrorType.INVALID_INPUT);
+    expect(err.message).toMatch(/minWork/);
+    expect(deriveSpy).not.toHaveBeenCalled();
+  });
+
+  it('ACCEPTS a headerless blob whose Argon2id fallback work meets minWork exactly', async () => {
+    // The boundary is inclusive here too: 16 384 work against a 16 384 floor.
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      decryptKdfLimits: { minWork: 2 ** 14 },
+    });
+    const deriveSpy = jest.spyOn(nodeEngine, 'deriveArgon2id');
+
+    const err = await captureError(() => cm.decryptBytes(v0Blob(), PASSWORD));
+
+    expect(err.code).toBe('DECRYPTION_FAILED');
+    expect(deriveSpy).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it('is inert when no floor is configured', async () => {
+    // Both floors default to 0, so nothing about the headerless path changes
+    // for the overwhelming majority of managers.
+    const cm = new CryptoManager(LOW_COST);
+    expect(cm.getDecryptKdfLimits().minWork).toBe(0);
+    expect(cm.getDecryptKdfLimits().minPbkdf2Iterations).toBe(0);
+    const deriveSpy = jest.spyOn(nodeEngine, 'deriveArgon2id');
+
+    const err = await captureError(() => cm.decryptBytes(v0Blob(), PASSWORD));
+
+    expect(err.code).toBe('DECRYPTION_FAILED');
+    expect(deriveSpy).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it('also fires on the legacyMode auto fallback taken by a KDF-mismatched v1 ciphertext', () => {
+    // `headerKdfParams` is null not only for a genuine v0 blob but for anything
+    // the 'auto' catch routes to the v0 path — here a v1 Argon2id ciphertext fed
+    // to the synchronous path, whose `assertKdfMatches` throws KDF_MISMATCH.
+    // The fallback cost is the same, so the same question is the right one.
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      pbkdf2Iterations: LOW_ITERS,
+      legacyPbkdf2Iterations: LOW_ITERS,
+      decryptKdfLimits: { minPbkdf2Iterations: 600_000 },
+    });
+    const argon2idV1 = craftArgon2idBlob(LOW_COST, true);
+    const pbkdf2Spy = jest.spyOn(nodeCrypto, 'pbkdf2Sync');
+
+    let thrown: unknown;
+    try {
+      cm.decryptTextSync(argon2idV1.toString('base64url'), PASSWORD);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as CryptoError).code).toBe(
+      'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM'
+    );
+    expect(pbkdf2Spy).not.toHaveBeenCalled();
+  });
+
+  it('decryptFile refuses a headerless file whose Argon2id fallback work is below minWork, without deriving', async () => {
+    // The two FILE paths need their own cases: they are separate call sites,
+    // and a mutation that neuters either of them leaves every other case in
+    // this describe green. Verified by neutering both and observing the suite
+    // stay at 1238 passing before these two were added.
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      decryptKdfLimits: { minWork: 2 ** 15 },
+    });
+    const dir = makeCaseDir('fallback-floor-async');
+    const input = path.join(dir, 'in.bin');
+    const output = path.join(dir, 'out.bin');
+    realFs.writeFileSync(input, v0Blob(64));
+    // `cm.deriveKey`, NOT `nodeEngine.deriveArgon2id`: this path derives through
+    // `CryptoManager.deriveKey`, so an engine spy could never fire with OR
+    // without the guard and the negative would be vacuous.
+    const deriveSpy = jest.spyOn(cm, 'deriveKey');
+
+    const err = await captureError(() =>
+      cm.decryptFile(input, output, PASSWORD)
+    );
+
+    expect(err.code).toBe('FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM');
+    expect(err.type).toBe(CryptoErrorType.INVALID_INPUT);
+    expect(deriveSpy).not.toHaveBeenCalled();
+    // Nothing was written, and no temp file was left behind.
+    expect(realFs.existsSync(output)).toBe(false);
+    expect(realFs.readdirSync(dir).filter(n => n.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('POSITIVE CONTROL: the same deriveKey spy fires for a headerless file that meets minWork', async () => {
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      decryptKdfLimits: { minWork: 2 ** 14 },
+    });
+    const dir = makeCaseDir('fallback-floor-async-ok');
+    const input = path.join(dir, 'in.bin');
+    const output = path.join(dir, 'out.bin');
+    realFs.writeFileSync(input, v0Blob(64));
+    const deriveSpy = jest.spyOn(cm, 'deriveKey');
+
+    const err = await captureError(() =>
+      cm.decryptFile(input, output, PASSWORD)
+    );
+
+    // Past the floor, derived, then failed GCM on the random body.
+    expect(err.code).toBe('FILE_DECRYPTION_FAILED');
+    expect(deriveSpy).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it('decryptFileSync refuses a headerless file whose PBKDF2 fallback count is below the floor, without deriving', () => {
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      pbkdf2Iterations: LOW_ITERS,
+      legacyPbkdf2Iterations: LOW_ITERS,
+      decryptKdfLimits: { minPbkdf2Iterations: 600_000 },
+    });
+    const dir = makeCaseDir('fallback-floor-sync');
+    const input = path.join(dir, 'in.bin');
+    const output = path.join(dir, 'out.bin');
+    realFs.writeFileSync(input, v0Blob(64));
+    const pbkdf2Spy = jest.spyOn(nodeCrypto, 'pbkdf2Sync');
+
+    let thrown: unknown;
+    try {
+      cm.decryptFileSync(input, output, PASSWORD);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as CryptoError).code).toBe(
+      'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM'
+    );
+    expect(pbkdf2Spy).not.toHaveBeenCalled();
+    expect(realFs.existsSync(output)).toBe(false);
+    expect(realFs.readdirSync(dir).filter(n => n.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('POSITIVE CONTROL: the same pbkdf2Sync spy fires for a headerless file that meets the floor', () => {
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      pbkdf2Iterations: LOW_ITERS,
+      legacyPbkdf2Iterations: 2000,
+      decryptKdfLimits: { minPbkdf2Iterations: 2000 },
+    });
+    const dir = makeCaseDir('fallback-floor-sync-ok');
+    const input = path.join(dir, 'in.bin');
+    const output = path.join(dir, 'out.bin');
+    realFs.writeFileSync(input, v0Blob(64));
+    const pbkdf2Spy = jest.spyOn(nodeCrypto, 'pbkdf2Sync');
+
+    let thrown: unknown;
+    try {
+      cm.decryptFileSync(input, output, PASSWORD);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as CryptoError).code).toBe('SYNC_FILE_DECRYPTION_FAILED');
+    expect(pbkdf2Spy).toHaveBeenCalledTimes(1);
+    expect(pbkdf2Spy.mock.calls[0]?.[2]).toBe(2000);
+  });
+
+  it('refuses headerless input outright under legacyMode strict, ahead of the floor check', () => {
+    // Unchanged behaviour, kept because it is the other documented remedy and
+    // because it proves `enforceLegacyMode` still runs first.
     const strict = new CryptoManager({
       ...LOW_COST,
       pbkdf2Iterations: LOW_ITERS,
@@ -471,7 +687,7 @@ describe('decrypt KDF cost policy — floors do NOT reach legacy v0 input', () =
     });
     let strictThrown: unknown;
     try {
-      strict.decryptTextSync(v0.toString('base64url'), PASSWORD);
+      strict.decryptTextSync(v0Blob().toString('base64url'), PASSWORD);
     } catch (err) {
       strictThrown = err;
     }
@@ -748,4 +964,166 @@ describe('decrypt KDF cost policy — legacyMode cannot mask it', () => {
       expect(deriveSpy).not.toHaveBeenCalled();
     });
   }
+});
+
+describe('decrypt KDF cost policy — what it deliberately does NOT cover', () => {
+  // These three cases pin INTENTIONAL exemptions. Each is documented and load
+  // bearing, and each was previously unpinned, so a future contributor could
+  // have "helpfully" closed one and broken the documented pattern with a green
+  // suite. Every case therefore pairs the exemption with proof that the policy
+  // DOES fire on the same parameters through the high-level path — otherwise it
+  // would only be asserting that some call did not throw, which a broken policy
+  // also satisfies.
+
+  /** Tight, explicit ceilings. Explicit ones are never widened. */
+  const TIGHT_LIMITS = {
+    maxMemoryCost: 2 ** 14,
+    maxTimeCost: 1,
+    maxWork: 2 ** 14,
+    maxPbkdf2Iterations: 1000,
+  } as const;
+
+  /** Over TIGHT_LIMITS, but cheap enough to actually run. */
+  const OVER_BUDGET_COST = {
+    memoryCost: 2 ** 15,
+    timeCost: 1,
+    parallelism: 1,
+  } as const;
+  const OVER_BUDGET_ITERS = 5000;
+
+  it('inspectHeader classifies an over-budget header instead of refusing it', async () => {
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      decryptKdfLimits: TIGHT_LIMITS,
+    });
+    const blob = craftArgon2idBlob(OVER_BUDGET_COST, true);
+
+    // The exemption: it parses and returns, applying the wire-format caps only.
+    const header = cm.inspectHeader(blob);
+    // Narrow by throwing rather than asserting non-null, so the rest of the
+    // case cannot run against a null and report a confusing failure.
+    if (header === null) {
+      throw new Error('inspectHeader returned null for a v1 ciphertext');
+    }
+    expect(header.params).toEqual({
+      kind: 'argon2id',
+      ...OVER_BUDGET_COST,
+    });
+
+    // The pairing that makes the assertion above mean something: the same bytes
+    // through the decrypt path ARE refused, so the exemption is specific to
+    // inspectHeader rather than the policy being broken outright.
+    const err = await captureError(() => cm.decryptBytes(blob, PASSWORD));
+    expect(err.code).toBe('KDF_COST_EXCEEDS_DECRYPT_LIMITS');
+
+    // And the documented pre-screen recipe reaches the same verdict by hand,
+    // which is the whole reason inspectHeader is allowed to stay permissive:
+    // the caller can apply the budget without the classifier doing it for them.
+    expect(() =>
+      assertKdfWithinDecryptLimits(header.params, cm.getDecryptKdfLimits())
+    ).toThrow(CryptoError);
+  });
+
+  it('deriveKey honours caller-supplied overrides the decrypt path would refuse', async () => {
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      decryptKdfLimits: TIGHT_LIMITS,
+    });
+    const salt = nodeCrypto.randomBytes(SALT_LENGTH);
+
+    // The exemption: the cost parameters are the CALLER's, not a ciphertext's.
+    const key = await cm.deriveKey(PASSWORD, salt, OVER_BUDGET_COST);
+    expect(key).toHaveLength(32);
+
+    // Paired proof the budget is genuinely in force on this manager.
+    const err = await captureError(() =>
+      cm.decryptBytes(craftArgon2idBlob(OVER_BUDGET_COST, true), PASSWORD)
+    );
+    expect(err.code).toBe('KDF_COST_EXCEEDS_DECRYPT_LIMITS');
+  }, 30_000);
+
+  it('deriveKeySync honours a caller-supplied iteration count the decrypt path would refuse', () => {
+    const cm = new CryptoManager({
+      ...LOW_COST,
+      pbkdf2Iterations: LOW_ITERS,
+      legacyPbkdf2Iterations: LOW_ITERS,
+      decryptKdfLimits: TIGHT_LIMITS,
+    });
+    const salt = nodeCrypto.randomBytes(SALT_LENGTH);
+
+    const key = cm.deriveKeySync(PASSWORD, salt, OVER_BUDGET_ITERS);
+    expect(key).toHaveLength(32);
+
+    let thrown: unknown;
+    try {
+      cm.decryptTextSync(
+        craftPbkdf2Blob(OVER_BUDGET_ITERS, true).toString('base64url'),
+        PASSWORD
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect((thrown as CryptoError).code).toBe(
+      'KDF_COST_EXCEEDS_DECRYPT_LIMITS'
+    );
+  });
+});
+
+describe('resolveDecryptKdfLimits fails CLOSED on an incoherent resolution', () => {
+  // The function is exported from both entry points, so "malformed input is a
+  // documented precondition" is not an adequate contract: before v1.9.0 a
+  // non-numeric `own` produced NaN ceilings, every `>` comparison against NaN
+  // is false, and the resulting policy accepted every ciphertext while looking
+  // like it was in force.
+  const OWN = {
+    memoryCost: 2 ** 14,
+    timeCost: 1,
+    parallelism: 1,
+    pbkdf2Iterations: 600_000,
+    legacyPbkdf2Iterations: 100_000,
+  };
+
+  it('throws instead of returning an all-accepting policy for a NaN instance cost', () => {
+    let thrown: unknown;
+    try {
+      resolveDecryptKdfLimits(undefined, DEFAULT_DECRYPT_KDF_LIMITS.node, {
+        ...OWN,
+        memoryCost: Number.NaN,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CryptoError);
+    expect((thrown as CryptoError).code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+    expect((thrown as CryptoError).type).toBe(CryptoErrorType.INVALID_INPUT);
+    expect((thrown as CryptoError).message).toMatch(/maxMemoryCost/);
+  });
+
+  it('throws for a fractional instance cost that survives the widening max', () => {
+    // The fraction has to WIN its `Math.max` to reach the resolved object; a
+    // `timeCost` of 1.5 would be absorbed by the default of 10 and resolve to a
+    // clean integer, so this case would pass vacuously. 10.5 is what actually
+    // lands a non-integer in `maxTimeCost`.
+    let thrown: unknown;
+    try {
+      resolveDecryptKdfLimits(undefined, DEFAULT_DECRYPT_KDF_LIMITS.node, {
+        ...OWN,
+        timeCost: 10.5,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CryptoError);
+    expect((thrown as CryptoError).code).toBe('INVALID_DECRYPT_KDF_LIMITS');
+    expect((thrown as CryptoError).message).toMatch(/maxTimeCost/);
+  });
+
+  it('still resolves a well-formed call unchanged', () => {
+    const resolved = resolveDecryptKdfLimits(
+      undefined,
+      DEFAULT_DECRYPT_KDF_LIMITS.node,
+      OWN
+    );
+    expect(resolved).toEqual({ ...DEFAULT_DECRYPT_KDF_LIMITS.node });
+  });
 });

@@ -1275,11 +1275,12 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
 
   it('never caches a rejected load: a later attempt can resolve to a DIFFERENT provider', async () => {
     await withNodeBuiltinArgon2Hidden(async () => {
-      // The cache slot holds the in-flight promise so concurrent first-callers
-      // coalesce, and clears it on rejection so a transient failure does not
-      // disable async crypto for the process lifetime. Here the SECOND attempt
-      // succeeds through a different provider than the first attempt reached,
-      // which is only possible if the rejected promise was genuinely discarded.
+      // The cache slot holds the in-flight load attempt so concurrent
+      // first-callers coalesce, and clears it on rejection so a transient
+      // failure does not disable async crypto for the process lifetime. Here the
+      // SECOND attempt succeeds through a different provider than the first
+      // attempt reached, which is only possible if the rejected attempt was
+      // genuinely discarded.
       //
       // This case deliberately does NOT call `jest.resetModules()` between the
       // attempts — that would wipe the module-scope cache that IS the subject —
@@ -1351,7 +1352,7 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
   it('reports no provider while an in-flight load is on its way to rejecting', async () => {
     await withNodeBuiltinArgon2Hidden(async () => {
       // `__peekArgon2ProviderForTesting` reads the cache slot synchronously, so
-      // it can observe the still-pending promise of a load that is about to fail.
+      // it can observe the still-pending attempt of a load that is about to fail.
       // It must resolve to `null` rather than rejecting — otherwise every test
       // that inspects the provider after a failure would blow up with an
       // unhandled rejection instead of reporting "nothing cached".
@@ -1367,12 +1368,114 @@ describe('provider module-shape normalisation + rejected-cache retry (Phase 7)',
       __resetArgon2ModuleCacheForTesting();
 
       // Start the load WITHOUT awaiting it; the cache slot now holds the pending
-      // promise. Peek reads that slot before the loader clears it.
+      // attempt. Peek reads that slot before the loader clears it.
       const loading = loadArgon2();
       const peeked = __peekArgon2ProviderForTesting();
 
       await expect(loading).rejects.toThrow(FRIENDLY_MESSAGE_FRAGMENT);
       await expect(peeked).resolves.toBeNull();
+    });
+  });
+
+  it('a displaced load that rejects late does not evict the fresh load that replaced it', async () => {
+    await withNodeBuiltinArgon2Hidden(async () => {
+      // WHAT THIS PINS. `loadArgon2` clears the cache slot on a rejection only
+      // when the slot still holds the attempt that just failed. Every other case
+      // that reaches that check reaches its "still mine" side; this is the one
+      // case that reaches the other side, and before it existed, replacing the
+      // check with `true` left the entire suite green.
+      //
+      // The race is reachable from outside this suite, not a test artefact:
+      // `__resetArgon2ModuleCacheForTesting` is `@internal` but re-exported
+      // from the `/crypto-manager` subpath. A reset while a load is pending,
+      // followed by a fresh load, leaves the displaced attempt to reject LATER.
+      // Clearing the slot unconditionally at that point would evict the fresh,
+      // successful attempt, and the next caller would start a duplicate import
+      // instead of joining it.
+      //
+      // HOW THE DISPLACED LOAD IS HELD OPEN. Jest's runtime awaits an async
+      // `unstable_mockModule` factory, so the `hash-wasm` factory parks on
+      // `staleGate` until the test releases it. Parking on the LAST link of the
+      // chain, rather than on `argon2`, means the fresh load never imports a
+      // specifier the stale one is still importing, so nothing here depends on
+      // how Jest's registry treats two concurrent imports of one mocked module.
+      const STALE_ERROR = 'EACCES: stale attempt released after the reset';
+      const native = recordingNativeHash();
+      let nativeFactoryCalls = 0;
+      jest.unstable_mockModule('argon2', () => {
+        nativeFactoryCalls += 1;
+        if (nativeFactoryCalls === 1) {
+          throw new Error("Cannot find module 'argon2'");
+        }
+        return { hash: native.hash };
+      });
+      let signalStaleParked: () => void = () => undefined;
+      const staleParked = new Promise<void>(resolve => {
+        signalStaleParked = resolve;
+      });
+      let releaseStale: () => void = () => undefined;
+      const staleGate = new Promise<void>(resolve => {
+        releaseStale = resolve;
+      });
+      let wasmFactoryCalls = 0;
+      jest.unstable_mockModule('hash-wasm', async () => {
+        wasmFactoryCalls += 1;
+        signalStaleParked();
+        await staleGate;
+        throw new Error(STALE_ERROR);
+      });
+
+      const {
+        loadArgon2,
+        __resetArgon2ModuleCacheForTesting,
+        __peekArgon2ProviderForTesting,
+      } = await import('../engine.node');
+      const { CryptoError, CryptoErrorType } = await import('../types');
+      __resetArgon2ModuleCacheForTesting();
+
+      // 1. The stale load claims the slot, fails native and the (hidden)
+      //    built-in, and parks inside its `hash-wasm` import. Its outcome is
+      //    captured at once, so a failing assertion below can never leave it
+      //    behind as an unhandled rejection.
+      const staleOutcome: Promise<{ resolved: boolean; error: unknown }> =
+        loadArgon2().then(
+          () => ({ resolved: true, error: undefined }),
+          (error: unknown) => ({ resolved: false, error })
+        );
+      await staleParked;
+
+      // 2. The slot is reset underneath it, and a fresh load claims the slot
+      //    and resolves through the now-working native module.
+      __resetArgon2ModuleCacheForTesting();
+      const freshHasher = await loadArgon2();
+      expect(freshHasher.provider).toBe('native');
+      expect(nativeFactoryCalls).toBe(2);
+
+      // 3. Only now does the displaced load fail, with the full
+      //    ARGON2_NOT_AVAILABLE diagnosis of its own attempt.
+      releaseStale();
+      const stale = await staleOutcome;
+      expect(stale.resolved).toBe(false);
+      expect(stale.error).toBeInstanceOf(CryptoError);
+      const error = stale.error as InstanceType<typeof CryptoError>;
+      expect(error.type).toBe(CryptoErrorType.MEMORY_ERROR);
+      expect(error.code).toBe('ARGON2_NOT_AVAILABLE');
+      expect(error.message).toContain(`WASM error: ${STALE_ERROR}`);
+
+      // 4. The fresh load still owns the slot. Peek FIRST: calling
+      //    `loadArgon2` would repopulate an evicted slot and hide the defect.
+      expect(await __peekArgon2ProviderForTesting()).toBe('native');
+      // The next caller joins the fresh load and receives the very same
+      // adapter object. Every load builds a new adapter, so a slot that had
+      // been evicted would answer with a different one.
+      expect(await loadArgon2()).toBe(freshHasher);
+      // NEGATIVES. The fresh load never reached `hash-wasm`, and neither
+      // factory ran again. These counts do not by themselves detect an evicted
+      // slot (Jest caches the mock module that loaded successfully, so a
+      // re-import would not re-run the factory); the two assertions above are
+      // what do.
+      expect(wasmFactoryCalls).toBe(1);
+      expect(nativeFactoryCalls).toBe(2);
     });
   });
 

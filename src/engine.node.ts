@@ -146,18 +146,39 @@ export type Argon2Hasher = {
 };
 
 /**
+ * One Argon2id load attempt, as held in {@link argon2ModuleCache}: the promise
+ * that every caller joining this attempt awaits.
+ *
+ * **Why the cache holds this record rather than the bare promise.** After a
+ * rejection, {@link loadArgon2} clears the cache only if the cache still
+ * belongs to ITS attempt. That is a question about identity (which attempt
+ * owns the slot), so it compares these records and never compares promises.
+ * Comparing two promises with `===` is valid JavaScript, but it reads exactly
+ * like a forgotten `await`, and CodeQL's `js/missing-await` reported the old
+ * form of this check as one, twice: first while the loader lived in
+ * `crypto-manager.ts`, and again after it moved here. The repair that message
+ * invites is the dangerous one. Awaiting the rejected promise inside that
+ * `catch` re-throws before the cache is cleared, so a single transient load
+ * failure would stay cached for the life of the process and every async
+ * method would keep failing with it. Keeping the identity (the record) apart
+ * from the value (its promise) removes the ambiguity instead of silencing it.
+ */
+type Argon2LoadAttempt = { readonly hasher: Promise<Argon2Hasher> };
+
+/**
  * Module-level cache for the loaded Argon2 hasher (native, Node built-in,
- * or WASM-backed).
+ * or WASM-backed), holding at most one {@link Argon2LoadAttempt}.
  * Three observable states, with the in-flight loading state expressed as
- * the unsettled promise itself:
+ * an attempt whose promise has not settled yet:
  *
  *   - `null`                       — load not yet attempted, OR the
  *                                    previous load attempt rejected (so
  *                                    the next caller will retry).
- *   - `Promise<Argon2Hasher>`      — either the in-flight load promise
- *                                    (concurrent callers await it) or, on
- *                                    success, a permanently-resolved
- *                                    promise that future callers `await`
+ *   - `Argon2LoadAttempt`          — either the in-flight attempt
+ *                                    (concurrent callers join it and await
+ *                                    its promise) or, on success, a
+ *                                    permanently-resolved attempt whose
+ *                                    promise future callers `await`
  *                                    cheaply.
  *
  * Keeping this at module scope (not on the class instance) means multiple
@@ -165,8 +186,8 @@ export type Argon2Hasher = {
  * behaviour: native modules are process-global anyway, and we don't want
  * to pay the import cost N times.
  *
- * **Why a promise rather than the resolved module?** Two requirements
- * pull in opposite directions:
+ * **Why cache a pending attempt rather than the resolved module?** Two
+ * requirements pull in opposite directions:
  *
  *   1. Concurrent first-callers should share one `await import('argon2')`
  *      — without coalescing, N parallel `encryptText` calls would each
@@ -175,14 +196,14 @@ export type Argon2Hasher = {
  *      Windows during a build-tool install) should not permanently
  *      disable async crypto for the lifetime of the process.
  *
- * Storing the in-flight promise satisfies (1) — concurrent callers see
- * the same promise and await it. Clearing the slot on rejection (see
- * `loadArgon2` below) satisfies (2) — the next caller after a failure
- * starts a fresh load. On success the promise stays cached forever, so
+ * Storing the in-flight attempt satisfies (1) — concurrent callers see
+ * the same attempt and await its promise. Clearing the slot on rejection
+ * (see `loadArgon2` below) satisfies (2) — the next caller after a failure
+ * starts a fresh load. On success the attempt stays cached forever, so
  * subsequent callers pay only an `await` of an already-settled promise
  * (no re-import).
  */
-let argon2ModuleCache: Promise<Argon2Hasher> | null = null;
+let argon2ModuleCache: Argon2LoadAttempt | null = null;
 
 /**
  * Internal hook used exclusively by tests to reset the lazy-load cache so
@@ -203,11 +224,12 @@ export function __resetArgon2ModuleCacheForTesting(): void {
  * @internal
  */
 export async function __peekArgon2ProviderForTesting(): Promise<Argon2Provider | null> {
-  if (argon2ModuleCache === null) {
+  const attempt = argon2ModuleCache;
+  if (attempt === null) {
     return null;
   }
   try {
-    const hasher = await argon2ModuleCache;
+    const hasher = await attempt.hasher;
     return hasher.provider;
   } catch {
     return null;
@@ -508,8 +530,8 @@ async function importHashWasmArgon2(): Promise<Argon2Hasher> {
  *     make both suites derive a real Argon2id key instead and every snapshot
  *     byte would change — a wire-format-looking failure with a tooling cause.
  *
- * Extracted from {@link loadArgon2} so the in-flight promise stored in the
- * cache contains only the import + normalisation + fallback work (no extra
+ * Extracted from {@link loadArgon2} so the promise held by a cached load
+ * attempt contains only the import + normalisation + fallback work (no extra
  * wrapping that would change the rejection shape callers see).
  */
 async function importArgon2Hasher(): Promise<Argon2Hasher> {
@@ -571,14 +593,14 @@ async function importArgon2Hasher(): Promise<Argon2Hasher> {
  *
  * Behaviour:
  *
- *   - First call (cache empty): assigns the in-flight import promise to
- *     the cache slot and awaits it. On success the resolved promise stays
+ *   - First call (cache empty): stores a new in-flight load attempt in
+ *     the cache slot and awaits its promise. On success the attempt stays
  *     cached forever — subsequent callers `await` an already-settled
  *     promise (no re-import). On rejection the cache slot is cleared back
  *     to `null` so the NEXT caller starts a fresh load.
- *   - Concurrent first-callers: read the same in-flight promise from the
- *     cache, await it, and either all resolve to the same module or all
- *     reject with the same error. No duplicate `await import`.
+ *   - Concurrent first-callers: read the same in-flight attempt from the
+ *     cache, await its promise, and either all resolve to the same module
+ *     or all reject with the same error. No duplicate `await import`.
  *   - Caller after a previous failure: cache is `null`, so this call
  *     behaves exactly like a first-time call. Transient failures (e.g.
  *     temporary FS permission errors during a parallel build-tool install)
@@ -586,37 +608,46 @@ async function importArgon2Hasher(): Promise<Argon2Hasher> {
  *     process lifetime.
  *
  * The cache-clear step uses a "compare-and-swap" pattern: only clear if
- * the slot still holds *our* failing promise. This guards against a race
- * where a concurrent caller resets the cache (via the test-only hook) or
- * a successful retry has already populated the slot.
+ * the slot still holds *our* attempt. This function fills the slot only
+ * when it is empty, and clears it only while it still holds this call's
+ * own, already-settled attempt, so nothing on the load path can displace a
+ * pending attempt. The one thing that can is
+ * {@link __resetArgon2ModuleCacheForTesting} (reachable through the
+ * `/crypto-manager` subpath), after which a fresh call may start a new
+ * attempt. The check stops the displaced attempt's late rejection from
+ * evicting that fresh attempt. It compares attempt records, never promises
+ * (the module-private `Argon2LoadAttempt` type records why).
  *
  * Why a function instead of inline in `deriveKey`: extracting it makes the
  * caching logic testable and keeps `deriveKey` readable.
  */
 export async function loadArgon2(): Promise<Argon2Hasher> {
   // Fast path: someone already started (or finished) the load. Reuse it.
-  if (argon2ModuleCache !== null) {
-    return argon2ModuleCache;
+  const cached = argon2ModuleCache;
+  if (cached !== null) {
+    return cached.hasher;
   }
 
-  // Slow path: start a load. Assign the promise to the cache slot BEFORE
-  // awaiting so concurrent callers landing here observe the in-flight
-  // promise rather than starting their own. We capture the promise in a
-  // local `inFlight` so the post-await CAS check is correct even if a
-  // concurrent caller (or the test-only reset hook) replaces the cache
-  // slot mid-flight.
-  const inFlight = importArgon2Hasher();
-  argon2ModuleCache = inFlight;
+  // Slow path: start a load. Store the attempt in the cache slot BEFORE
+  // awaiting so concurrent callers landing here join it rather than
+  // starting their own. The local `attempt` is this call's ownership token
+  // for the compare-and-swap below.
+  const attempt: Argon2LoadAttempt = { hasher: importArgon2Hasher() };
+  argon2ModuleCache = attempt;
 
   try {
-    return await inFlight;
+    return await attempt.hasher;
   } catch (err) {
-    // Clear the cache slot — but ONLY if it still holds OUR failing
-    // promise. If a concurrent caller already started a fresh attempt
-    // (which they couldn't have, given JS single-threaded semantics —
-    // but a synchronous test-only reset between assignment and await is
-    // possible) or the test reset hook emptied it, we don't overwrite.
-    if (argon2ModuleCache === inFlight) {
+    // Clear the cache slot, but ONLY if it still holds THIS attempt. Nothing
+    // on the load path replaces a pending attempt; only the reset hook can,
+    // while this load is pending, and a fresh `loadArgon2()` may then have
+    // stored its own attempt. Clearing unconditionally would evict that fresh
+    // attempt and make the next caller start a duplicate import.
+    //
+    // Compare the attempt records, and never `await` here: awaiting the
+    // rejected promise would re-throw before the slot is cleared and cache
+    // this failure for the life of the process.
+    if (argon2ModuleCache === attempt) {
       argon2ModuleCache = null;
     }
     throw err;

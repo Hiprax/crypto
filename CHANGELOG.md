@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-09-28
+
+Closes the two open CodeQL code-scanning alerts on the Argon2id provider cache, and pins the one branch
+of that cache that no test exercised.
+
+**No wire byte moved, and no runtime behaviour changed.** No primitive, key / salt / IV / tag size, KDF
+default, header byte, public signature, exported type or error code changed; the emitted declarations
+differ only in documentation comments. All 25 checked-in byte-layout snapshots and the committed
+cross-runtime interop vectors are untouched. Nothing to do on upgrade.
+
+### Fixed
+
+- **The Argon2id loader's cache check no longer compares promises** (`src/engine.node.ts`). CodeQL
+  `js/missing-await` (alerts #146 and #147; severity warning, a quality finding rather than a security
+  one) flagged `argon2ModuleCache === inFlight` in the `catch` of `loadArgon2`, reporting that each
+  value "is always a promise". Nothing was missing. That line is a deliberate compare-and-swap: after a
+  failed load it clears the module-level cache only if the cache still holds the attempt that failed,
+  which is a question about identity, not about resolved values.
+  **The repair the message invites would have been a real defect.** Awaiting the rejected promise
+  inside that `catch` re-throws before the cache is cleared, so a single transient load failure would
+  stay cached for the life of the process and every async method would keep failing with it. That edit
+  was applied deliberately as a check against the loader's own test file, and it turned exactly the
+  five transient-recovery tests there red.
+  The cache now holds a small attempt record whose `hasher` property is the promise callers await, and
+  the check compares records. It is still one slot, every caller still awaits the same promise and
+  receives the same hasher object, and the ordering of every step is unchanged; the analyzer's concern
+  no longer applies because no promise is compared anywhere.
+- **Why this is a code change and not a dismissal.** The same check was flagged once before, as #97 and
+  #98 at its previous location in `src/crypto-manager.ts`, and those alerts were dismissed as false
+  positives in 1.3.5. The 1.5.0 refactor moved the loader into `src/engine.node.ts`, and CodeQL raised
+  the finding again as two new alerts on the day that change landed, because a dismissal is tied to a
+  location. A structural fix survives the next refactor; a dismissal did not survive the last one.
+- **The branch of that check that handles a race was untested**
+  (`src/__tests__/argon2-lazy-load.test.ts`). A pending load can be displaced from the cache only by
+  `__resetArgon2ModuleCacheForTesting`, which is re-exported from the public `/crypto-manager` subpath.
+  A reset while a load is pending, followed by a fresh load, leaves the displaced attempt to reject
+  later, and the check is what stops that late rejection from evicting the fresh attempt, which would
+  make the next caller start a duplicate import instead of joining it. No test reached that side of the
+  check: with the condition replaced by `true`, all 1,242 existing tests still passed. The new case, "a
+  displaced load that rejects late does not evict the fresh load that replaced it", holds the stale
+  load open inside its last provider import, resets the cache and completes a fresh load, then releases
+  the stale load and asserts that the fresh attempt still owns the cache. The mutation was run against
+  the full suite on both the old code and the new, and each time this case was the only failure (1
+  failed, 1,242 passed).
+- **The comment beside that check described the race wrongly.** It said no concurrent caller could have
+  replaced the cache, and placed the risk "between assignment and await", two statements with no gap
+  between them. It now states the actual invariant: the loader fills the cache only when it is empty,
+  and clears it only while it still holds the loader's own, already-settled attempt, so only the reset
+  hook can displace a pending attempt.
+
+Tests 1,242 to 1,243. Coverage 96.23 / 88.26 / 98.13 / 96.24 (statements / branches / functions /
+lines), up from 96.22 / 88.18 / 98.13 / 96.23; thresholds unchanged because no figure crossed the next
+integer. `package-lock.json`'s own root `version` field, left at 1.7.0 through the 1.8.0 and 1.9.0
+releases, is back in step with `package.json`; no dependency resolution changed.
+
 ## [1.9.0] - 2026-09-22
 
 Residual hardening left over from the v1.8.0 security fix, plus one finding that fix did not cover:
